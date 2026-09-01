@@ -152,7 +152,7 @@ class MusicBrainzVerifier(context: Context) {
 		 */
 		private val USER_AGENT =
 			"RustedWax/${BuildConfig.VERSION_NAME} " +
-				"( https://github.com/rustedcomet/rustedwax )"
+				"( https://github.com/rustedcomet/RustedWax-Android )"
 
 		private val rateLimit = Mutex()
 

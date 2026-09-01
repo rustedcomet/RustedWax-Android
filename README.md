@@ -17,7 +17,7 @@ locally on the Android device.
 
 The current public release is **RustedWax v0.11.1**.
 
-1. Open the [latest GitHub Release](https://github.com/rustedcomet/rustedwax/releases/latest).
+1. Open the [latest GitHub Release](https://github.com/rustedcomet/RustedWax-Android/releases/latest).
 2. Download `rustedwax-v0.11.1.apk`.
 3. Optionally verify it against the published
    [release identity and checksum](Documentation/Product/RELEASE_VERIFICATION.md).
