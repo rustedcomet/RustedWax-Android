@@ -24,73 +24,6 @@ enum class ObservedSurface {
 	OTHER_APP,
 }
 
-/**
- * Names the outage that `<redacted-private-path>` §5.1 could only infer from gaps.
- *
- * ## The bug this instruments
- *
- * Between 17:19:40 and 17:21:07 on 2026-08-05 the log held two lines, 30s apart
- * — the idle poll and nothing else — while a Short was playing. The Shorts
- * observer had received no YouTube accessibility event for 87 seconds. In the
- * same session a Short titled `💯💯💯🔥😎` never appears in the log at all:
- * never observed, never finalized. It is the same shape as the earlier 13h
- * outage, it explains the regular-mode Shorts that did not scrobble, and it is
- * very likely why roughly half that day's watch history never reached the app.
- *
- * At hand-off the service looked healthy — `crashed services: {}` empty, both
- * grants on, standby bucket 10 — so it is intermittent and cannot be reproduced
- * on demand. Hunting a cause that only appears by surprise, from evidence that
- * only exists as an absence of lines, is how the 13h outage went unexplained.
- * So this measures it first: the next occurrence writes its own name, its own
- * duration and what was on screen at the time.
- *
- * ## What the first field day proved about this detector, 2026-08-06
- *
- * It reported **111 outages in one day**, median 111 seconds. Almost none were
- * real, and two measurements killed the design that produced them.
- *
- * **Event silence is not observer silence.** At 15:08:39 it reported
- * `silent for 45s … (Shorts player on screen) — anything played in this window
- * is unobserved` while, inside that exact window, the service had measured the
- * seekbar thirteen times and credited forty seconds. Once a Short is latched the
- * observer stops needing callbacks and polls on its own second, so *events* stop
- * while *observation* continues perfectly. A successful capture is therefore
- * liveness, and the only liveness that matters.
- *
- * **`YOUTUBE_NO_PLAYER` is usually the user leaving Shorts.** Reproduced on
- * demand, first try: press Back out of the Shorts player and YouTube keeps
- * `reel_time_bar` in its hierarchy while `reel_watch_fragment_root` stops being
- * visible, so every capture reads `found 0; captured 2 nodes`. 36% of the day's
- * captures were that shape. It is the app being open and idle, not an outage.
- *
- * ## The evidence that a report actually needs
- *
- * The report has to answer "is something playing that we cannot see?", and the
- * accessibility tree cannot answer it — measured 2026-08-06, while a Short plays
- * YouTube's MediaSession is `active=false`, `state=1`, `metadata: size=0`. It
- * says nothing about Shorts at all, so asking it would be circular.
- *
- * The independent answer already exists, built for picture-in-picture (§8.3):
- * media audio in the `started` state paired with a YouTube window that
- * `UsageStatsManager` reports visible. That pair is what [PipPlaybackProbe]
- * answers, and it is true exactly when a listen is being lost.
- *
- * So a report now requires the screen on, the surface not to be another app, no
- * successful capture within the window — and evidence that something is playing
- * that **nothing else is already counting**. Ordinary watch playback is measured
- * by the MediaSession, and picture-in-picture time is credited by its own
- * inference; neither is a loss, so neither reports. When Usage Access is missing
- * the question cannot be answered at all, and only [ObservedSurface.NO_ROOT] —
- * the state where the service cannot see anything — still reports on its own.
- *
- * A paused Short left on screen no longer reports at all: paused audio drops out
- * of the started list, which is the same property the PiP inference relies on.
- *
- * ## Reporting-only
- *
- * Nothing here changes a scrobble decision, a capture, or any gate. It observes
- * and it writes lines.
- */
 class AccessibilityEventSilence(
 	private val silenceThresholdMillis: Long = SILENCE_THRESHOLD_MS,
 	private val repeatIntervalMillis: Long = REPEAT_INTERVAL_MS,
@@ -115,14 +48,6 @@ class AccessibilityEventSilence(
 		reported = false
 	}
 
-	/**
-	 * A YouTube accessibility event arrived: the stream is alive.
-	 *
-	 * @return a line to log when this ends an outage that was reported, naming
-	 * the measured duration, or null. The recovery line is the half that makes
-	 * the next occurrence self-describing — a start with no end is how long an
-	 * outage lasted becomes guesswork from log gaps again.
-	 */
 	@Synchronized
 	fun eventReceived(atElapsed: Long): String? {
 		val since = lastSignalAtElapsed
@@ -138,34 +63,9 @@ class AccessibilityEventSilence(
 		return recovered
 	}
 
-	/**
-	 * A capture parsed a complete Shorts player: the observer can see.
-	 *
-	 * Identical to [eventReceived] in effect, and separate only so the call site
-	 * reads as what it is. A latched Short is measured by the service's own 1s
-	 * poll, and YouTube emits no callbacks while it does — measured 2026-08-06,
-	 * the old detector called forty seconds of successful per-second measurement
-	 * an outage because none of it arrived as an event.
-	 */
 	@Synchronized
 	fun captureSucceeded(atElapsed: Long): String? = eventReceived(atElapsed)
 
-	/**
-	 * The outcome of one capture attempt, whatever it found.
-	 *
-	 * @param screenInteractive the display is on. Silence with the screen off is
-	 * correct behaviour and must never be reported.
-	 * @param unmeasuredPlayback asked only when a report is otherwise due,
-	 * because it costs a `UsageStatsManager` query and this runs on every
-	 * capture. True when something is playing in YouTube that nothing else is
-	 * counting — not the seekbar, not the MediaSession, not the picture-in-
-	 * picture inference. False when nothing is playing *or* when something else
-	 * already has it. `null` when Usage Access is not granted and the question
-	 * cannot be answered at all, which is not the same as "nothing is playing"
-	 * and is treated as unknown.
-	 * @return a line to log, or null when the observer is alive, the quiet is
-	 * explained, nothing is playing, or a report is not yet due.
-	 */
 	@Synchronized
 	fun observed(
 		atElapsed: Long,

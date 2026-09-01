@@ -168,20 +168,27 @@
 
 	.preview {
 		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
+		grid-template-columns: repeat(3, minmax(0, 1fr));
 		gap: 18px;
 		margin-top: 26px;
 	}
 
+	.preview figure { margin: 0; }
+
 	.preview img {
 		display: block;
 		width: 100%;
-		aspect-ratio: 4 / 3;
-		object-fit: cover;
-		object-position: top;
+		height: auto;
 		border: 1px solid var(--edge);
 		border-radius: 16px;
 		background: var(--surface);
+	}
+
+	.preview figcaption {
+		margin-top: 8px;
+		color: var(--muted);
+		font-size: .86rem;
+		text-align: center;
 	}
 
 	.install {
@@ -247,7 +254,10 @@
 		section { padding: 40px 0; }
 		.features,
 		.install { grid-template-columns: 1fr; }
-		.preview { gap: 10px; }
+		.preview {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 10px;
+		}
 		.more { align-items: flex-start; flex-direction: column; }
 	}
 </style>
@@ -264,7 +274,8 @@
 			and Chrome, then writes verified listens to the Hive blockchain.
 		</p>
 		<div class="actions">
-			<a class="button primary" href="#install">How to install</a>
+			<a class="button primary" href="https://github.com/rustedcomet/rustedwax/releases/latest">Download v0.11.1</a>
+			<a class="button" href="#install">Setup overview</a>
 			<a class="button" href="https://github.com/rustedcomet/rustedwax">View on GitHub</a>
 		</div>
 	</div>
@@ -293,30 +304,35 @@
 			</article>
 		</div>
 		<div class="preview">
-			<img src="Assets/screenshots/settings-dark.png" alt="RustedWax settings screen">
-			<img src="Assets/screenshots/history-dark.png" alt="RustedWax listening history with Hive transactions">
+			<figure><img src="Assets/screenshots/now-v0111-light.png" alt="RustedWax v0.11.1 Now screen in light mode"><figcaption>Now · light</figcaption></figure>
+			<figure><img src="Assets/screenshots/history-v0111-light.png" alt="RustedWax v0.11.1 History screen in light mode"><figcaption>History · light</figcaption></figure>
+			<figure><img src="Assets/screenshots/not-logged-v0111-light.png" alt="RustedWax v0.11.1 Not logged screen in light mode"><figcaption>Not logged · light</figcaption></figure>
+			<figure><img src="Assets/screenshots/settings-v0111-light.png" alt="RustedWax v0.11.1 settings in light mode"><figcaption>Settings · light</figcaption></figure>
+			<figure><img src="Assets/screenshots/settings-v0111-dark.png" alt="RustedWax v0.11.1 settings in dark mode"><figcaption>Settings · dark</figcaption></figure>
+			<figure><img src="Assets/screenshots/event-log-v0111-dark.png" alt="RustedWax v0.11.1 event log in dark mode"><figcaption>Event log · dark</figcaption></figure>
 		</div>
 	</section>
 
 	<section id="install">
 		<h2>Install</h2>
-		<p class="intro">RustedWax is currently a prototype built from source; there is no public signed release yet.</p>
+		<p class="intro">RustedWax v0.11.1 is available as a signed APK from the public GitHub Release.</p>
 		<ol class="install">
 			<li>
-				<strong>Build the APK</strong>
-				<span>Clone the repository and build it with Android Studio or Gradle.</span>
+				<strong>Download the release</strong>
+				<span>Open the latest GitHub Release and download <code>rustedwax-v0.11.1.apk</code>.</span>
 			</li>
 			<li>
-				<strong>Install and sign in</strong>
-				<span>Install the APK, then add your Hive username and posting key.</span>
+				<strong>Install on Android</strong>
+				<span>Open the APK. Android may ask you to allow installs from that browser or file manager.</span>
 			</li>
 			<li>
-				<strong>Grant media access</strong>
-				<span>Allow Notification Access; add browser, Shorts, or PiP grants only if you want them.</span>
+				<strong>Complete setup</strong>
+				<span>Grant Notification Access, add your Hive posting key, and enable only the optional access you need.</span>
 			</li>
 		</ol>
 		<p class="note">
-			Use only a Hive <strong>posting key</strong>—never an active or owner key.
+			Use only a Hive <strong>posting key</strong>—never an active key, owner key, or master password.
+			Transactions are signed locally on the Android device.
 			<a href="https://github.com/rustedcomet/rustedwax/blob/main/Documentation/Product/SETUP.md">Read the complete setup guide</a>.
 		</p>
 	</section>
@@ -332,7 +348,7 @@
 
 <footer>
 	<div class="wrap">
-		Prototype software · MIT licensed · Not affiliated with scrobble.life, Hive Scrobbler, or Web Scrobbler
+		Independent software · MIT licensed · Not affiliated with Hive, scrobble.life, Hive Scrobbler, Web Scrobbler, Google, or YouTube
 	</div>
 </footer>
 

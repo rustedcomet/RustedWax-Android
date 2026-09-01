@@ -2,44 +2,6 @@ package com.rustedwax.app.enrich
 
 import org.json.JSONObject
 
-/**
- * Reads YouTube Music's `youtubei/v1/player` response. Pure — no network.
- *
- * ## Why this exists
- *
- * Adapted from the desktop extension's `getTrackInfoFromYoutubeMusic`
- * (`src/connectors/youtube.ts`), which uses it as its authoritative
- * "is this a music recording?" signal. It answers the question RustedWax was
- * asking MusicBrainz — but keyed by **video id** rather than by a parsed
- * artist/track string, which is why it succeeds where MusicBrainz can't.
- *
- * The 2026-07-29 sessions are full of `[musicbrainz] no match` on
- * Spanish-language and small-channel uploads. Verified against those same ids:
- *
- * | video | `musicVideoType` | author / title |
- * | --- | --- | --- |
- * | `GQwj_FRntp8` | `MUSIC_VIDEO_TYPE_ATV` | Daddy Yankee / Con Calma |
- * | `mgoLdQZl_pQ` | `MUSIC_VIDEO_TYPE_ATV` | KAROL G & Nicki Minaj / Tusa |
- * | `l69Cq38GgZ4` | `MUSIC_VIDEO_TYPE_OMV` | Elena Verrier / Metallica - Blackened (guitar cover) |
- * | `cq2xXbWGHu8` | *absent* | — (a football short) |
- * | `CYgQQqvwwsY` | *absent* | — (a shorts-feed ad) |
- *
- * ## Why it is worth a second request
- *
- * 10 KB against ~615 KB for the watch page, and it carries `lengthSeconds`,
- * `category` and `unlisted` as well. The watch-page fetch timed out on ~12% of
- * ids in field testing, and one of those timeouts is what let a stale video id
- * reach the chain with the wrong `url`. This is the cheap second source that
- * closes that hole.
- *
- * ## Field names differ from the watch page
- *
- * The music client returns `microformat.microformatDataRenderer` with an
- * `unlisted` key, where the watch page returns
- * `microformat.playerMicroformatRenderer` with `isUnlisted`. Same fact, two
- * spellings — a detail worth stating because it is exactly the kind of thing a
- * refactor would "tidy" into a bug.
- */
 object YouTubeMusicParser {
 
 	/**
@@ -62,13 +24,6 @@ object YouTubeMusicParser {
 			.put("videoId", videoId)
 			.toString()
 
-	/**
-	 * What the music client knows about a video.
-	 *
-	 * @param musicVideoType null when YouTube Music has no record of it — which
-	 * is a clean negative for "is this music", but see [recognisedAsMusic] for
-	 * why it is only ever read as a positive.
-	 */
 	data class Result(
 		val videoId: String,
 		val musicVideoType: String? = null,
@@ -97,24 +52,9 @@ object YouTubeMusicParser {
 		val recognisedAsMusic: Boolean
 			get() = isRecognisedMusicType(musicVideoType)
 
-		/**
-		 * An Art Track — audio delivered by a distributor, not a filmed video.
-		 *
-		 * The only case where [author] and [title] are trustworthy credits: they
-		 * come from the catalogue, so `Daddy Yankee / Con Calma` rather than
-		 * whatever the uploader typed.
-		 *
-		 * The extension trusts credits from `MUSIC_VIDEO_TYPE_OMV` too. We
-		 * deliberately do **not**: for `l69Cq38GgZ4` that yields author
-		 * `Elena Verrier` (the channel) and title `Metallica - Blackened (guitar
-		 * cover)`, which is strictly worse than what [TitleParser] already
-		 * produces for the same video. An OMV is a filmed video whose "author"
-		 * is just the channel.
-		 */
 		val isArtTrack: Boolean get() = musicVideoType == ART_TRACK_TYPE
 	}
 
-	/** @throws org.json.JSONException if the response isn't the shape we expect */
 	fun parse(videoId: String, json: String): Result {
 		val root = JSONObject(json)
 		val details = root.optJSONObject("videoDetails")

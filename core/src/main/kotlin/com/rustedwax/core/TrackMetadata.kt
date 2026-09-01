@@ -1,23 +1,5 @@
 package com.rustedwax.core
 
-/**
- * What the session said this track *is*, after the presentation freeze.
- *
- * Descriptive fields only. Length lives in [PlaybackMeasurement] because it is
- * the denominator of the threshold rather than a description of the item, and
- * splitting it that way is what keeps "how the track was named" separable from
- * "how much of it was played" — two of the eight concepts
- * `<redacted-private-path>` §5 says `SessionSnapshot` currently fuses.
- *
- * These are the values already frozen by `finalizedPresentation`, so a teardown
- * bundle that replaces the channel with the site's own host, or omits fields
- * entirely, cannot erase what this track established while it was playing.
- *
- * [rawLines] is the metadata dump the diagnostics card shows. It is carried so
- * the decomposition is lossless rather than because any decision reads it; a
- * decision that parsed it would be re-deriving facts the typed fields already
- * hold.
- */
 data class TrackMetadata(
 	val title: String?,
 	val artist: String?,

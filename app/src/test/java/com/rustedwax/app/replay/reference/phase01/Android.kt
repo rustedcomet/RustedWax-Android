@@ -8,8 +8,8 @@ import com.rustedwax.core.MetadataFields
  *
  * ## Why stand-ins rather than the real classes
  *
- * The reference in this package is the pre-migration `SessionProbe.kt`, body
- * byte-identical to the recorded original. To run it at all, the nine
+ * The reference in this package is a retained legacy `SessionProbe.kt`. To run
+ * it at all, the nine
  * `android.*` types it imports have to exist on a JVM. The unit-test classpath
  * has `android.jar`, but it is the *stub* jar: `MediaMetadata.Builder().build()`
  * returns null under `isReturnDefaultValues`, so the real classes can be
@@ -18,8 +18,8 @@ import com.rustedwax.core.MetadataFields
  *
  * These are therefore data carriers with the same names, the same members, and
  * the same documented semantics as the platform types — nothing more. The
- * reference file's *imports* were deleted so these resolve in their place; not a
- * line of its body changed. See `<redacted-private-path>`.
+ * reference file's Android imports were replaced so these resolve in their
+ * place.
  *
  * ## What is deliberately not modelled
  *
@@ -364,8 +364,8 @@ class MediaController(val packageName: String, tokenId: String? = null) {
  * production for a reason that is about the test environment rather than about
  * either state machine.
  *
- * So the answer becomes an explicit input the scenario sets, which is what
- * `<redacted-private-provenance>` Phase 1 means by an injectable evidence interface.
+ * The answer therefore becomes an explicit scenario input through an
+ * injectable evidence interface.
  */
 object UrlWatcherService {
 	@Volatile

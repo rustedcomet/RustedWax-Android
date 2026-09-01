@@ -92,11 +92,7 @@ class YouTubeAdDetectorTest {
 
 	@Test
 	fun `measured multi-line Shorts ad card is recognised by its own line`() {
-		// Captured on the device 2026-08-05. The whole ad card arrives as one
-		// content description, with the label on its own line rather than in its
-		// own node. Whole-literal matching missed every one of these, so the ad
-		// refused on the owner-handle gate — ads have no channel — and was logged
-		// as an identity failure instead of an ad.
+
 		assertEquals(
 			"Ad",
 			YouTubeAdDetector.signalFor("Dola: Smart AI Assistant\nAd\n4.4 stars\nFREE"),

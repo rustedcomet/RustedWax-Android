@@ -6,7 +6,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Executable Architecture Audit Phase 8 dependency and package boundaries. */
+/** Executable dependency and package-boundary checks. */
 class Phase8ArchitectureTest {
 
 	private val root: File by lazy {

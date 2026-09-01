@@ -39,10 +39,6 @@ object PrivacySecret {
 	/** Fixed for v1, and shared with the extension and zingit-web. */
 	const val CHALLENGE = "zingit:privacy-key:v1"
 
-	/**
-	 * @param wif the account's private posting key.
-	 * @return 32 bytes for AES-256-GCM.
-	 */
 	fun derive(wif: String): ByteArray? {
 		val key = HiveKey.fromWif(wif) ?: return null
 		// Keychain's `requestSignBuffer` signs the SHA-256 of the message bytes,

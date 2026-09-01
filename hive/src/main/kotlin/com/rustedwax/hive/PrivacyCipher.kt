@@ -49,11 +49,6 @@ object PrivacyCipher {
 		return Base64.getEncoder().encodeToString(iv + body)
 	}
 
-	/**
-	 * @throws DecryptionFailed for a wrong key, a tampered blob, or a future
-	 * wire format — deliberately one uniform error, as upstream does, so a
-	 * caller cannot accidentally tell a user *which* of those it was.
-	 */
 	fun decrypt(blob: String, secret: ByteArray): String {
 		val all = runCatching { Base64.getDecoder().decode(blob.trim()) }
 			.getOrElse { throw DecryptionFailed() }

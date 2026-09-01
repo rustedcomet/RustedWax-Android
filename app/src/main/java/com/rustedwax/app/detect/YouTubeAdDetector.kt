@@ -50,25 +50,10 @@ object YouTubeAdDetector {
 		RegexOption.IGNORE_CASE,
 	)
 
-	/**
-	 * @return the original trimmed label when it is explicit ad UI, otherwise
-	 * null. Keeping the literal label makes field logs auditable.
-	 */
 	fun signalFor(label: CharSequence?): String? {
 		val literal = label?.toString()?.trim()?.takeIf { it.isNotEmpty() } ?: return null
 		matches(literal)?.let { return it }
-		// Shorts ad cards publish the whole card as one multi-line content
-		// description — measured 2026-08-05:
-		// "Dola: Smart AI Assistant\nAd\n4.4 stars\nFREE" — where the ad label is
-		// its own line rather than its own node. Whole-literal matching missed
-		// every one of these, so an ad refused on the *owner handle* gate (ads
-		// have no channel) and was logged as an identity failure rather than as
-		// the ad it plainly is.
-		//
-		// Still line-*exact*: a line has to be nothing but the label. This keeps
-		// the guarantee in the class comment — brand names, channel names and
-		// arbitrary uses of "ad" inside a title are untouched, because none of
-		// those occupy a line by themselves.
+
 		if (literal.none { it == '\n' || it == '\r' }) return null
 		return literal.split('\n', '\r')
 			.firstNotNullOfOrNull { line -> line.takeIf(String::isNotBlank)?.let(::matches) }

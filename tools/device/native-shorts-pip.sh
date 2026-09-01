@@ -5,12 +5,13 @@
 # the same token must then lose its progress surface while separate audio and
 # YouTube-window evidence are both true. No instrumentation targets RustedWax.
 # Usage: tools/device/native-shorts-pip.sh [serial] [shortVideoId] [launch|already-open]
+# ANDROID_SERIAL may supply the serial. ADB or ANDROID_HOME may locate adb.
 set -eu
 
-serial="${1:-R58R215V2SA}"
-video="${2:-4x_q2gBomZI}"
+serial="${1:-${ANDROID_SERIAL:-}}"
+video="${2:-}"
 entry="${3:-launch}"
-adb="<redacted-local-path>/Library/Android/sdk/platform-tools/adb"
+adb="${ADB:-}"
 pkg="com.rustedwax.app"
 youtube="com.google.android.youtube"
 prefs="rustedwax_keys.xml rustedwax_settings.xml rustedwax_youtube_session.xml"
@@ -19,10 +20,20 @@ say() { printf '%s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 field() { printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | tail -1; }
 telemetry() {
-	$adb -s "$serial" logcat -d -s RustedWaxPhase3:I '*:S' 2>/dev/null |
+	"$adb" -s "$serial" logcat -d -s RustedWaxPhase3:I '*:S' 2>/dev/null |
 		sed -n 's/^.*kind=/kind=/p'
 }
 snapshots() { telemetry | grep '^kind=snapshot ' || true; }
+
+[ -n "$serial" ] || fail "provide a device serial or set ANDROID_SERIAL"
+[ -n "$video" ] || fail "provide a deliberately selected public Short video ID"
+if [ -z "$adb" ] && [ -n "${ANDROID_HOME:-}" ]; then
+	adb="$ANDROID_HOME/platform-tools/adb"
+fi
+if [ -z "$adb" ]; then
+	adb=$(command -v adb || true)
+fi
+[ -x "$adb" ] || fail "adb is unavailable; set ADB or ANDROID_HOME"
 wait_for_stable_rustedwax_bindings() {
 	# On this API-31 Samsung build, force-stopping YouTube also makes Android
 	# recycle package-scoped accessibility bindings in other processes. The
@@ -33,7 +44,7 @@ wait_for_stable_rustedwax_bindings() {
 	stable=0
 	i=0
 	while [ "$i" -lt 30 ]; do
-		accessibility=$($adb -s "$serial" shell dumpsys accessibility)
+		accessibility=$("$adb" -s "$serial" shell dumpsys accessibility)
 		bound=$(printf '%s\n' "$accessibility" |
 			sed -n '/bound services:{/,/crashed services:/p' |
 			grep -c "id=$pkg/" | tr -d '\r' || true)
@@ -54,19 +65,19 @@ wait_for_stable_rustedwax_bindings() {
 state() {
 	for f in $prefs; do
 		printf '%s ' "$f"
-		$adb -s "$serial" shell "run-as $pkg sha256sum shared_prefs/$f 2>/dev/null" |
+		"$adb" -s "$serial" shell "run-as $pkg sha256sum shared_prefs/$f 2>/dev/null" |
 			tr -d '\r' | awk '{print $1}'
 	done
 	printf 'listener '
-	$adb -s "$serial" shell settings get secure enabled_notification_listeners |
+	"$adb" -s "$serial" shell settings get secure enabled_notification_listeners |
 		tr ':' '\n' | grep -c "$pkg" | tr -d '\r' || true
 	printf 'usage '
-	$adb -s "$serial" shell appops get "$pkg" GET_USAGE_STATS | tr -d '\r' |
+	"$adb" -s "$serial" shell appops get "$pkg" GET_USAGE_STATS | tr -d '\r' |
 		grep -c 'allow' || true
 	printf 'a11y-master '
-	$adb -s "$serial" shell settings get secure accessibility_enabled | tr -d '\r'
+	"$adb" -s "$serial" shell settings get secure accessibility_enabled | tr -d '\r'
 	printf 'a11y-bound '
-	$adb -s "$serial" shell dumpsys accessibility |
+	"$adb" -s "$serial" shell dumpsys accessibility |
 		sed -n '/bound services:{/,/crashed services:/p' |
 		grep -c "id=$pkg/" | tr -d '\r' || true
 }
@@ -77,7 +88,7 @@ printf '%s' "$before" | grep -qE 'listener [1-9]' || fail "notification access i
 printf '%s' "$before" | grep -qE 'usage [1-9]' || fail "Usage Access is absent"
 printf '%s' "$before" | grep -q 'a11y-master 1' || fail "accessibility master is off"
 printf '%s' "$before" | grep -q 'a11y-bound 2' || fail "both RustedWax accessibility services are not bound"
-if $adb -s "$serial" shell run-as "$pkg" cat shared_prefs/rustedwax_settings.xml 2>/dev/null |
+if "$adb" -s "$serial" shell run-as "$pkg" cat shared_prefs/rustedwax_settings.xml 2>/dev/null |
 	grep -q 'name="autoScrobble" value="true"'; then
 	fail "auto-scrobble is on; refusing to drive playback that could publish"
 fi
@@ -94,16 +105,16 @@ if [ "$entry" = "launch" ]; then
 	# cleared. Android may recycle the package-scoped RustedWax accessibility
 	# bindings, so wait for them and their source-epoch callback to settle before
 	# the exact Short is allowed to latch.
-	$adb -s "$serial" shell am force-stop "$youtube"
+	"$adb" -s "$serial" shell am force-stop "$youtube"
 	wait_for_stable_rustedwax_bindings ||
 		fail "RustedWax accessibility bindings did not settle after YouTube stopped"
-	$adb -s "$serial" logcat -c
-	$adb -s "$serial" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
-	$adb -s "$serial" shell am start -W -a android.intent.action.VIEW \
+	"$adb" -s "$serial" logcat -c
+	"$adb" -s "$serial" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+	"$adb" -s "$serial" shell am start -W -a android.intent.action.VIEW \
 		-d "https://www.youtube.com/shorts/$video" "$youtube" >/dev/null
 else
-	$adb -s "$serial" logcat -c
-	activity=$($adb -s "$serial" shell dumpsys activity activities | tr -d '\r')
+	"$adb" -s "$serial" logcat -c
+	activity=$("$adb" -s "$serial" shell dumpsys activity activities | tr -d '\r')
 	printf '%s\n' "$activity" | grep -q "mResumedActivity:.*$youtube" ||
 		fail "already-open mode requires foreground YouTube"
 fi
@@ -139,9 +150,9 @@ surface=$(telemetry | grep '^kind=short-surface ' |
 	fail "observer did not prove exactly one Shorts player with no in-app mini-player"
 say "surface:    $surface"
 
-$adb -s "$serial" shell input keyevent KEYCODE_HOME
+"$adb" -s "$serial" shell input keyevent KEYCODE_HOME
 sleep 3
-activity=$($adb -s "$serial" shell dumpsys activity activities | tr -d '\r')
+activity=$("$adb" -s "$serial" shell dumpsys activity activities | tr -d '\r')
 printf '%s\n' "$activity" | grep -q 'mode=pinned' || fail "the Short did not enter mode=pinned"
 printf '%s\n' "$activity" | grep -q 'rootPinnedTask=Task=' || fail "Android has no rootPinnedTask"
 printf '%s\n' "$activity" | grep -q 'A=.*:com.google.android.youtube' ||
@@ -181,7 +192,7 @@ played_delta=$(( $(field "$pip" played) - $(field "$foreground" played) ))
 # End the source, not RustedWax. The tracker must emit exactly one finalized
 # snapshot for the latched token, then remain quiet beyond both short proof and
 # native replacement graces.
-$adb -s "$serial" shell am force-stop "$youtube"
+"$adb" -s "$serial" shell am force-stop "$youtube"
 sleep 8
 first_count=$(snapshots | grep "token=$token " | grep -c 'finalized=true' || true)
 [ "$first_count" -eq 1 ] || fail "expected one finalization, observed $first_count"

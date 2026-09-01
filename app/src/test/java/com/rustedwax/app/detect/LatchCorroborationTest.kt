@@ -5,25 +5,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The two checks that can disprove a latched video id.
- *
- * The address bar is read asynchronously, so at track start it can still be
- * naming the *previous* video. The latch is corroborated against the resolved
- * page to catch that — and until v0.8.2 the only corroboration was the title,
- * which is absent whenever the page fetch failed. So it failed open:
- *
- * ```
- * 14:22:41  [enrich] fetch failed or timed out for GQwj_FRntp8
- * 14:27:39  TITLE = "Para Mis Soldados - Danger Man"
- * 14:27:39  [identity] latched video GQwj_FRntp8 for this track    ← previous entry
- * 14:27:46  [url] → video=<redacted-video-id>                             ← bar catches up
- * 14:28:06  broadcasting … url=…GQwj_FRntp8
- * ```
- *
- * `GQwj_FRntp8` is Daddy Yankee's "Con Calma" (193 s); the track being scrobbled
- * was 226 s. That disagreement is what the duration check now catches.
- */
 class LatchCorroborationTest {
 
 	// region duration
@@ -109,7 +90,7 @@ class LatchCorroborationTest {
 	}
 
 	@Test
-	fun `log 16 localized and structural title presentations retain their own ids`() {
+	fun `localized and structural title presentations retain their own ids`() {
 		assertTrue(
 			corroborates(
 				"BAD BUNNY - SOY PEOR (Video Oficial)",
@@ -134,7 +115,7 @@ class LatchCorroborationTest {
 	}
 
 	@Test
-	fun `log 16 adjacent tracks and ads remain contradictions`() {
+	fun `adjacent tracks and ads remain contradictions`() {
 		assertFalse(
 			corroborates(
 				"BAD BUNNY - SOY PEOR (Official Video)",
@@ -200,13 +181,6 @@ class LatchCorroborationTest {
 		assertTrue(selected is YouTubeProbe.Identity.Unconfirmed)
 	}
 
-	/**
-	 * Exact field regression from 2026-08-11. The first callback for
-	 * Sleepwalking still saw Visions (`QuQW1vkDA1c`), rejected it, and then the
-	 * correct address-bar id (`lir3dzYIhz0`) arrived. Keeping the rejected id as
-	 * the immutable "observed" one made the correct generation fail weak-title
-	 * corroboration at finalization.
-	 */
 	@Test
 	fun `a correct address bar id replaces the outgoing id after rejection`() {
 		val outgoing = UrlEvidence.Evidence(
@@ -282,13 +256,6 @@ class LatchCorroborationTest {
 		pageDurationSeconds = pageSeconds,
 	)
 
-	/**
-	 * The measured 2026-08-10 case: the bar was read before the session had
-	 * published a duration, so the page's short title could not confirm
-	 * `GBRAnuT48qo` — and filing that as a rejection then vetoed the resolver's
-	 * own title + duration + channel proof four minutes later, throwing away a
-	 * 225-of-236-second listen.
-	 */
 	@Test
 	fun `weak title evidence drops the latch without counting against the id`() {
 		val weak = disagreement(VideoTitleMatcher.Evidence.WEAK_SHORT_CANONICAL_CORE)

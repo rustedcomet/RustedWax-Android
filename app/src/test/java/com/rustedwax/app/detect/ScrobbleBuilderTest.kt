@@ -108,16 +108,6 @@ class ScrobbleBuilderTest {
 		trackStartedAtEpochSec = 1_700_000_000,
 	)
 
-	/**
-	 * `<redacted-private-path>` §3.1, observed on-chain: the YouTube app publishes the
-	 * *channel* in the ARTIST slot, and both payload fields came out wrong.
-	 *
-	 * ```
-	 * TITLE:  Snoop Doggy Dogg - Intro
-	 * ARTIST: King Of Rap          ← the channel
-	 *   → broadcast as artist "King Of Rap", title "Snoop Doggy Dogg - Intro"
-	 * ```
-	 */
 	@Test
 	fun `the YouTube app's channel is not taken as the artist`() {
 		val payload = ScrobbleBuilder.from(
@@ -277,7 +267,7 @@ class ScrobbleBuilderTest {
 		val songPayload = ScrobbleBuilder.from(nativeSong)
 		val videoPayload = ScrobbleBuilder.from(nativeVideo)
 		// The YouTube *app* publishes the channel in the ARTIST slot, so "Clean
-		// Artist" is an uploader, not a performer — `<redacted-private-path>` §3.2.
+		// Artist" is an uploader, not a performer under the classification contract.
 		// With no `Artist - Track` separator in the title there is nothing else to
 		// establish a performer from, so this stops claiming to be a song and
 		// becomes a video credited to its channel, which is true by construction.
@@ -297,17 +287,6 @@ class ScrobbleBuilderTest {
 
 	// region credits depend on the kind
 
-	/**
-	 * The bug, exactly as it reached the chain on 2026-07-29:
-	 *
-	 * ```
-	 * artist: "Fall 2: Deadpoint (2026) Official Trailer 2"   ← the film
-	 * title:  "Harriet Slater, Arsema Thomas"                 ← the cast
-	 * ```
-	 *
-	 * `category=Film & Animation` had already resolved and the channel was in
-	 * the notification. The kind was computed and then never consulted.
-	 */
 	@Test
 	fun `a film trailer keeps its channel as the artist and its whole title`() {
 		val rawTitle =
@@ -469,11 +448,6 @@ class ScrobbleBuilderTest {
 
 	// region YouTube Music credits
 
-	/**
-	 * An Art Track's credits are catalogue metadata, so they replace whatever the
-	 * uploader typed. `GQwj_FRntp8` is where the resolver gets
-	 * `Daddy Yankee / Con Calma`.
-	 */
 	@Test
 	fun `art track credits reach the payload`() {
 		val payload = ScrobbleBuilder.from(

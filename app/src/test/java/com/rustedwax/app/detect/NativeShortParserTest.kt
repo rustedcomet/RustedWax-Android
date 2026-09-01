@@ -122,12 +122,6 @@ class NativeShortParserTest {
 		assertInvalid(player(Case("Title", "@owner", 1, 20), secondSeekbar = 2L to 30L))
 	}
 
-	/**
-	 * The owner handle is the one mandatory field, so losing it loses the whole
-	 * listen — and the 2026-08-07 log holds 352 refusals that all read the same,
-	 * with no way to tell a footer YouTube never drew from one holding two
-	 * handles at once. The two have unrelated fixes, so they say so.
-	 */
 	@Test
 	fun `an absent handle and an ambiguous one are told apart`() {
 		val absent = NativeShortParser.parse(
@@ -164,8 +158,7 @@ class NativeShortParserTest {
 
 	@Test
 	fun `the handle refusal detail does not defeat the diagnostic throttle`() {
-		// Keyed on the shape, not the payload: a footer that changes with every
-		// Short must still coalesce to one line per window (FIELD §17.1).
+
 		val first = NativeShortParser.parse(
 			player(Case("A", "@a", 1, 20), includeHandle = false, seekbarLabel = ""),
 		) as NativeShortParser.Result.Invalid
@@ -184,13 +177,6 @@ class NativeShortParserTest {
 		assertTrue(first.reason != second.reason)
 	}
 
-	/**
-	 * Measured 2026-08-08 on the owner's device: holding a Short near the top
-	 * right plays it at 2× and strips the entire overlay — no title, no handle,
-	 * no seekbar — leaving exactly `2x` and `Pull down to lock 2x speed`. That is
-	 * the state in which nothing can be measured, and the state that says how
-	 * fast it is going.
-	 */
 	@Test
 	fun `the speed chip is read out of the stripped 2x overlay`() {
 		val refusal = NativeShortParser.parse(
@@ -211,12 +197,6 @@ class NativeShortParserTest {
 		assertTrue("nothing is measurable here", refusal.progressSurfaceLost)
 	}
 
-	/**
-	 * The hold strips the seekbar as well as the footer, so a refusal can land on
-	 * the *time* check and never reach the handle. Measured 2026-08-08: that
-	 * refusal carried no rate, so the listen underneath it was credited at 1×
-	 * while the screen said 2×.
-	 */
 	@Test
 	fun `a refusal that stops at the seekbar still reports the rate`() {
 		// A second time-bar container refuses before the handle is ever looked at.
@@ -289,11 +269,7 @@ class NativeShortParserTest {
 
 	@Test
 	fun `measured auto-dub badge does not compete with the title`() {
-		// Captured from the live A12 tree on 2026-08-05, @enefectoescine17. The
-		// auto-dubbing badge is a bare semantic View: no resource id, no button
-		// class, no control vocabulary, so every other filter missed it. It stood
-		// as a second title candidate, `singleOrNull` returned null, and the Short
-		// refused identity silently and finalized at `measured 0s`.
+
 		val title = "Shakira Fue a Ver el Partido de Messi y Todos Pensaron lo Mismo 😱 #artista"
 		val overlay = node(
 			id = "reel_player_overlay_container",
@@ -345,16 +321,6 @@ class NativeShortParserTest {
 		)
 	}
 
-	/**
-	 * Measured 2026-08-06 23:00–01:20: YouTube stopped rendering the Shorts
-	 * progress bar altogether — no `SeekBar` node anywhere in the tree and no bar
-	 * on screen — until the viewer taps the video once, which restores it for the
-	 * rest of the session. 47 of 71 Shorts in 85 minutes were lost, because a
-	 * Short that is never *started* can never accrue anything at all.
-	 *
-	 * The player, its container and the exact handle are all still proven, so
-	 * this is a proof without a reading, not a refusal.
-	 */
 	@Test
 	fun `a named player with no readable time is proven, not refused`() {
 		val result = NativeShortParser.parse(
@@ -368,9 +334,7 @@ class NativeShortParserTest {
 
 	@Test
 	fun `a missing seekbar container is still a structural refusal`() {
-		// A container that is not there at all is a swipe or a torn frame, not a
-		// live player whose bar YouTube declined to draw. It keeps its own
-		// message, which a field log once could not tell apart from the other.
+
 		val missingContainer = NativeShortParser.parse(
 			player(Case("Title", "@owner", 1, 20), includeSeekbar = false),
 		)
@@ -381,11 +345,7 @@ class NativeShortParserTest {
 
 	@Test
 	fun `no handle and no readable time is the picture-in-picture signature`() {
-		// <redacted-private-path> §4.2: a Short live in picture-in-picture keeps
-		// reel_watch_fragment_root, reel_watch_player and reel_time_bar, but the
-		// time bar loses its SeekBar child and the window has no footer to read
-		// an owner from. Nothing there can start a Short — it only ever credits
-		// one that was already proven.
+
 		val pip = NativeShortParser.parse(
 			player(
 				Case("Title", "@owner", 1, 20),
@@ -417,8 +377,7 @@ class NativeShortParserTest {
 
 	@Test
 	fun `ordinary refusals never claim the progress surface was lost`() {
-		// The regression this guards: wiring the marker to generic proof loss put
-		// it on essentially every Short finalize (FIELD §3.1).
+
 		listOf(
 			// No time-bar container at all, two of them, a blown budget and the
 			// wrong package: every one of these means "not a Shorts player",
@@ -438,12 +397,7 @@ class NativeShortParserTest {
 
 	@Test
 	fun `the measured id-less footer resolves despite its like and comment counters`() {
-		// Captured from the device on 2026-08-05 (@MontRecaps). YouTube had
-		// dropped `reel_title` from the Shorts footer entirely, so the id-bound
-		// pass finds nothing and the fallback sees every text node. The like and
-		// comment counters are bare ViewGroups carrying only their number, with
-		// no id, no button class and no control vocabulary — so before the count
-		// filter there were three survivors and every organic Short refused.
+
 		val footer = listOf(
 			node(description = "Go to channel @MontRecaps"),
 			node(text = "@MontRecaps", description = "@MontRecaps"),
@@ -514,9 +468,7 @@ class NativeShortParserTest {
 
 	@Test
 	fun `an uncounted View comments control is not a title`() {
-		// Measured 2026-08-05. A Short with no comments renders a bare "View
-		// comments"; the counted-only phrase missed it, so it stood as a second
-		// title candidate and refused identity on every such Short.
+
 		listOf("View comments", "View 14 comments", "View 1 comment", "View 2,417 comments")
 			.forEach { control ->
 				assertEquals(
@@ -585,18 +537,7 @@ class NativeShortParserTest {
 
 	@Test
 	fun `the sound attribution pill is not a second title candidate`() {
-		// Measured 2026-08-25 on the Galaxy A36, YouTube 21.33.322, capturing
-		// `dSYyRBKh4kA` (@ResilientGlamour, 49s) — the Short the owner reported
-		// as producing no History and no Not logged row after watching it past
-		// the threshold in picture-in-picture.
-		//
-		// The footer's sound row names the video the audio came from, so it is
-		// ordinary prose with no "Original sound" or "with @handle" wording for
-		// the blocklist to catch, and it is left-aligned with the title. Two
-		// survivors made `singleOrNull` null, the Short finalized `played 49s of
-		// 49s` with no title, and watch history could not name it from the owner
-		// handle and duration alone. What separates the two is that the sound row
-		// is a chip carrying its own play icon; the title is text and nothing else.
+
 		assertEquals(
 			NativeShortParser.Result.Organic(resilientGlamourTitle, "@resilientglamour", 5, 49),
 			NativeShortParser.parse(resilientGlamourShort(5)),
@@ -608,12 +549,6 @@ class NativeShortParserTest {
 		"Karen Cruz Mexico\u2019s Flag Football Queen \uD83C\uDDF2\uD83C\uDDFD\uD83C\uDFC8 " +
 			"#flagfootball\u200b #mexico\u200b #shorts\u200b #youtubeshorts\u200b #football\u200b"
 
-	/**
-	 * `dSYyRBKh4kA` as the shipped accessibility capture reported it, at
-	 * [seconds] of its 49 — classes, bounds and nesting from the device's own
-	 * tree rather than from a `uiautomator dump`, which collapses the sound
-	 * chip's two nodes into one and hides the defect entirely.
-	 */
 	private fun resilientGlamourShort(seconds: Int) = measuredShort(
 		listOf(
 			// avatar + handle + Subscribe
@@ -720,11 +655,7 @@ class NativeShortParserTest {
 
 	@Test
 	fun `an AI disclosure chip's inner label is not a title candidate`() {
-		// Measured 2026-08-25 on `@ZoeCole-x6z` / 46s: YouTube's AI-disclosure
-		// chip is a Button reading "AI: Content was made with AI" with a bare
-		// "AI" inside it, left-aligned with the title and matching none of the
-		// vocabulary rules. Two survivors refused the title; the listen was left
-		// to watch history exactly as `dSYyRBKh4kA` was.
+
 		val title = "The Most Stunning Colombia Fan? \uD83D\uDE0D\uD83C\uDDE8\uD83C\uDDF4 #shorts\u200b"
 		val sound = "Original Sound (Contains music from: Gata Only \u00b7 FloyyMenor & Cris Mj)"
 		val footer = listOf(
@@ -774,19 +705,7 @@ class NativeShortParserTest {
 
 	@Test
 	fun `an artist channel row and a Shop chip are not title candidates`() {
-		// @ITSBIZKIT / 92s, observed refusing its title on the same device and in
-		// the same session: an Official Artist Channel renders the handle a
-		// second time as prose the handle filter does not recognise, and a Shop
-		// chip sits above the channel row. Three left-aligned survivors, so the
-		// title was refused and the listen was left to watch history.
-		//
-		// Provenance, stated exactly: the refusal is measured — the device log
-		// reads `proof acquired: "null" / @itsbizkit / 0s of 92s` — but the tree
-		// below is rebuilt from a `uiautomator dump`, which collapses each chip
-		// into a single node. The nesting the shipped capture reports is
-		// therefore *not* represented here; the two rules this exercises are the
-		// icon and the shared channel row, both of which the collapsed shape
-		// still carries faithfully.
+
 		val handle = bounded(45, 1863, 135, 1953, description = "Go to channel @ITSBIZKIT")
 		val title = "SWIZZ BEATZ SURPRISED ALICIA KEYS WITH THE RARE VIRGIL ABLOH MAYBACH \uD83D\uDE33\uD83D\uDD25"
 		val footer = listOf(
@@ -914,8 +833,7 @@ class NativeShortParserTest {
 
 	@Test
 	fun `a bare upload date is not a title`() {
-		// Measured 2026-08-05: a Short finalized with the title "August 5, 2026".
-		// It failed closed, but letting the date chip through cost the real title.
+
 		listOf(
 			"August 5, 2026", "5 August 2026", "2026-08-05", "5/8/2026",
 			"Aug 5, 2026", "5 de agosto de 2026",
@@ -943,21 +861,6 @@ class NativeShortParserTest {
 
 	// ── retained in-app miniplayer ─────────────────────────────────────────
 
-	/**
-	 * A retained YouTube in-app mini-player sitting behind a foreground Short.
-	 *
-	 * This is the state the 2026-08-13 Shorts PiP gate had to be cleared of by
-	 * hand before it could run: the owner left a Short foreground and a *different*
-	 * retained YouTube player was still alive behind it, and pressing YouTube's own
-	 * Home tab exposed it — accessibility described `Minimized player` with a
-	 * paused 14/269-second seekbar while YouTube's sole MediaSession was stopped
-	 * with empty metadata.
-	 *
-	 * Until now that separation was proven only on the device, by one capture
-	 * reporting `minimized=0`. Absence in a single capture is not a negative
-	 * control: it shows the state did not occur, not that the parser refuses it.
-	 * These fixtures construct it deliberately.
-	 */
 	private fun miniplayer(
 		title: String = "Some Retained Video",
 		current: Long = 14,
@@ -1128,11 +1031,7 @@ class NativeShortParserTest {
 
 	@Test
 	fun `the measured dSYyRBKh4kA footer reaches the tracker with its title`() {
-		// The production wiring for the reported defect: the same capture the
-		// device produced, through the real adapter and the real tracker, to the
-		// snapshot finalization reads. Before the narrowing this Short arrived
-		// with `title = null` — the exact string the device log printed — and the
-		// listen could not be named.
+
 		val adapter = NativeShortsAdapter()
 		val tracker = ForegroundShortTracker()
 		fun capture(seconds: Int) = ShortsSurfaceCapture(
@@ -1276,18 +1175,6 @@ class NativeShortParserTest {
 		assertTrue(neutral.single() is PlaybackInput.ForegroundSurfaceUnavailable)
 	}
 
-	/**
-	 * Field 2026-08-16, Galaxy A36: four Shorts played back to back at 2x, two
-	 * lost.
-	 *
-	 * The whole production chain, because the defect only existed across it:
-	 * YouTube's own tree through the adapter's stabilizer into the neutral
-	 * reducer inputs and the real tracker. The hold begins one poll after the
-	 * footer is first read, and every frame from then on is a bare seekbar — no
-	 * title, no owner handle, and YouTube's `2x` chip. Before the fix the Short
-	 * was never acquired at all: `readStableSurface` answered `Absent` for the
-	 * whole hold and the listen did not exist.
-	 */
 	@Test
 	fun `a 2x hold that hides the footer still acquires and credits the Short`() {
 		val adapter = NativeShortsAdapter()
@@ -1412,15 +1299,6 @@ class NativeShortParserTest {
 		)
 	}
 
-	/**
-	 * A visible speed chip is the player saying it is playing, and at what rate.
-	 *
-	 * Measured 2026-08-08: holding a Short to play it at 2x strips the overlay, so
-	 * nothing is measurable, and the paired usage/audio/window evidence did not
-	 * answer either — so the Short was dropped three seconds into every hold. The
-	 * chip is a stronger signal than that pair, and is gated on the owner's
-	 * inference setting rather than on the pair.
-	 */
 	@Test
 	fun `a speed chip permits inference on the setting, not on the audio pair`() {
 		val held = NativeShortTree(node(pkg = YT, children = listOf(node(id = "reel_watch_player"))))
@@ -1452,12 +1330,6 @@ class NativeShortParserTest {
 		)
 	}
 
-	/**
-	 * Field 2026-08-15, AhlkQPqStO8: the footer was off screen, the seekbar was
-	 * still readable but cached at 2s, and YouTube's own chip said 2x. The parser
-	 * used to discard that rate on the proven path, so every stalled second was
-	 * credited as one content second instead of two.
-	 */
 	@Test
 	fun `a readable footerless 2x surface carries the rate and uses the inference setting`() {
 		val held = player(

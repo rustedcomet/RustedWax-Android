@@ -6,16 +6,6 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-/**
- * The search-based video-id fallback.
- *
- * The fixture is trimmed from the **real** results page for the reported case
- * (2026-07-25, "Doomed" / "Bring Me The Horizon - Topic", 274 s), keeping the
- * renderer shape intact. The second entry matters most: `DIEI2YLYg6o` is a
- * *different artist's cover*, titled exactly "Doomed" and within two seconds
- * of the same length. Anything less than title + channel + duration would pick
- * it and write a wrong link to an immutable chain.
- */
 class SearchResultsParserTest {
 
 	private val fixture = """
@@ -44,7 +34,7 @@ class SearchResultsParserTest {
 	}
 
 	/**
-	 * The renderer shape that caused all six unlinked entries in log 12. A
+	 * A renderer shape that previously produced unlinked entries. A
 	 * Shorts card no longer has `title`, `ownerText`, or `lengthText`; the old
 	 * generic walker therefore reported zero candidates even though the ids were
 	 * present in `reelWatchEndpoint`.
@@ -135,7 +125,6 @@ class SearchResultsParserTest {
 		)
 	}
 
-	/** The duration-known Brave field failure from 2026-08-14. */
 	@Test
 	fun `an exact hashtag-only title still requires channel and duration`() {
 		val correct = SearchResultsParser.Candidate(
@@ -268,14 +257,6 @@ class SearchResultsParserTest {
 		)
 	}
 
-	/**
-	 * VEVO channels are written as one word. The media session reports
-	 * `systemofadownVEVO`; search lists the owner as `System Of A Down`.
-	 * Stripping the suffix left `systemofadown`, which never equalled
-	 * `system of a down` — so every VEVO track failed to resolve. Three of the
-	 * four missing `url`s in the 2026-07-28 session were this, and each time
-	 * the right video was the *first* result, exact title, one second off.
-	 */
 	@Test
 	fun `a VEVO channel matches its spaced-out search listing`() {
 		val body = """{"contents":{"sectionListRenderer":{"contents":[{"itemSectionRenderer":
@@ -322,7 +303,7 @@ class SearchResultsParserTest {
 	}
 
 	@Test
-	fun `log 18 compound owner and explicit collaborator bylines resolve safely`() {
+	fun `compound owner and explicit collaborator bylines resolve safely`() {
 		val body = """{"contents":[
 			{"videoRenderer":{"videoId":"lZizLbWxr_E",
 			"title":{"runs":[{"text":"Spice, Sean Paul, Shaggy - Go Down Deh | Official Music Video"}]},
@@ -403,12 +384,6 @@ class SearchResultsParserTest {
 		assertNotNull(WatchPageParser.extractJson(page, "ytInitialData"))
 	}
 
-	/**
-	 * Shorts titles read off the screen carry `U+200B` between hashtags —
-	 * measured across the 2026-08-06 acceptance log, where every hashtag in a
-	 * foreground Short's title was followed by one. A watch page publishes the
-	 * same title without them, so both title comparisons have to survive it.
-	 */
 	@Test
 	fun `zero-width spaces in a screen title are not identity evidence`() {
 		val screen = "#music​ #news​ #hiphop​"

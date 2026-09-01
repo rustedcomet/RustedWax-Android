@@ -5,16 +5,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * A metadata bundle that omits DURATION says nothing about the length.
- *
- * Measured 2026-08-10 in Brave: YouTube's web player reported 236981 ms for
- * "Happy Song" throughout a 247-second watch, then republished the same title
- * and artist with DURATION unset half a second before the track changed. The
- * finalize read "played 247s of 0s", so there was no percentage to clear a
- * threshold with and no length to resolve an id by, and a complete listen was
- * skipped as "title, owner/channel and duration were not all available".
- */
 class EstablishedDurationTest {
 
 	private fun happySong(durationMs: Long?) = TrackIdentity(

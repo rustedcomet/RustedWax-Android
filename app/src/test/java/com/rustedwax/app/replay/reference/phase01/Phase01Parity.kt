@@ -19,15 +19,7 @@ import com.rustedwax.app.detect.YouTubeProbe
  *
  * ## What this compares, and why that is worth doing
  *
- * `<redacted-private-provenance>` requires "zero unexplained difference between old and
- * shadow outputs, from Phase 2 onward", and the Phase 2/3 report rejected the
- * previous attempt for a specific reason: the thing on the "old" side was a
- * hundred-line model of a sixteen-hundred-line state machine, so a green run
- * proved the model agreed with itself.
- *
- * The old side here is the real one — `phase01/SessionProbe.kt`, whose body is
- * byte-identical to the recorded pre-migration file and which
- * `Phase01ProvenanceTest` re-checks on every run. It measures, decides
+ * The old side here is a retained legacy `phase01/SessionProbe.kt`. It measures, decides
  * lifecycle, resolves identity through the same production `YouTubeProbe`, and
  * emits real `SessionSnapshot`s through its own `onTrackFinalized`. It has never
  * seen `PlaybackReducer`, which did not exist when it was written. That is what
@@ -85,23 +77,8 @@ sealed interface ParityStep {
 	/** The active-session list goes empty without the session being destroyed. */
 	data object RemoveSession : ParityStep
 
-	/**
-	 * Android lists a controller again after its session was destroyed.
-	 *
-	 * Not hypothetical: measured on <redacted-device-model> / API 31, `getActiveSessions` keeps
-	 * returning a released controller for a moment. Expressed as "the list goes
-	 * empty, then the same controller comes back", because that is the sequence
-	 * that removes the watch and then offers the dead token to the code that
-	 * creates new ones.
-	 */
 	data object RelistDestroyedSession : ParityStep
 
-	/**
-	 * The listener service goes away.
-	 *
-	 * @param finalizeTracks false is the user pressing Stop, which must not
-	 * scrobble what was in flight; true is the system taking the listener down.
-	 */
 	data class StopProbe(val finalizeTracks: Boolean = true) : ParityStep
 
 	/** The listener service comes back and re-attaches to whatever is active. */
@@ -287,14 +264,6 @@ object ReferenceRun {
 	}
 }
 
-/**
- * Runs the same script through `PlaybackReducer`.
- *
- * @param speedScale a deliberate defect injector for the negative control. At
- * `1.0` this run is faithful; at anything else the replacement measures at the
- * wrong rate, and a parity assertion that does not notice is not testing
- * anything. See `Phase01ParityTest.negative control`.
- */
 class ReducerRun(private val speedScale: Double = 1.0) {
 
 	private val reducer = PlaybackReducer(SourceProfile.playbackCapabilitiesFor(PARITY_PACKAGE))

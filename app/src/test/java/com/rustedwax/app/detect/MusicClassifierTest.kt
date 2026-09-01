@@ -5,7 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * Phase 4 decision D4 flipped the default to `song`, so these tests carry more
+ * The classifier once defaulted to `song`, so these tests carry more
  * weight than most: an over-claimed kind is permanent on-chain, and the
  * blocklist is the only thing standing between "default to music" and a
  * tutorial in the music index.
@@ -90,12 +90,6 @@ class MusicClassifierTest {
 		assertEquals(video, kindOf("Anything", "SomeVEVO", category = "Gaming"))
 	}
 
-	/**
-	 * Field data 2026-07-24 evening: the category is wrong in BOTH directions.
-	 * "How to Throat Sing like in DUNE!" (a tutorial) and a Manson news
-	 * bulletin are both categorized Music by their uploaders. Format evidence
-	 * in the title now outranks the category.
-	 */
 	@Test
 	fun `format evidence beats a Music category`() {
 		assertEquals(video, kindOf(
@@ -152,7 +146,7 @@ class MusicClassifierTest {
 	}
 
 	/**
-	 * D4 revised in v0.5.1: two days of field data showed every default-song
+	 * Regression evidence showed every default-song false positive in this set
 	 * hit was a news clip, movie scene or vlog. With category, MusicBrainz and
 	 * the vocabulary layers supplying the positive path for real music, the
 	 * last-resort default is now video.
@@ -165,11 +159,6 @@ class MusicClassifierTest {
 		assertEquals("no music evidence", r.reason)
 	}
 
-	/**
-	 * The 2026-07-24 field sample: eleven film clips, trailers and shorts that
-	 * went on-chain as `song`. Titles, channels and categories are the real
-	 * values fetched from each video's watch page. Every one must be `video`.
-	 */
 	@Test
 	fun `the field sample of misclassified film content is video`() {
 		// Film & Animation — the category alone must decide these.
@@ -393,12 +382,6 @@ class MusicClassifierTest {
 		assertEquals(video, kindOf("Metallica Interview 2023", "MetallicaVEVO"))
 	}
 
-	/**
-	 * Field case 2026-07-28: `Blade II | Sewers of the Damned | ClipZone:
-	 * Heroes & Villains` was scrobbled as a song because the first `|` made
-	 * the weakest rule of all fire, yielding artist "Blade II". A three-part
-	 * title is a clip caption, not `Artist - Track`.
-	 */
 	@Test
 	fun `a three-part clip caption does not read as an artist`() {
 		assertEquals(
@@ -445,12 +428,6 @@ class MusicClassifierTest {
 		assertEquals(song, kindOf("Enter Sandman 【Drum Playthrough】", "Drummer"))
 	}
 
-	/**
-	 * Broadcast 2026-07-24T17:35 as `video`: a 42-second performance clip of
-	 * a real song, whose only offline signal was the weak artist-separator
-	 * shape the short-form rule refuses. A MusicBrainz confirmation is
-	 * explicit evidence, so it rescues exactly this case.
-	 */
 	@Test
 	fun `a MusicBrainz match rescues a short performance clip`() {
 		assertEquals(video, kindOf("Maphra - Doomed", durationMs = 42_000L))
@@ -464,12 +441,6 @@ class MusicClassifierTest {
 			"MOVIE Official Trailer (2026)", category = null, mbMatch = true))
 	}
 
-	/**
-	 * Broadcast 2026-07-24T17:27 as `song` on the D4 default: the video id
-	 * (and with it the Education category) was lost by finalize time, and
-	 * nothing else fired. The uploader-declared #shorts tag is evidence that
-	 * survives losing the URL.
-	 */
 	@Test
 	fun `a #shorts tag in the title is short-form even with no url evidence`() {
 		assertEquals(video, kindOf(
@@ -497,11 +468,6 @@ class MusicClassifierTest {
 
 	// region episode numbering
 
-	/**
-	 * Both went on-chain as `kind: song` on 2026-07-30. `EPISODE_STRUCTURAL`
-	 * matched `Season 6 Ep 19` and `S06E19` but not the `NxNN` notation TV clip
-	 * channels actually use.
-	 */
 	@Test
 	fun `NxNN episode numbering reads as a TV episode`() {
 		assertEquals(
@@ -645,12 +611,6 @@ class MusicClassifierTest {
 
 	// region hashtag-only titles
 
-	/**
-	 * On-chain 2026-07-29: `katter — #guitar #dubstep #djdubstep #fnaf
-	 * #fivenightsatfreddy`, `kind: song`, on the strength of `category=Music`
-	 * alone. The category was arguably right about the content and still
-	 * produced a permanent playlist entry naming no track.
-	 */
 	@Test
 	fun `a title of nothing but hashtags is not a song`() {
 		assertEquals(

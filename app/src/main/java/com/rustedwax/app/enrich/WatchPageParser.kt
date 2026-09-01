@@ -46,22 +46,6 @@ object WatchPageParser {
 		return null
 	}
 
-	/**
-	 * The title YouTube *displays*, when it differs from the uploaded one.
-	 *
-	 * YouTube auto-translates titles for the viewer's language. `videoDetails`
-	 * and the microformat keep the original; `videoPrimaryInfoRenderer` carries
-	 * what is actually rendered on screen — and the screen is exactly where the
-	 * native observer reads a Short's title from.
-	 *
-	 * Measured 2026-08-05 on `QnRnooyKeZk`: `videoDetails.title` is
-	 * "El Día que Karol G Vivió un Momento Inesperado en Pleno Concierto", while
-	 * the phone and this renderer both say "The Day Karol G Experienced an
-	 * Unexpected Moment During a Concert". Comparing only against the original
-	 * meant every auto-translated video refused identity, silently, forever.
-	 *
-	 * @param json the `ytInitialData` blob from the same watch page
-	 */
 	fun localizedTitle(json: String): String? {
 		val root = runCatching { JSONObject(json) }.getOrNull() ?: return null
 		val renderer = firstObject(root, "videoPrimaryInfoRenderer") ?: return null
@@ -87,7 +71,6 @@ object WatchPageParser {
 		return null
 	}
 
-	/** @throws org.json.JSONException if the blob isn't the shape we expect */
 	fun parsePlayerResponse(videoId: String, json: String): VideoFacts {
 		val root = JSONObject(json)
 		val details = root.optJSONObject("videoDetails")

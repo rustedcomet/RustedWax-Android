@@ -65,9 +65,7 @@ data class TrackIdentity(
 
 	fun sameTrackAs(other: TrackIdentity): Boolean {
 		if (!sameWorkAs(other)) return false
-		// Like artist and duration, an album that one callback omitted is silence,
-		// not a contradictory album. music source measured on 2026-08-20 publishes
-		// the Song-mode album one callback after title/artist/duration.
+
 		if (!albumsCompatible(other)) return false
 		// An artist nobody published is silence, exactly like a missing duration
 		// — not a second opinion about who the uploader is. page-backed source answers the
@@ -126,13 +124,6 @@ data class TrackIdentity(
 	companion object {
 		const val DURATION_REFINEMENT_TOLERANCE_MS = 2_000L
 
-		/**
-		 * Presentation form, shared with `DedupLedger` — §3.6. Title, artist and
-		 * album are text a human reads, so compatibility folding is correct here
-		 * and this keeps NFKC. What changed is that it is now the *same* NFKC as
-		 * everywhere else, and that invisible characters are stripped before it
-		 * rather than silently ending a track that never changed.
-		 */
 		private fun normalize(value: String?): String =
 			TextNormalizer.presentation(value).replace(Regex("""\s+"""), " ").trim()
 

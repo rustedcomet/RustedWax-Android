@@ -12,14 +12,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
-/**
- * Retention where it actually has to hold: the file the Export button sends and
- * the list the Log destination draws, across a restart.
- *
- * The whole point of the bound is that it survives the process ending. A prune
- * that only ran while the app happened to be open would leave the 22 MB file
- * measured on the field device exactly where it was.
- */
 class EventLogRetentionTest {
 
 	private lateinit var file: File
@@ -88,10 +80,6 @@ class EventLogRetentionTest {
 		)
 	}
 
-	/**
-	 * The exact shape of the field device's 240,631-line file: no dates at all,
-	 * because they were written before the stamp carried one.
-	 */
 	@Test
 	fun `a legacy undated file is pruned safely rather than kept or crashed on`() {
 		file.writeText(
@@ -158,13 +146,6 @@ class EventLogRetentionTest {
 		)
 	}
 
-	/**
-	 * The exact state measured on the field device on 2026-08-26: a log file that
-	 * is already sitting on the byte ceiling when the process starts.
-	 *
-	 * Every line is dated an hour ago, so only the byte cap binds and the twelve
-	 * hour window has no say in what this test is measuring.
-	 */
 	private fun fillToCeiling() {
 		val body = "[probe] " + "x".repeat(100)
 		val width = at(hour, "$body 0").length + 1
@@ -174,20 +155,6 @@ class EventLogRetentionTest {
 		)
 	}
 
-	/**
-	 * A prune that trims to exactly the ceiling leaves the next line over it, so
-	 * the ceiling re-arms on every append and the whole file is read, reparsed and
-	 * rewritten *per line* — several times a second while something is playing,
-	 * on whichever thread wrote the line.
-	 *
-	 * That thread is usually the main one: this app is a single process, so the
-	 * notification listener and the accessibility service deliver on the same
-	 * looper the UI draws on. Measured on the field device on 2026-08-26 with the
-	 * log at 524,263 bytes across 4,497 lines, 74 of 78 lines written during a
-	 * playback start came from the main thread, and the app skipped 302 frames —
-	 * five seconds of an unswipeable, unscrollable UI, with playback progress
-	 * arriving late and jumping.
-	 */
 	@Test
 	fun `a log already at the byte ceiling does not re-prune for every single line`() {
 		fillToCeiling()

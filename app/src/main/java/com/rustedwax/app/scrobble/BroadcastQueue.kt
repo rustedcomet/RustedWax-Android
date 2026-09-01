@@ -32,7 +32,7 @@ class BroadcastQueue(context: Context) {
 	data class Entry(
 		val id: Long,
 		val username: String,
-		/** The exact `custom_json` payload string to broadcast. */
+
 		val json: String,
 		/** Human-readable, for the UI list. */
 		val label: String,

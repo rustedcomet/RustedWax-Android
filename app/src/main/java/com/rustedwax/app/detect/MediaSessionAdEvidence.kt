@@ -53,13 +53,6 @@ object MediaSessionAdEvidence {
 		}
 	}
 
-	/**
-	 * Bind one observation to the one instance selected by SessionProbe.
-	 *
-	 * A first observation is accepted only if that exact instance was already
-	 * established before the accessibility frame. Otherwise the same literal
-	 * signal must be observed again for the same token/signature.
-	 */
 	fun observe(
 		observation: Observation,
 		instance: TrackInstance,
@@ -146,13 +139,6 @@ object MediaSessionAdEvidence {
 
 	fun clearAll() = byPackage.clear()
 
-	/**
-	 * Which packages this store currently holds anything for.
-	 *
-	 * Read-only, and it exists so a caller can assert that a run left the store
-	 * alone. `<redacted-private-path>` §2 is about evidence with no single owner;
-	 * being able to *observe* the store is the cheapest half of fixing that.
-	 */
 	fun trackedPackages(): Set<String> = byPackage.keys.toSet()
 
 	private fun pruneProvisional(packageName: String, now: Long) {

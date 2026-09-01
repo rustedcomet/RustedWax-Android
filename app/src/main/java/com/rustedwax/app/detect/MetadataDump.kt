@@ -6,8 +6,8 @@ import com.rustedwax.core.MetadataFields
 /**
  * Dumps every field a media session publishes.
  *
- * The Phase 0 question is "what does Brave actually put in a MediaMetadata,
- * and is it enough to build a HiveScrobblePayload from?" — so we dump the
+ * The diagnostic question is "what does Brave actually put in a MediaMetadata,
+ * and is it enough to build a HiveScrobblePayload from?" Therefore we dump the
  * whole surface, including keys we don't currently care about and any
  * non-standard keys the app invented. What's *absent* matters as much as
  * what's present, so unset known keys are reported explicitly rather than
@@ -98,9 +98,7 @@ object MetadataDump {
 			val v = md.getLong(key)
 			when {
 				v == 0L -> missing += short(key)
-				// Duration is documented as milliseconds, but a browser
-				// reporting seconds would look identical — print both readings
-				// so a known-length video settles it (<redacted-private-path>, Q2).
+
 				key == MediaMetadata.METADATA_KEY_DURATION ->
 					out += "${short(key)} = $v  (${mmss(v / 1000)} if ms, " +
 						"${mmss(v)} if seconds)"

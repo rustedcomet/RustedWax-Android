@@ -7,20 +7,6 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * Chain-error handling, from the 2026-07-30 frozen-node incident.
- *
- * `api.openhive.network` stalled at block 108575690 and stayed 77 minutes behind
- * while answering every RPC normally. It swallowed five scrobbles and refused two
- * more, and the app logged the refusal as:
- *
- * ```
- * rejected: Account ${'$'}{a} already submitted ${'$'}{n} custom json operation(s) this block.
- * ```
- *
- * Two separate defects in one line — the placeholders were never filled in, and
- * a rate limit was classified as permanent and the listens discarded.
- */
 class HiveRpcErrorTest {
 
 	@Test
@@ -145,10 +131,6 @@ class HiveRpcErrorTest {
 
 	// region node list
 
-	/**
-	 * Both nodes dropped on 2026-07-30 — one frozen off the front, one removed
-	 * outright for answering a broadcast with an empty body.
-	 */
 	@Test
 	fun `the dead node is gone and the frozen one is no longer tried first`() {
 		assertFalse(HiveRpc.DEFAULT_NODES.any { it.contains("arcange") })

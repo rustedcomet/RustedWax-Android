@@ -2,34 +2,6 @@ package com.rustedwax.app.detect
 
 import com.rustedwax.app.storage.Settings
 
-/**
- * Which apps RustedWax scrobbles from — `<redacted-private-path>` §5.1.
- *
- * ## What this replaces
- *
- * `Settings.nativeYouTube` and `Settings.nativeYouTubeMusic`: two hardcoded
- * booleans, one per package. That shape does not survive a third source, and
- * every source added under it costs a setting, a UI row, a migration and a
- * branch. A set costs none of those, and it can hold a package this build has
- * never heard of.
- *
- * ## The conflict rule
- *
- * **The allowlist wins.** Taken verbatim from Pano (`bSet.removeAll(aSet)`)
- * because it prevents a class of bug rather than merely choosing a winner: a
- * package that ends up in both sets — through a migration, an import, or a
- * race between two screens — resolves to *enabled*, deterministically, and the
- * contradiction is repaired on write instead of being re-decided on every read.
- * The alternative fails in the direction where a user's explicit yes silently
- * stops working.
- *
- * ## Why a migration exists at all
- *
- * Someone has already made these choices. Reading the old booleans once and
- * folding them into the new sets means nobody re-enables anything after an
- * update — and the marker is one-way, so a later "block YouTube" cannot be
- * undone by the migration running a second time.
- */
 object AppAllowlist {
 
 	/**

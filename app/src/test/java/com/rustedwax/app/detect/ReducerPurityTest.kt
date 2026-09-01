@@ -15,8 +15,8 @@ import org.junit.Test
  * [ListenState] was written as a `data class` of `val`s and read as immutable on
  * that basis — but it carried a mutable `PipPlaybackInference`, and the
  * picture-in-picture branch advanced it by calling `observe()` on the *caller's*
- * state. So `reduce` changed its own argument. The visible consequence is the
- * one that matters for the audit's Phase 3 claim: replaying an event stream
+ * state. So `reduce` changed its own argument. The visible consequence is that
+ * replaying an event stream
  * twice from the same starting state produced two different answers, and a
  * reducer that cannot be replayed cannot be a reference for anything.
  *

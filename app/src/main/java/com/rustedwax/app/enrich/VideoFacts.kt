@@ -18,50 +18,11 @@ data class VideoFacts(
 	val ownerHandle: String? = null,
 	/** YouTube's own category — "Music", "Gaming", "Entertainment"… */
 	val category: String? = null,
-	/**
-	 * The video's real length, from whichever resolver supplied it.
-	 *
-	 * Two jobs. It is the fallback when the media session publishes no
-	 * `DURATION` — a 2026-07-29 shorts session lost 10 clips that way, skipped
-	 * as "no duration" before any rule could look at them. YouTube Music can
-	 * also supply this field, so its presence must never be used as proof that
-	 * the separate watch-page request succeeded.
-	 */
+
 	val lengthSeconds: Long? = null,
 	/** True only when the watch-page parser found a `videoDetails` object. */
 	val watchPageResolved: Boolean = false,
-	/**
-	 * `microformat.playerMicroformatRenderer.isUnlisted` — the video is not
-	 * publicly listed, so it can only be reached by direct link.
-	 *
-	 * This is the ad guard, and it was found the hard way. v0.8.0 gated the
-	 * short-clip floor on the watch page merely *resolving*, on the assumption
-	 * that ad creatives have no public watch page. They do. A 2026-07-29 Chrome
-	 * session put `Video ad upload channel — Blurry: Formula única` on-chain: it
-	 * was served at `m.youtube.com/shorts/CYgQQqvwwsY`, a genuine `/shorts/`
-	 * URL, and its page resolved with `category=People & Blogs`, so both halves
-	 * of the proof were satisfied.
-	 *
-	 * Fetching that page next to a real short from the same feed showed what
-	 * actually separates them:
-	 *
-	 * | field | ad | real short |
-	 * | --- | --- | --- |
-	 * | `isUnlisted` | true | false |
-	 * | `isCrawlable` | false | true |
-	 * | `viewCount` | 1 | 96229 |
-	 *
-	 * `isUnlisted` is the one to use. An ad creative is unlisted by
-	 * construction; a short reached by scrolling the feed is public by
-	 * construction. It is also structural rather than a name match — the channel
-	 * was literally called "Video ad upload channel", but that is a string
-	 * YouTube can rename or localize.
-	 *
-	 * **Null means the field was absent**, which is treated as "not proven
-	 * public" rather than as `false`. Reading absence as public is precisely the
-	 * direction that lets an ad through, so if YouTube renames this field the
-	 * short-clip floor closes rather than silently re-opening the leak.
-	 */
+
 	val isUnlisted: Boolean? = null,
 	/**
 	 * `videoDetails.isCrawlable`. Corroborates [isUnlisted] — false on the ad,
@@ -78,9 +39,8 @@ data class VideoFacts(
 	 * The release, from the line after the `Song · Artist` credit on an
 	 * auto-generated description.
 	 *
-	 * `album` has been a field on [com.rustedwax.hive.HiveScrobblePayload]
-	 * since Phase 0 and nothing ever populated it — every RustedWax entry went
-	 * on-chain without one. The desktop extension has been reading it out of the
+	 * `album` is an optional field on [com.rustedwax.hive.HiveScrobblePayload].
+	 * The desktop extension reads it from the
 	 * same three-line block all along (`parseYtVideoDescription`), so this is
 	 * catching up rather than inventing anything.
 	 */

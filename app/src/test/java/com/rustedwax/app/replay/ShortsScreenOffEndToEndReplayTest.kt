@@ -6,7 +6,6 @@ import com.rustedwax.youtube.identity.VideoResolutionAttempt
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/** FIELD log 26: foreground Short -> PiP -> display-off evidence dropout. */
 class ShortsScreenOffEndToEndReplayTest : ReplayScenarioTest() {
 	private val videoId = "screenOff01"
 	private val title = "Screen-off continuity field Short"

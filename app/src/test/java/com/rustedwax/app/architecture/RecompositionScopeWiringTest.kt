@@ -4,39 +4,6 @@ import java.io.File
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The screen may not be recomposed by things only one row draws.
- *
- * ## The defect this exists to stop
- *
- * `MainScreen` is one composable covering the tab strip, the pager and all five
- * destinations. Compose skips a composable only when every parameter is stable,
- * and `List<String>` is not — so passing the event log **by value** meant every
- * logged line invalidated the whole screen. `NativeShortsObserver.Status` is a
- * value class but it *changes* about once a second while a Short is on screen,
- * with the same effect.
- *
- * That is expensive here for a reason specific to this app: RustedWax enables
- * its own accessibility services, so `AccessibilityManager.isEnabled()` is true
- * and Compose runs its semantics pipeline —
- * `checkForSemanticsChanges → getCurrentSemanticsNodes → subtreeSortedByGeometryGrouping`,
- * an O(n log n) geometry sort over the whole tree — after each of those
- * invalidations. A `simpleperf` capture on 2026-08-26 showed that pipeline at
- * 35.75% of the main-thread Looper.
- *
- * Reading the value inside the one composable that draws it confines the
- * invalidation to that composable. Measured on the field device with YouTube
- * Music playing, Chrome open, RustedWax foreground and idle, interleaved
- * installs: **171.5 → 116 main-thread jiffies per 30 s.**
- *
- * ## Why source wiring
- *
- * The project has no Robolectric and no Compose UI-test dependency, so no JVM
- * test renders a composable or counts a recomposition. This is the same
- * supplement pattern as `UiSettingsLogWiringTest`: it proves the production
- * declaration keeps the shape the measurement depended on. It is not itself a
- * performance measurement.
- */
 class RecompositionScopeWiringTest {
 
 	private val root: File by lazy {

@@ -173,10 +173,7 @@ class MainActivity : ComponentActivity() {
 		var nativeShortsGranted by remember {
 			mutableStateOf(NativeShortsAccessibilityService.isEnabled(this))
 		}
-		// "Off" and "was on and stopped on its own" are the same boolean
-		// but very different messages: Android drops a crashed
-		// accessibility service from the enabled list, and on 2026-08-05
-		// that silently cost most of a day's browser evidence.
+
 		var urlWatcherDropped by remember { mutableStateOf(false) }
 		var nativeShortsDropped by remember { mutableStateOf(false) }
 		// When each grant last stopped being live. §2.3: the master flag
@@ -504,20 +501,6 @@ class MainActivity : ComponentActivity() {
 		startActivity(Intent(AndroidSettings.ACTION_USAGE_ACCESS_SETTINGS))
 	}
 
-	/**
-	 * Open a canonical watch URL, preferring the YouTube app.
-	 *
-	 * `ACTION_VIEW` on the https link, not a `vnd.youtube:` scheme: Android
-	 * already routes a youtube.com link to the app when it is installed and its
-	 * links are verified, and falls back to a browser when it is not. Naming the
-	 * app explicitly would gain nothing and would fail outright on a device that
-	 * does not have it.
-	 *
-	 * The URL only ever comes from
-	 * [com.rustedwax.app.detect.YouTubeProbe.canonicalWatchUrl], which will not
-	 * build one from anything but a proven eleven-character id — so this cannot
-	 * open a search, a guess, or someone else's re-upload.
-	 */
 	private fun openVideo(url: String) {
 		val view = Intent(Intent.ACTION_VIEW, Uri.parse(url))
 		runCatching { startActivity(view) }.onFailure {
@@ -550,21 +533,6 @@ class MainActivity : ComponentActivity() {
 	}
 }
 
-/**
- * Classifies an accessibility grant as live, never granted, or **dropped**.
- *
- * Android removes a crashed accessibility service from
- * `enabled_accessibility_services`, which is indistinguishable from the user
- * switching it off. On 2026-08-05 the browser watcher was dropped exactly that
- * way, stayed off for most of a day, and nothing anywhere said so — roughly
- * half that day's watch history never reached the app. Remembering that a
- * grant was once live turns one boolean into two very different messages.
- *
- * Logged once per transition rather than once per poll, which runs every
- * second: a run of identical lines is what buried the last two diagnoses.
- *
- * @return whether the grant was once live and is not live now.
- */
 private data class GrantReport(val dropped: Boolean, val notLiveSince: Long)
 
 private fun noteGrant(

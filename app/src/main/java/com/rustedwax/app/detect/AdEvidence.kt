@@ -2,15 +2,6 @@ package com.rustedwax.app.detect
 
 import java.util.concurrent.ConcurrentHashMap
 
-/**
- * Explicit visible YouTube ad evidence bound to one URL generation.
- *
- * A Shorts transition is not atomic: the address bar may name the successor
- * while the previous card's `Sponsored` overlay is still visible. The first
- * label in a new generation is therefore provisional. It becomes accepted
- * only when re-observed for the same id/generation, or when the MediaSession
- * had already established that exact instance before the label appeared.
- */
 object AdEvidence {
 
 	data class Evidence(

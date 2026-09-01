@@ -23,40 +23,6 @@ import com.rustedwax.core.SystemClock
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.delay
 
-/**
- * The edges of [FinalizationRuntime] — everything it needs that is a device, a disk
- * or a network, expressed as an interface so the decision path in between can
- * be run without any of them.
- *
- * ## Why this exists
- *
- * `<redacted-private-path>` §8 records the reason plainly: hundreds of unit tests
- * pass while a field playback sequence still fails, because the tests exercise
- * pure helpers and nothing exercises `onTrackFinalized` from a finalized track
- * through to a payload or a refusal. That method is not untested by neglect —
- * it was untestable, because reaching it meant constructing a `Context`, an
- * `EncryptedSharedPreferences`, a live HTTP stack and the Hive chain.
- *
- * These ports change that and nothing else. Every production caller is wired to
- * the same concrete class it used before, through an adapter that forwards each
- * call unchanged; the shipped behaviour is byte-for-byte what it was. What is
- * new is that a replay can substitute a scripted resolver and a recording
- * broadcaster and watch the *real* engine decide.
- *
- * ## The rule these interfaces are under
- *
- * A port describes what the engine needs, not what the implementation happens
- * to offer. `Settings` has thirty-odd fields; [ScrobblePolicy] names the seven
- * the engine reads. That is deliberate — the narrower surface is what stops the
- * migration's later phases from quietly acquiring new coupling, and it is what
- * makes a fake readable. Adding a member here should feel like a decision.
- *
- * Nested types from the concrete classes (`KeyVault.Account`,
- * `BroadcastQueue.Entry`, `MusicBrainzVerifier.Match`) are reused rather than
- * re-declared. They are already pure data, and a parallel set of identical
- * types would need a conversion layer whose only job would be to be wrong once.
- */
-
 /** The user's switches, as the finalization path reads them. */
 internal interface ScrobblePolicy {
 	val monitoringEnabled: Boolean

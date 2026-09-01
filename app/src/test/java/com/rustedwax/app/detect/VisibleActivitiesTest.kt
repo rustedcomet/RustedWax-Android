@@ -4,10 +4,6 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The ordering that made a single last-event field wrong, measured on the
- * device 2026-08-06.
- */
 class VisibleActivitiesTest {
 
 	private val main = "com.google.android.apps.youtube.app.watchwhile.MainActivity"

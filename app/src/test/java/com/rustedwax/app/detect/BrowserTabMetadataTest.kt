@@ -7,13 +7,6 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The fields Brave publishes when the page has stopped describing a track.
- *
- * Every string here is a literal from the 2026-08-11 log, including the ones
- * that must survive: "Bring Me The Horizon - Youtopia" contains the site's name
- * and is a real song, and the suffix test has to know the difference.
- */
 class BrowserTabMetadataTest {
 
 	private val brave = "com.brave.browser"
@@ -117,10 +110,7 @@ class BrowserTabMetadataTest {
 
 	@Test
 	fun `finalization reads the channel established before the teardown bundle`() {
-		// Reproduced 2026-08-11 on three consecutive background Brave tracks:
-		// the final bundle kept the real title, replaced the channel with the
-		// origin, and dropped the duration. The track identity retained all three,
-		// but snapshot() used to ignore it and handed the resolver a blank owner.
+
 		val established = TrackIdentity(
 			title = "Krazy",
 			artist = "2Pac - Topic",

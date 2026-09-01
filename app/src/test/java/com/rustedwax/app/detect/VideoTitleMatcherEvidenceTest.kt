@@ -42,7 +42,7 @@ class VideoTitleMatcherEvidenceTest {
 	)
 
 	@Test
-	fun `log 17 short canonical works are weak evidence for only their own generation`() {
+	fun `short canonical works are weak evidence for only their own generation`() {
 		log17.forEachIndexed { index, fixture ->
 			val evidence = VideoTitleMatcher.compare(fixture.canonical, fixture.session)
 			assertEquals(fixture.id, VideoTitleMatcher.Evidence.WEAK_SHORT_CANONICAL_CORE, evidence)
@@ -127,7 +127,6 @@ class VideoTitleMatcherEvidenceTest {
 		)
 	}
 
-	/** Field failure 2026-08-14: both log strings were byte-identical emoji. */
 	@Test
 	fun `an exact emoji-only Short title is exact evidence`() {
 		assertEquals(
@@ -140,23 +139,6 @@ class VideoTitleMatcherEvidenceTest {
 		)
 	}
 
-	// ---- 2026-08-16 Brave Mix regression: two correct ids poisoned ----------
-
-	/**
-	 * `dE8D6WY6tQQ`. Its watch page is titled `Bounce`; its MediaSession
-	 * publishes `Ladii Rose ft Dej RoseGold Bounce (Official Video)`.
-	 *
-	 * The parsed-work route cannot see this one: `ft` there joins two *artists*,
-	 * so stripping the trailing feature credit takes the work with it and leaves
-	 * `Ladii Rose`. The difference was therefore graded a contradiction, the
-	 * correct address-bar id was filed as rejected, and the Mix queue's later
-	 * independent resolution of that same id was vetoed by it — a 138-of-137
-	 * second listen lost.
-	 *
-	 * It is the weak rank, not a confirmation: the caller still needs
-	 * same-generation duration corroboration before the id may be retained. What
-	 * matters is that it is no longer a *contradiction*.
-	 */
 	@Test
 	fun `a canonical title at the tail of a long presentation is weak, not contradictory`() {
 		assertEquals(
@@ -196,11 +178,6 @@ class VideoTitleMatcherEvidenceTest {
 		)
 	}
 
-	/**
-	 * `aZUbc6fCNDk`. One video, one title, one embedded channel mention that the
-	 * watch page writes as the handle and the MediaSession writes as the display
-	 * name. Every other word is identical.
-	 */
 	@Test
 	fun `a channel mention spelled as handle or display name is presentation`() {
 		val page = "Belaysha / Obsession Twerk Camp  / Choreo by Elizabet Tomas  " +

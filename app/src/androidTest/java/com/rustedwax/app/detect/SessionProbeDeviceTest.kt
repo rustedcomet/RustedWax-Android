@@ -17,55 +17,6 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/**
- * The real production path, on the device, driven by real platform callbacks.
- *
- * ## What this is
- *
- * `<redacted-private-path>` §8 lists the gap this closes: "no Android instrumented
- * test suite" and "no behavioral test driving the real private callback-to-
- * reducer/finalization path". Everything the JVM
- * parity gate proves, it proves through stand-in media classes; the translation
- * from Android callbacks into `PlaybackInput` — which is the half that lives in
- * `SessionProbe` rather than in `PlaybackReducer` — is not executed by any JVM
- * test.
- *
- * So this drives the whole chain, with nothing simulated:
- *
- * ```text
- * real MediaSession -> real platform delivery -> real MediaSessionManager
- *   -> production SessionProbe.syncControllers -> production Watch callbacks
- *   -> production PlaybackReducer -> production SessionSnapshot -> onTrackFinalized
- * ```
- *
- * `PlaybackReducer` is never called directly. Every assertion below is about
- * what came out of `onTrackFinalized` or `SessionProbe.sessions` after the
- * platform delivered a callback.
- *
- * ## The one accommodation, and its containment
- *
- * A test cannot create a `MediaSession` under Brave's package name, and
- * `NativeSourceSwitches.accepts` watches four packages and nothing else. So the
- * suite declares its own package through
- * `NativeSourceSwitches.allowForInstrumentation`, which is `internal`, empty by
- * default, and asserted empty in production by `NativeSourceSwitchesTest`. See
- * the KDoc there for why this is the narrowest seam available before Phase 4
- * makes source registration a boundary.
- *
- * The consequence is stated rather than hidden: this app's package is not a
- * native YouTube package, so the probe treats these sessions with **browser**
- * capabilities — no exact-id requirement to carry progress, no stopped
- * replacement grace, no picture-in-picture inference. The native-capability
- * halves of those branches remain JVM-only coverage, and
- * [browser_capabilities_are_what_this_suite_exercises] asserts that is what is
- * being measured rather than leaving it to be assumed.
- *
- * ## Timing
- *
- * Real clock, real `Handler`, real main looper. Playback windows are seconds and
- * assertions carry tolerance; nothing here advances a virtual clock, which is
- * exactly the point.
- */
 @RunWith(AndroidJUnit4::class)
 class SessionProbeDeviceTest {
 
@@ -159,19 +110,6 @@ class SessionProbeDeviceTest {
 		setPlaybackState(PlaybackState.Builder().setState(state, positionMs, speed).build())
 	}
 
-	/**
-	 * Fail once, clearly, when the device cannot run this suite at all.
-	 *
-	 * Without the notification-listener grant `MediaSessionManager` refuses every
-	 * query, `SessionProbe.start` records the refusal and returns, and every test
-	 * below dies of a timeout waiting for a callback that was never going to
-	 * arrive. Eleven identical "timed out waiting for playback to be observed"
-	 * failures do not say what is wrong; this does.
-	 *
-	 * Deliberately a failure rather than an `Assume`: a suite that quietly skips
-	 * itself when the permission is missing reports green having proven nothing,
-	 * which is the exact substitution this gate exists to prevent.
-	 */
 	private fun requireNotificationAccess() {
 		val enabled = android.provider.Settings.Secure.getString(
 			context.contentResolver,
@@ -278,9 +216,7 @@ class SessionProbeDeviceTest {
 
 	@After
 	fun tearDown() {
-		// Sessions first, then let the platform deliver the destructions, and only
-		// then take the probe down: stopping first would leave the releases to be
-		// observed by whichever probe starts next.
+
 		onMain {
 			sessions.forEach {
 				runCatching { it.isActive = false }
@@ -438,33 +374,6 @@ class SessionProbeDeviceTest {
 		assertEquals("Stopped Track", listenFor("Stopped Track").title)
 	}
 
-	/**
-	 * A real replacement, carried through to one finalized listen.
-	 *
-	 * ## The gate
-	 *
-	 * `<redacted-private-path>`: "no duplicate transaction after MediaSession
-	 * recreation". The carry store, the tombstone, the timers and the replacement's
-	 * claim all live in the Android half, so no reducer test can reach this.
-	 *
-	 * ## The production fault this now covers
-	 *
-	 * Android keeps returning a released controller from `getActiveSessions` for a
-	 * short time. The departure sweep removed the watch, the dead token was offered
-	 * again, and `syncControllers` built a **second** watch over one logical
-	 * listen — measured here as two track-change lines, "after 5s played" from the
-	 * watch holding the carried progress and "after 2s played" from the resurrected
-	 * one, with the winner varying run to run. `SessionProbe.destroyedTokens` now
-	 * refuses a token the platform has already announced as destroyed, which is
-	 * what makes the assertions below deterministic rather than a coin toss.
-	 *
-	 * ## The full sequence
-	 *
-	 * A plays and is destroyed; A parks. B appears and claims. B advances, then
-	 * ends with a track change. Exactly one listen must come out, carrying the
-	 * combined measurement and one stable instance identity — and nothing further
-	 * may arrive afterwards.
-	 */
 	@Test
 	fun a_real_session_replacement_produces_exactly_one_combined_listen() {
 		val first = newSession("carry-1")
@@ -571,15 +480,6 @@ class SessionProbeDeviceTest {
 	 * listen for one recreated session.
 	 */
 
-	/**
-	 * The tombstone must not collapse two genuinely live sessions.
-	 *
-	 * Two browser tabs are legitimate, and `<redacted-private-path>` calls them
-	 * deliberately ambiguous rather than wrong. A rule keyed on the *package*
-	 * would break them to fix a lifecycle bug; the rule is keyed on the session
-	 * token instance, and this is what proves the difference rather than asserting
-	 * it. Nothing is destroyed here, so no tombstone may apply.
-	 */
 	@Test
 	fun two_live_sessions_from_one_package_are_both_watched() {
 		val tabOne = newSession("tab-1")
@@ -672,15 +572,6 @@ class SessionProbeDeviceTest {
 		)
 	}
 
-	/**
-	 * The idle deadline, on the real clock.
-	 *
-	 * The JVM gate compares this against the reference as a declared divergence;
-	 * what it cannot show is that the real `Handler` actually fires it. A source
-	 * that publishes a length, plays past it and then says nothing must be ended
-	 * rather than left accruing — the 2026-08-12 case where a 3:06 song accrued
-	 * 1h47m.
-	 */
 	@Test
 	fun a_silent_listen_past_its_own_length_is_ended_by_the_real_timer() {
 		val session = newSession("idle")

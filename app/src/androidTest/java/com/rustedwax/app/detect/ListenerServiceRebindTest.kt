@@ -9,44 +9,6 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/**
- * What the real listener service built, in production, before this test ran.
- *
- * ## The boundary, and how much of it is reachable in-process
- *
- * `SessionProbeDeviceTest` has a fast component test that calls `probe.stop()`
- * and `probe.start()` directly. That is *not* this boundary: it never executes
- * `RustedWaxListenerService.onListenerConnected`, so it proves nothing about the
- * wiring that callback rebuilds. The audit called that out, and the component
- * test has been renamed to say what it does.
- *
- * The disconnect/reconnect half cannot be driven from inside this process.
- * `NotificationListenerService.requestRebind` is documented for use *after*
- * `requestUnbind()`, and measured here it is a no-op while the listener is still
- * bound: 20 s of polling produced no unbind, no reconnect and no new probe. The
- * platform log for that run shows the only rebind of the day arriving when the
- * instrumentation process itself died — which is the point: the event is a
- * process/binding boundary, and a test living inside that process cannot
- * provoke it and survive to assert on it.
- *
- * That half is therefore orchestrated from the host by
- * `tools/device/process-restart.sh`, with `am force-stop`, and its result is
- * reported separately rather than claimed here.
- *
- * ## What this file does assert
- *
- * `ProbeHolder` is only ever written by `RustedWaxListenerService.startProbe`.
- * So a probe present here, carrying its five engine callbacks, is direct
- * evidence that the production `onListenerConnected` path ran on this device and
- * built what it is supposed to build. That is a real production-path assertion;
- * it is simply not the *reconnect* assertion, and it does not pretend to be.
- *
- * ## Deliberately no MediaSession
- *
- * The service wires the **real** `FinalizeTrackUseCase` through `FinalizationRuntime`,
- * the path holding the owner's posting key. A test that made a listen finalize
- * through it could write to an immutable chain. Nothing here publishes playback.
- */
 @RunWith(AndroidJUnit4::class)
 class ListenerServiceRebindTest {
 

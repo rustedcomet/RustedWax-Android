@@ -37,16 +37,6 @@ internal fun finalizedPresentation(
 	album = established.album ?: currentAlbum,
 )
 
-/**
- * Keep the first address-bar id for a track until it is disproved, then let the
- * first later non-rejected id become that track's observed generation.
- *
- * Chromium commonly publishes the outgoing URL for the first callback of the
- * successor track. Freezing it forever meant the correct URL that arrived a
- * few seconds later could be latched, yet could never satisfy the
- * same-generation corroboration used for short page titles such as
- * `Sleepwalking` versus `Bring Me The Horizon - Sleepwalking`.
- */
 internal fun resolverContextWithObservedUrl(
 	context: ResolverContext,
 	url: UrlEvidence.Evidence,
@@ -86,7 +76,7 @@ internal fun resolverContextWithObservedUrl(
  * Browser sessions remain the v0.8.15 path. v0.9 additionally watches the two
  * native YouTube packages only when their independent persisted opt-ins are on.
  *
- * Position handling here is the same extrapolation Phase 3 needs: PlaybackState
+ * Position handling extrapolates from the last published PlaybackState:
  * reports a position sampled at `lastPositionUpdateTime`, so live position is
  * `position + (now - sampledAt) * speed`. We also accumulate *played
  * milliseconds* across play/pause, which is what the 60% rule consumes and is
@@ -143,40 +133,6 @@ class SessionProbe(
 
 	private val watches = mutableMapOf<String, AndroidSessionBinding>()
 
-	/**
-	 * Session tokens whose session the platform has already destroyed.
-	 *
-	 * ## The production fault this exists for
-	 *
-	 * `watches` is keyed on `sessionToken.toString()`, and [syncControllers]
-	 * creates a `AndroidSessionBinding` for any key it does not already hold. Between those two
-	 * facts sits an Android behaviour: a controller whose session has been
-	 * released can still be returned by `getActiveSessions` for a short while
-	 * afterwards. The departure sweep removes the watch, the next active-session
-	 * callback re-lists the same dead token, and the probe builds a **second**
-	 * watch for a session that no longer exists.
-	 *
-	 * Measured on <redacted-device-model> / API 31 during the replacement scenario: two watches
-	 * for one package, both reaching the track-change branch — the log shows
-	 * "track change after 5s played" from the one holding the carried progress and
-	 * "after 2s played" from the resurrected one — and which of them reached
-	 * `onTrackFinalized` varied run to run. `<redacted-private-path>` gates on "no
-	 * duplicate transaction after MediaSession recreation"; a nondeterministic
-	 * second watch over one logical listen is exactly that risk.
-	 *
-	 * ## Why a token tombstone rather than a package rule
-	 *
-	 * Two live sessions from one package are **legitimate** — two browser tabs —
-	 * and the audit is explicit that they are deliberately ambiguous rather than
-	 * wrong. Anything that collapsed them by package would break real multi-tab
-	 * behaviour to fix a lifecycle bug. A token identifies one session instance,
-	 * so refusing a token the platform has already announced as destroyed rejects
-	 * exactly the resurrection and nothing else: a genuine second tab arrives with
-	 * a token of its own and is unaffected.
-	 *
-	 * Bounded, because a long monitoring run would otherwise accumulate one entry
-	 * per session for the life of the process.
-	 */
 	private val destroyedTokens = object : LinkedHashMap<String, Unit>(16, 0.75f, false) {
 		override fun removeEldestEntry(eldest: Map.Entry<String, Unit>): Boolean =
 			size > MAX_REMEMBERED_DESTROYED_TOKENS
@@ -418,17 +374,6 @@ class SessionProbe(
 	}
 
 	/**
-	 * Tear the probe down.
-	 *
-	 * @param finalizeTracks whether tracks still in flight get one last chance
-	 * to score. True when the *system* ends things (session gone, listener
-	 * disconnected) — the track really did end, and dropping it would lose a
-	 * legitimate scrobble. **False when the user presses Stop**: a Stop button
-	 * that writes to an immutable chain on its way out is a bad Stop button, and
-	 * without this flag `dispose()` would do exactly that for any track already
-	 * past the threshold.
-	 */
-	/**
 	 * Ask the source which of its live listens an observation belongs to.
 	 *
 	 * The host's whole part is here: collect immutable facts about the listens it
@@ -491,8 +436,7 @@ class SessionProbe(
 		// A vanished epoch-scoped controller may still have a pending continuation
 		// even though no AndroidSessionBinding remains in the map. Reconnect/Stop clears it too.
 		SourceRegistry.epochScopedPackages.forEach(::clearPackageState)
-		// Nothing observed before a Stop may survive it — including play time
-		// waiting to be handed to a session that no longer exists.
+
 		if (!finalizeTracks) {
 			TrackProgressCarry.clear()
 		}
@@ -831,27 +775,11 @@ class SessionProbe(
 		/** The key this watch is filed under, and the identity a tombstone names. */
 		val sessionKey: String = controller.sessionToken.toString()
 
-		/**
-		 * The source this listen belongs to, chosen once and never re-asked.
-		 *
-		 * `<redacted-private-path>` Phase 4: source-specific interpretation lives in
-		 * adapters, and this class becomes the Android registry that routes to them.
-		 * Selection happens **here**, at watch creation, and nothing below this line
-		 * asks what kind of source it got — it asks the adapter what its observations
-		 * mean, and asks the declared capabilities what its transport does.
-		 */
 		val adapter: SourceAdapter =
 			SourceRegistry.forWatch(
 				packageName, appLabel, evidenceCoordinator, evidenceSourceSession,
 			)
 
-		/**
-		 * Address-bar, notification and screen-scan evidence describes this listen.
-		 *
-		 * The successor to the former source-kind branch at every observation-routing site — not a
-		 * renaming of it: a source declares this, so a future one may prove itself by
-		 * package while still being observed through a host surface, or the reverse.
-		 */
 		val observesHostScreenEvidence: Boolean
 			get() = adapter.evidenceCapabilities.publishesHostScreenEvidence
 		// Capture at AndroidSessionBinding construction. Reading the current epoch while finalizing
@@ -873,8 +801,8 @@ class SessionProbe(
 			get() = acceptsLiveEvidence && listen.transport == TransportState.PLAYING
 
 		/**
-		 * Always true since Phase 4 — non-browser sessions are no longer
-		 * watched at all. Kept because the payload and the UI still read it,
+		 * Always true for observed sessions because unsupported packages are not
+		 * watched. Kept because the payload and the UI still read it,
 		 * and because a future per-app allowlist would put it back to work.
 		 */
 		val isTarget: Boolean = acceptsPackage(packageName)
@@ -890,20 +818,6 @@ class SessionProbe(
 		 */
 		private var taintedReason: String? = null
 
-		/**
-		 * The Confirmed identity captured while this track was actually
-		 * playing, kept for the track's lifetime.
-		 *
-		 * PHASE0's "resolve identity at finalize" rule is right for
-		 * notification hints (they arrive late) and exactly wrong for
-		 * address-bar evidence, which is right at track *start* and stale at
-		 * track *end*. Resolving from live evidence at finalize produced two
-		 * on-chain failures on 2026-07-24: a track that lost its video id
-		 * because the user had already scrolled to the next short (payload got
-		 * no url, no category, wrong kind), and two different songs broadcast
-		 * with the *same* url because one finalized while the bar showed the
-		 * other. So: latch on first confirmation, spend at finalize.
-		 */
 		private var latchedVideo: YouTubeProbe.Identity.Confirmed? = null
 
 		/**
@@ -954,17 +868,6 @@ class SessionProbe(
 		private var metadata: MediaMetadata? = controller.metadata
 		private var state: PlaybackState? = controller.playbackState
 
-		/**
-		 * The deterministic half of this watcher, and everything it measures.
-		 *
-		 * `<redacted-private-path>` Phase 3: progress and speed accounting, metadata
-		 * refinement and track transitions, destruction/recreation continuation,
-		 * finalization decisions and picture-in-picture measurement all live in
-		 * [PlaybackReducer] now. What is left here is the Android registry —
-		 * translating `MediaController` callbacks into inputs and performing the
-		 * effects the reducer asks for — plus the identity and evidence stack,
-		 * which the audit types in Phase 6.
-		 */
 		private val driver = MediaSessionDriver(
 			reducer = PlaybackReducer(
 				adapter.playbackCapabilities,
@@ -1052,20 +955,6 @@ class SessionProbe(
 		)
 
 		/**
-		 * Give this listen until its own content runs out, plus a grace period.
-		 *
-		 * Nothing ends a browser listen except a track change, a navigation or a
-		 * closed tab — Brave publishes `STATE_STOPPED` zero times in the entire
-		 * retained field log — so a video that finishes while nobody is watching
-		 * keeps a `PLAYING` transport and an accruing clock indefinitely. Measured
-		 * 2026-08-12: one 3:06 song accrued 1h47m that way.
-		 *
-		 * Re-armed after every observation, so any transport or metadata event
-		 * pushes the deadline out. Only a source that goes completely silent lets
-		 * it expire, and even then the reducer re-checks that the item's length is
-		 * genuinely used up before ending anything.
-		 */
-		/**
 		 * The best length available for this listen, for the idle deadline only.
 		 *
 		 * The session's own `DURATION` first — but a browser publishing none at all
@@ -1090,16 +979,6 @@ class SessionProbe(
 
 		private fun rearmIdleFinalization() = idleFinalization.rearm()
 
-		/**
-		 * The video's own page arrived, so a length may now be known.
-		 *
-		 * The precise deadline needs the item's length, and a browser that publishes
-		 * no `DURATION` at all is ordinary — measured 2026-08-12, Brave listed
-		 * `DURATION` among the *unset* keys for a whole listen. The length then comes
-		 * from the latched video's own cached page, which is fetched asynchronously,
-		 * and until this existed nothing re-derived the deadline when it landed: the
-		 * listen kept the blunt fifteen-minute ceiling it was armed with, or nothing.
-		 */
 		private var videoFactsRequestGeneration = 0L
 		private var videoFactsRequestSignature: Pair<Long, String>? = null
 
@@ -1329,7 +1208,6 @@ class SessionProbe(
 			}
 		}
 
-
 		init {
 			adapter.bindTrackInstance(mediaSessionAdInstance(), trackInstanceEstablishedAtMillis)
 			controller.registerCallback(callback, handler)
@@ -1419,9 +1297,7 @@ class SessionProbe(
 			// same predicate the claim will apply — asked here against the carry's
 			// own stopping point so the log states the wait it will actually keep.
 			val resumable = TrackProgressCarry.holdsResumeWindow(identityKey, progress)
-			// §4.1: a session that was never named must not name itself on the way
-			// out either. Measured 2026-08-10 — this was the last line an
-			// unrelated Chrome video still produced after the other routes closed.
+
 			logDeparture(
 				"$packageName [$reason] waiting " +
 					if (resumable) {
@@ -1626,12 +1502,7 @@ class SessionProbe(
 					durationMs = snapshot.durationMs,
 				)
 			}
-			// §4.1. The finalize still happens — policy needs the snapshot to
-			// decide, and it will refuse this one for not being YouTube — but the
-			// *line* names the track, and for an unproven session that track is a
-			// page the user watched somewhere else. Measured 2026-08-10, after the
-			// metadata, identity, playback and arrival routes were closed, this one
-			// still wrote `w3schools.com/html/mov_bbb.mp4` into the exportable log.
+
 			if (mayRecordIdentifyingDetail()) {
 				EventLog.append(
 					"finalize",
@@ -1859,15 +1730,6 @@ class SessionProbe(
 				requestVideoFacts(live.videoId)
 			}
 
-			// Corroborate the latch once a page is known: what it says must match
-			// what the session is playing. A clear mismatch means the bar was
-			// already showing some other video when we latched — drop the id
-			// rather than broadcast a wrong url.
-			//
-			// Two independent checks, because either can be unavailable. The
-			// title is the stronger signal but absent whenever the fetch failed;
-			// the duration survives that, and it is what the 2026-07-29
-			// wrong-url case turned on. See [durationsDisagree].
 			var titleCorroboratedObservedId = false
 			latchedVideo?.let { l ->
 				val known = knownVideoFor?.invoke(l.videoId)
@@ -2009,28 +1871,6 @@ class SessionProbe(
 			trackIdentity.isUsable && isPlaying(state) &&
 				trackInstanceEstablishedAtMillis <= atMillis
 
-		/**
-		 * The ad flag Android itself publishes — `<redacted-private-path>` §3.4.
-		 *
-		 * `METADATA_KEY_ADVERTISEMENT` is set by the player on a session that is
-		 * playing an ad. RustedWax read every other ad signal and not this one,
-		 * which is the cheapest and least ambiguous of them: an ad the OS has
-		 * labelled is not weaker evidence than one inferred from a screen scrape,
-		 * so it is the same hard veto rather than a hint.
-		 *
-		 * Unlike the visible-UI and notification routes this deliberately **does**
-		 * apply to native sessions. Those routes skip native because they read a
-		 * browser's chrome, which says nothing about what the YouTube app is
-		 * doing; this reads the session's own metadata, which says exactly that.
-		 * The corroborating evidence is in `debug/`: finalized titles like
-		 * `094 GP EN 16x9 21s 11` are ad creative slate names that reached
-		 * finalization as if they were content.
-		 *
-		 * Only ever set, never cleared: the flag going away means the ad ended and
-		 * the *next* track is content, and that next track gets a fresh AndroidSessionBinding or a
-		 * fresh track start. Clearing it here would let the last frame of an ad
-		 * launder the listen it interrupted.
-		 */
 		private fun noteAdvertisementMetadata(md: MediaMetadata?) {
 			val metadata = md ?: return
 			if (explicitAdSignal != null) return
@@ -2062,7 +1902,6 @@ class SessionProbe(
 		/** This listen's own handle, for [BrowserScanBinding]. */
 		val bindingKey: Long get() = listen.instanceToken
 
-		/** The listen has ended; evidence observed now cannot belong to it. */
 		val listenFinalized: Boolean get() = listen.finalized
 
 		/** Transport state, for the refusal line only — see [BrowserScanBinding]. */
@@ -2127,19 +1966,6 @@ class SessionProbe(
 		private fun boundHint(md: MediaMetadata?): NotificationHints.Hint? =
 			adapter.hostNotificationHint(md?.asFields(), soleHostSession)
 
-		/**
-		 * One tick of picture-in-picture evidence for a session the MediaSession
-		 * cannot measure.
-		 *
-		 * The gate — credit only when the session publishes no usable progress of
-		 * its own — is the reducer's, so a regular video in PiP is measured
-		 * normally and never double-counted.
-		 *
-		 * Measured 2026-08-05 on "BECKY G, MAYORES": the MediaSession carried
-		 * `TITLE` and `DURATION = 50000` and then reported `state=NONE`, `pos=0`,
-		 * `isActive=false` for the whole session. Title and duration are there;
-		 * only progress is missing, which is exactly what this supplies.
-		 */
 		fun creditPipInference(nowMillis: Long, playing: Boolean) {
 			if (!acceptsLiveEvidence) return
 			dispatch(
@@ -2155,17 +1981,6 @@ class SessionProbe(
 
 		private fun speedOf(ps: PlaybackState?): Double = speedFactor(ps?.playbackSpeed)
 
-		/**
-		 * "…, first seen 94s in", when the player was already well into the track
-		 * when RustedWax first saw it. Everything before that point was never
-		 * published to us and can never have been measured, so a short `played`
-		 * against a long duration is an accurate report rather than a fault.
-		 * Silent for the ordinary case of a track seen from its start.
-		 *
-		 * The evidence itself is [SessionSnapshot.unobservedLeadInMs], so the
-		 * finalize line and the **Not logged** reason cannot disagree about
-		 * whether a listen was resumed.
-		 */
 		private fun unobservedLeadInNote(snapshot: SessionSnapshot): String {
 			val unobserved = snapshot.unobservedLeadInMs
 			if (unobserved <= 0) return ""
@@ -2305,36 +2120,6 @@ class SessionProbe(
 		private fun durationOf(md: MediaMetadata?): Long? =
 			MetadataDump.longOrNull(md?.asFields(), MediaMetadata.METADATA_KEY_DURATION)
 
-		/**
-		 * The length this track has established, which a bundle that omits
-		 * DURATION does not erase.
-		 *
-		 * A bundle without DURATION is silence about the length, not a statement
-		 * that the track has none. YouTube's web player publishes exactly that as
-		 * a video ends, and republishes it intermittently while one plays —
-		 * measured 2026-08-10, "Happy Song" reported 236981 ms for its whole
-		 * 247-second watch and then dropped it half a second before the track
-		 * changed:
-		 *
-		 *   21:13:51  DURATION = 236981   pos=236974
-		 *   21:13:52  unset: … DURATION …
-		 *   21:14:02  [finalize] Happy Song — played 247s of 0s
-		 *
-		 * At that checkpoint, no length meant no percentage to clear a threshold
-		 * and the resolver refused before using other finalized fields, so a
-		 * complete listen produced nothing:
-		 * "title, owner/channel and duration were not all available for lookup".
-		 * The same silence also makes the latch's own corroboration unavailable,
-		 * so a page whose title is a short form of the session's kept failing to
-		 * corroborate and the track's identity was wiped pass after pass, ending
-		 * in "source not proven YouTube".
-		 *
-		 * [TrackIdentity.refinedWith] has kept the established length all along —
-		 * it is what decides these updates describe the same track — so this
-		 * reads a value the session already holds rather than inventing one. A
-		 * published length always wins; this is consulted only when the current
-		 * bundle says nothing.
-		 */
 		private fun establishedDurationMs(md: MediaMetadata?): Long? =
 			listen.establishedDurationMs(durationOf(md))
 
@@ -2410,23 +2195,7 @@ class SessionProbe(
 				identity = identity,
 				resolverContext = frozenResolver,
 				notificationHint = boundHint(md),
-				// Diagnostics only, and only for the bundle that is actually finalized.
-				//
-				// `publish()` builds a snapshot for every watched session on every tick —
-				// the activity polls once a second — while `freezeAndReport()` builds one
-				// per finished listen. `FinalizedTrack.rawLines` is the only reader, so a
-				// live snapshot was paying for a field nothing left alive would read: the
-				// Now card stopped drawing the raw dump in v0.11.1b and nothing replaced
-				// that consumer.
-				//
-				// The dump is not cheap. It asks every non-text extra for text, and
-				// `BaseBundle` answers a type mismatch by printing a whole
-				// `ClassCastException` stack trace; it also marshals every artwork bitmap
-				// across Binder. YouTube Music publishes both; the YouTube app publishes
-				// neither, which is why only one of them made this app lag. Measured on
-				// the field device on 2026-08-26: 1,532 `W/Bundle` stack traces in twelve
-				// seconds, 99% of everything the process logged, on the main thread this
-				// single-process app shares with Compose.
+
 				metadataLines = if (finalizedTrack) MetadataDump.dump(md?.asFields()) else emptyList(),
 				firstObservedPositionMs = firstSeenPositionMs,
 				trackStartedAtEpochSec = trackStartedAtEpochSec,
@@ -2550,13 +2319,7 @@ class SessionProbe(
 		 * enrichment. A later active callback may still latch a different,
 		 * corroborated id; only this contradictory pass fails closed.
 		 */
-		/**
-		 * Why a latched id was dropped, and whether that is evidence *against* it.
-		 *
-		 * @param contradicts the page named a different video, so the id follows
-		 * the track as rejected. False when the page simply could not establish
-		 * the id — the latch is still dropped, but nothing is held against it.
-		 */
+
 		data class LatchDisagreement(
 			val reason: String,
 			val contradicts: Boolean,
@@ -2576,21 +2339,6 @@ class SessionProbe(
 			val titleOnly: Boolean = false,
 		)
 
-		/**
-		 * Not confirming an id is not the same as disproving it.
-		 *
-		 * Measured 2026-08-10: tapping "Happy Song" in a playlist read the address
-		 * bar before the session had published a duration, so the page's short
-		 * title was only weak evidence and `GBRAnuT48qo` was filed as rejected.
-		 * Four minutes later the resolver proved that same id by title + duration
-		 * + the watch page's own channel — a strictly stronger join than this one
-		 * — and a 225-of-236-second listen was thrown away for "video id
-		 * GBRAnuT48qo was rejected while the track was active".
-		 *
-		 * The latch is still dropped in both cases: a weak title may never confirm
-		 * an id. What changes is that insufficiency no longer outranks the
-		 * stronger evidence that arrives afterwards.
-		 */
 		fun latchDisagreement(
 			titleEvidence: VideoTitleMatcher.Evidence?,
 			weakEvidenceAllowed: Boolean,
@@ -2690,22 +2438,6 @@ class SessionProbe(
 			VideoTitleMatcher.Evidence.CONTRADICTION -> false
 		}
 
-		/**
-		 * Second, independent corroboration of a latched id: does the page's length
-		 * match what the session says it's playing?
-		 *
-		 * Added because the title check **fails open**. On 2026-07-29 the address
-		 * bar was 7 seconds late advancing a playlist, so a Danger Man track latched
-		 * the *previous* entry's id — and the page fetch for that id had already
-		 * timed out, so there was no title to compare and the stale id survived onto
-		 * the chain with a `url` pointing at Daddy Yankee's "Con Calma". The
-		 * durations were 226 s against 193 s: the mismatch was sitting right there.
-		 *
-		 * Tolerance is both absolute *and* proportional, and it has to be both.
-		 * `lengthSeconds` and the session's `DURATION` routinely differ by a second
-		 * of rounding, so a flat threshold alone is too noisy; a percentage alone
-		 * would let a 30-second disagreement pass on a two-hour video.
-		 */
 		fun durationsDisagree(sessionMs: Long?, pageSeconds: Long?): Boolean {
 			if (sessionMs == null || sessionMs <= 0 || pageSeconds == null || pageSeconds <= 0) {
 				return false

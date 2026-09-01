@@ -15,7 +15,7 @@ The detection pipeline, end to end.
    the session watcher. On Start, reconnect or process rebuild it first replays currently active
    browser media notifications, then discovers sessions; an unchanged background notification does
    not have to be posted a second time. No foreground service, no persistent notification.
-3. When an accepted browser—or an independently enabled native YouTube package—plays media, the OS
+3. When an accepted browser or native YouTube package plays media, the OS
    media session exposes title, artist, album, duration and playback position. The app accumulates
    content played against the configured threshold (60% by default).
 4. When a track ends, the app first requires one verified YouTube video id—either the matching exact
@@ -34,7 +34,7 @@ The detection pipeline, end to end.
    healthy independent node has included it in a block. A transaction seen relaying in an
    independent healthy node's mempool is reported separately and is not retried, to avoid creating
    a permanent duplicate. Acceptance with no available confirmation is also reported separately; see
-   [Why a scrobble is confirmed, not assumed](#why-a-scrobble-is-confirmed-not-assumed).
+   [Scrobble rules](SCROBBLE_RULES.md#retry).
    Definite failures and offline sends are queued.
 5. When it *doesn't* broadcast, the reason lands in the **Not logged** tab. A scrobbler that
    silently declines things is indistinguishable from a broken one. One exception, added in

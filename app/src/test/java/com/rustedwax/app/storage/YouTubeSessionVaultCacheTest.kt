@@ -7,24 +7,6 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The session the status poll reads is decrypted once, not once a second.
- *
- * `EncryptedSharedPreferences` decrypts on every `get`. One
- * [YouTubeSessionVault.Session] is four of them — an AES-256-SIV key lookup and
- * an AES-256-GCM value decrypt each, against the Android Keystore.
- * `MainActivity`'s status poll reads the session every second on the main
- * thread, for as long as the composition is alive, which includes while the UI
- * is not on screen.
- *
- * Measured on the field device on 2026-08-26 with YouTube Music playing and
- * RustedWax hidden, a `simpleperf` call graph attributed **58.88%** of the poll
- * coroutine's main-thread time to `YouTubeSessionVault.getSession`.
- *
- * The cache holds only what `Session` already exposes — a display label and two
- * timestamps. The negative controls below are the point of the file: the
- * credential is still decrypted on every call, and every writer drops the cache.
- */
 class YouTubeSessionVaultCacheTest {
 
 	/** A `SharedPreferences` that counts reads and actually stores writes. */

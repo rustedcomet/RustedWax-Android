@@ -330,15 +330,6 @@ class ShadowIsolationReplayTest : ReplayScenarioTest() {
 		)
 	}
 
-	/**
-	 * Cancellation is a terminal outcome, and exactly one of them.
-	 *
-	 * `<redacted-private-path>`'s rule is "exactly one typed outcome per finalized
-	 * target presented to an initialized engine". `CancellationException` was the
-	 * one path that produced none: a teardown racing an in-flight resolution
-	 * ended the finalization silently. Cancelling the scope while the
-	 * asynchronous half is still queued is exactly that race, made deterministic.
-	 */
 	@Test
 	fun `a cancelled finalization files exactly one Ignored outcome`() {
 		val dispatcher = DeferredDispatcher()

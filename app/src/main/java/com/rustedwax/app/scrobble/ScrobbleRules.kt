@@ -33,70 +33,8 @@ object ScrobbleRules {
 	/** The extension's `scrobblePercent` default. */
 	const val DEFAULT_THRESHOLD = ListenPolicyDefaults.THRESHOLD
 
-	/**
-	 * The ordinary minimum. Applies to the `/watch` path.
-	 *
-	 * It no longer applies to an unproven Short. A clip on a `/shorts/` path that
-	 * cannot be shown to be a real public video is refused outright rather than
-	 * held to this floor — see [SHORT_MIN_DURATION_SECONDS].
-	 *
-	 * It was added because YouTube pre-roll ads publish their own media session
-	 * with the *video's* title and a ~6 s duration (observed in PHASE0 run 1),
-	 * which would otherwise scrobble the song on every ad.
-	 */
 	const val MIN_DURATION_SECONDS = 30L
 
-	/**
-	 * The minimum for a **verified** YouTube short.
-	 *
-	 * ### Why shorts get their own floor
-	 *
-	 * The 2026-07-29 session sorted every 30 s-floor rejection by URL path:
-	 * all 24 were `/shorts/`, none were `/watch`. The floor was doing nothing
-	 * on the watch path and blocking a third of the shorts feed — 22 of 64
-	 * unique shorts produced no logbook entry, which is exactly the "where are
-	 * my entries?" failure this floor was never meant to cause.
-	 *
-	 * Ten seconds rather than fifteen because the blocked durations clustered
-	 * hard at the bottom: `7, 10, 10, 10, 10, 10, 11, 12, 12, 15, 16, …`. A 10 s
-	 * floor recovers 23 of the 24; 15 s recovers only 15.
-	 *
-	 * ### Why it is scoped by *path*, not by kind
-	 *
-	 * The ad-guard rationale above is specifically about pre-roll, which is a
-	 * `/watch` phenomenon. Scoping the exception to a proven `/shorts/` URL
-	 * leaves the case the floor was written for completely untouched.
-	 *
-	 * ### Why "verified" is load-bearing, and what it actually means
-	 *
-	 * Length is a terrible ad guard — an ad and a real 12-second clip are the
-	 * same length. v0.8.0 therefore gated the exception on the video resolving
-	 * on its watch page, on the reasoning that an ad creative has no public
-	 * watch page.
-	 *
-	 * **That was wrong, and a Chrome session proved it.** YouTube serves shorts
-	 * ads at genuine `/shorts/` URLs backed by genuine watch pages, so an 18 s ad
-	 * cleared both halves and reached the chain. The gate is now
-	 * [com.rustedwax.app.enrich.VideoFacts.provenPublicVideo] — resolved *and*
-	 * publicly listed — because an ad creative is unlisted by construction while
-	 * a short reached by scrolling the feed is public by construction.
-	 *
-	 * ### Why an unproven Short is refused rather than held to 30 seconds
-	 *
-	 * Falling back to [MIN_DURATION_SECONDS] looked conservative and was not. It
-	 * is the v0.8.7 leak in another shape: it admitted anything unproven purely
-	 * on length, and a 42-second shorts creative is longer than 30 seconds. So a
-	 * proven `/shorts/` path is now either proven public — 10-second floor — or
-	 * refused. There is no third state in which something unproven scrobbles
-	 * because it happened to run long.
-	 *
-	 * The cost, stated plainly: enrichment failed on ~12% of ids in field
-	 * testing, and decision D8 requires it stay non-blocking. So roughly one in
-	 * eight legitimate short clips is now refused rather than merely held to a
-	 * higher floor. That is the right direction to fail — a missed entry can be
-	 * earned again by watching, a false entry is permanent — and it applies only
-	 * to Shorts, which are off by default anyway.
-	 */
 	const val SHORT_MIN_DURATION_SECONDS = 10L
 
 	/**
@@ -105,7 +43,7 @@ object ScrobbleRules {
 	 * This is diagnostic evidence, not a rejection rule. A qualifying first
 	 * viewing remains earned however long the browser leaves the same short
 	 * active, and [capForKind] already limits every video to one transaction.
-	 * Field data put ordinary end-of-track timing overrun at no more than 120%,
+	 * Regression evidence puts ordinary end-of-track timing overrun below 125%,
 	 * so 125% leaves a small margin before naming a probable loop.
 	 */
 	const val SHORT_LOOP_INFERENCE_PROGRESS = 1.25
@@ -121,19 +59,6 @@ object ScrobbleRules {
 		val shouldScrobble: Boolean get() = percentages.isNotEmpty()
 	}
 
-	/**
-	 * The cheap rejection, before any network call.
-	 *
-	 * @param progressSurfaceLost the Short's progress surface went away while it
-	 * was still playing, so no percentage can honestly be quoted. This has to be
-	 * handled *here* as well as in [decide]: a sub-threshold Short is rejected on
-	 * this path and never reaches [decide] at all, so the honest wording added
-	 * there alone was unreachable on the common path and the log still printed
-	 * `played N%` for something that was never measured (`<redacted-private-path>`
-	 * §3.2).
-	 * @return a reason to skip now, or null when the track deserves enrichment
-	 * and a full [decide].
-	 */
 	/**
 	 * Why a short `played` against a long duration is not a lost measurement.
 	 *
@@ -189,16 +114,6 @@ object ScrobbleRules {
 		return null
 	}
 
-	/**
-	 * The full decision, once enrichment has had its say.
-	 *
-	 * @param durationMs the *effective* duration — the media session's, or the
-	 * watch page's `lengthSeconds` when the session published none
-	 * @param isShort the address bar proved a `/shorts/` path
-	 * @param videoResolved the watch page returned a well-formed `videoDetails`
-	 * @param videoUnlisted the page said `isUnlisted`, or didn't say — null when
-	 * the field was absent, which fails the gate the same way `true` does
-	 */
 	fun decide(
 		playedMs: Long,
 		durationMs: Long?,
@@ -211,9 +126,7 @@ object ScrobbleRules {
 		inferredMs: Long = 0,
 		unobservedLeadInMs: Long = 0,
 	): Decision {
-		// The optional accessibility service observed YouTube's own visible ad
-		// UI and bound it to this exact track instance. This is the mobile analogue of
-		// the desktop connector refusing while `.ad-showing` is present.
+
 		explicitAdSignal?.let {
 			return Decision(emptyList(), explicitAdReason(it))
 		}
@@ -284,17 +197,6 @@ object ScrobbleRules {
 	private fun explicitAdReason(signal: String): String =
 		"YouTube's visible UI marked this track as an ad (\"$signal\")"
 
-	/**
-	 * Shared by both stages so a Short refused early and a Short refused late
-	 * read identically in the log.
-	 *
-	 * A percentage here would be a claim we cannot support. When the progress
-	 * surface is gone there is no measurement at all, not a measurement of zero,
-	 * and the two must not read alike: on 2026-08-05 a picture-in-picture session
-	 * reported "played 0%, below 60% threshold" and was indistinguishable from a
-	 * parser bug for most of a day. It refuses either way — the difference is
-	 * only whether the log tells the truth about why.
-	 */
 	private fun progressSurfaceLostReason(playedMs: Long, inferredMs: Long): String = if (
 		inferredMs > 0
 	) {
@@ -342,41 +244,6 @@ object ScrobbleRules {
 			"the only thing that tells a real short from an ad creative, so it is refused"
 	}
 
-	/**
-	 * The 160% double-listen only applies to songs with no loop evidence.
-	 *
-	 * A deliberate deviation from upstream, which doubles every kind. The rule
-		 * exists to record a genuine second listen — but YouTube shorts auto-loop,
-		 * so any short watched to 1.6× its 40 seconds produced two transactions for
-		 * one sitting (observed on-chain 2026-07-24: the same clip broadcast twice
-		 * in one block at 100% and 76%). The `/shorts/` source stays capped even
-		 * when its content is correctly classified as a song. A strict
-		 * end-to-start position reset applies the same cap to a watch-path song;
-		 * a separate later session earns its own new scrobble.
-	 *
-	 * ## The second transaction needs more than elapsed time
-	 *
-	 * [positionCorroborated] is false when the session never published a readable
-	 * position for this listen — the transport said `pos=-1` from the first
-	 * callback to the last. Everything then rests on wall clock, and wall clock
-	 * keeps running whether or not anyone is still watching.
-	 *
-	 * Measured 2026-08-12: a 3:06 song finalized at **6,421 s of 186 s — 3,452%**
-	 * after the browser was left sitting on the finished video, and this rule
-	 * minted two on-chain transactions for one sitting (`ae7ad561…` and
-	 * `27c2171c…`, identical frozen start, both 100%). Brave never publishes
-	 * `STATE_STOPPED` — zero of 835 finalizations in the retained field log — so
-	 * nothing ended the track; and with no position there was no wrap to detect,
-	 * so the loop cap above could not apply either.
-	 *
-	 * A second scrobble is a claim that a second listen happened. With no position
-	 * that moved, there is no evidence for one, and one transaction is the honest
-	 * answer. A genuine replay on a session that reports position is unaffected.
-	 *
-	 * Deliberately the *complement* of [loopDetected] rather than the same test: a
-	 * detected wrap means the item auto-looped and caps for that reason, while
-	 * this covers the case where nothing could be detected at all.
-	 */
 	fun capForKind(
 		percentages: List<Int>,
 		kind: String,

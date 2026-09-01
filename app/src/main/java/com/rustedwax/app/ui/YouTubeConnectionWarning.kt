@@ -54,11 +54,6 @@ object YouTubeConnectionWarning {
 		val actionLabel: String?,
 	)
 
-	/**
-	 * @param connected whether a YouTube session is stored at all
-	 * @param refusal the typed health verdict, or null while the route runs
-	 * @return the warning to show, or null when there is nothing wrong
-	 */
 	fun evaluate(connected: Boolean, refusal: WatchHistoryHealth.Refusal?): State? {
 		// Not connected outranks any refusal. A refusal recorded against a
 		// session that has since been forgotten must not replace "you have not

@@ -3,19 +3,6 @@ package com.rustedwax.app.detect
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/**
- * The rate the play-time accumulator scores a window at.
- *
- * "Played" has to mean *content consumed*, because the 60% rule compares it
- * against `duration`. Measuring wall-clock seconds instead under-reports every
- * sped-up listen and loses some outright: a 2026-07-29 field session watched a
- * 76 s trailer at 1.25× to position 59.9 s — 79% of the video — and it went
- * on-chain as 67%. At 2× the same arithmetic puts a fully-watched video at 50%,
- * below the threshold, and it never scrobbles.
- *
- * Only the arithmetic is covered here; the accumulator itself lives on an inner
- * class holding an Android `MediaController`.
- */
 class PlaybackSpeedTest {
 
 	private fun scale(elapsedMs: Long, reported: Float?): Long =
@@ -52,12 +39,6 @@ class PlaybackSpeedTest {
 		assertEquals(30_000L, scale(60_000, 0.5f))
 	}
 
-	/**
-	 * Paused or unreported must not erase time. `playingSince` already decides
-	 * whether a window counts; a `speed=0.0` sample landing mid-window would
-	 * otherwise throw away play time that really happened. The field log had 36
-	 * such samples.
-	 */
 	@Test
 	fun `zero and missing speeds fall back to normal`() {
 		assertEquals(1.0, SessionProbe.speedFactor(0.0f), 0.0)

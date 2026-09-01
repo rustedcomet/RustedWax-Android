@@ -72,13 +72,6 @@ class PipPlaybackProbe(private val context: Context) {
 		return Evidence(audio, window)
 	}
 
-	/**
-	 * Any `USAGE_MEDIA` player in the started state, from any app.
-	 *
-	 * Paused players drop out of this list, which is what makes it usable as a
-	 * play/pause signal at all. It is deliberately not treated as evidence of
-	 * *who* is playing — see [PipPlaybackInference].
-	 */
 	private fun mediaAudioStarted(): Boolean = runCatching {
 		val audio = context.getSystemService(AudioManager::class.java) ?: return false
 		audio.activePlaybackConfigurations.any {

@@ -4,14 +4,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-/**
- * Name → playlist id, the native equivalent of the browser address bar.
- *
- * The fixture keeps the `lockupViewModel` shape the real playlist-filtered
- * search page served on 2026-08-04 for `Reggaeton 2016,17,18`: playlist id in
- * `contentId`, title at `metadata.lockupMetadataViewModel.title.content`, owner
- * in the first metadata row, and the `N videos` badge elsewhere in the lockup.
- */
 class PlaylistSearchParserTest {
 
 	private fun entry(id: String, title: String, owner: String, videos: Int) =

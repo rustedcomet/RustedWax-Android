@@ -260,9 +260,6 @@ fun MainScreen(
 				onOpenYouTubeHistory = onOpenYouTubeHistory,
 			)
 
-			// The address bar has stopped naming videos while tracks keep ending.
-			// Silent until now: a 13-minute hole in the 2026-07-29 session cost
-			// five links and four entries outright, and nothing in the UI said so.
 			if (urlWatcherEnabled && tracksWithoutVideoId >= FinalizationRuntime.QUIET_BAR_THRESHOLD) {
 				Card(
 					modifier = Modifier
@@ -309,13 +306,6 @@ fun MainScreen(
 				},
 			)
 
-			// Keep exactly one destination composed. The pager previously retained
-			// neighbouring page trees and moved their geometry on every drag. With
-			// RustedWax's two accessibility services enabled, Compose rebuilt and
-			// sorted that combined semantics tree on the UI thread; the field device
-			// measured multi-second freezes and pages left half visible. A horizontal
-			// gesture still changes one named destination, but only after it settles,
-			// so vertical lists keep their gesture and there is no in-between page.
 			Box(
 				modifier = Modifier
 					.weight(1f)
@@ -414,13 +404,6 @@ fun MainScreen(
 	}
 }
 
-/**
- * The warning that the watch-history route cannot name anything.
- *
- * @param detail the prose [com.rustedwax.app.enrich.WatchHistoryHealth] wrote
- * for a person to read. Shown, never branched on — which button appears is
- * decided by the typed cause in [state].
- */
 @Composable
 private fun WatchHistoryWarning(
 	state: YouTubeConnectionWarning.State?,
@@ -721,13 +704,6 @@ private fun ScrobbleControls(
 					)
 				}
 
-				// The body is deliberately free of anything that changes while a
-				// Short plays. `exactReason` is a per-observation diagnostic that
-				// turns over several times a second, and putting it here made the
-				// card's text — and therefore its height — change at that rate,
-				// so the whole settings list below it juddered whenever a Short
-				// was on screen. The live half now lives in `liveNote`, which is
-				// one ellipsized line and cannot reflow.
 				SettingsRow.FOREGROUND_SHORTS -> SettingRow(
 					icon = WaxIcons.Bolt,
 					title = SettingsOutline.title(row),
@@ -946,18 +922,6 @@ internal fun SettingCard(
 	}
 }
 
-/**
- * Icon, title, explanation, control — the shape of every switch in the app.
- *
- * @param alert draws the icon in the error colour. Reserved for a grant that
- * stopped on its own, which is the one state here that is nobody's decision.
- * @param liveNote a line that may change while the screen is open. Always one
- * line and always present once non-null, so its height is fixed and a change
- * cannot move anything below it. [body] must stay constant for a given state
- * for the same reason — a settings list that reflows while you read it is worse
- * than one that tells you less.
- * @param below extra controls under the row, inside the same card.
- */
 @Composable
 internal fun SettingRow(
 	icon: ImageVector,
@@ -1333,8 +1297,7 @@ private fun SessionList(
 	// This is the ownership boundary for the live read. When Now is not composed,
 	// session progress cannot invalidate Settings, History, Not logged or Log.
 	val liveSessions = sessions()
-	// `fillMaxSize` keeps an empty or stopped state anchored at the top and gives
-	// every destination the same stable content bounds.
+
 	if (!monitoring) {
 		Text(
 			"Monitoring is stopped.\n\nNo media sessions are being watched and no " +
@@ -1366,39 +1329,6 @@ private fun SessionList(
 	}
 }
 
-/**
- * What is playing, and whether it will count.
- *
- * ## What this used to be
- *
- * A diagnostics dump: package name, origin, source proof, every raw metadata
- * line in monospace, the browser scan's coverage, the foreground observer's
- * coverage, the native ad-guard caveat, the video id, the canonical URL, the
- * route that proved it, the notification hint, the whole prospective payload
- * with its kind reason, the YouTube Music catalogue type, the MusicBrainz match,
- * the listed flag, a one-word verdict — and a button that put the listen
- * on-chain by hand.
- *
- * Every one of those answers a question about *this app*. None of them answers
- * the one a person opens the app with. They are not lost: the event log records
- * what was observed and why, under a switch, with a retention bound and an
- * Export button, which is where a recording of somebody's viewing belongs.
- *
- * ## What decides what is drawn
- *
- * [NowCard], and only [NowCard] — a closed presentation model asserted in
- * `NowCardTest`. This composable holds no rule of its own, so the card cannot
- * regrow a field by someone adding a `Text` to it.
- *
- * Nothing here changes detection, identity, classification, measurement or
- * eligibility. [NowPreview] is the same cache-only observation as before — no
- * network is started from the UI — and it is read for exactly one thing now:
- * the classified kind, so the card can say `Song` rather than nothing.
- *
- * The manual broadcast is gone with it. The engine's `MANUAL` trigger stays
- * exactly where it was; removing a finalization trigger to remove a button would
- * be a change to scrobbling, and this is a change to a screen.
- */
 @Composable
 private fun SessionCard(
 	s: SessionSnapshot,

@@ -7,31 +7,6 @@ import org.json.JSONObject
 import java.text.Normalizer
 import java.util.Locale
 
-/**
- * Finds a video id by matching a YouTube search page against what the media
- * session reported. Pure — no network, no Android — so the matching rules are
- * unit-testable against a checked-in fixture.
- *
- * ## Why matching has to use all three signals
- *
- * Measured against the real search page for the reported case (2026-07-25,
- * "Doomed" / "Bring Me The Horizon - Topic", 274 s):
- *
- * | id | length | owner | title |
- * | --- | --- | --- | --- |
- * | `CZFTfYYql4k` | 4:35 | Bring Me The Horizon | Doomed |
- * | `DIEI2YLYg6o` | 4:36 | Maphra - Topic | Doomed |
- *
- * Both are titled exactly "Doomed" and both are within a second or two of the
- * session's duration — the second is a *cover by a different artist*. Title
- * alone or duration alone would have written the wrong link to an immutable
- * chain. The channel is what separates them, so a match requires title **and**
- * channel **and** duration, and anything short of that resolves to nothing.
- *
- * Channels are compared through [TitleParser.cleanChannel] because search
- * lists the owner as "Bring Me The Horizon" while the session and the watch
- * page both say "Bring Me The Horizon - Topic".
- */
 object SearchResultsParser {
 
 	data class Candidate(
@@ -132,13 +107,6 @@ object SearchResultsParser {
 		return out.values.toList()
 	}
 
-	/**
-	 * The one candidate that is certainly the same video, or null.
-	 *
-	 * @param durationSec the session's duration; when unknown the duration
-	 * check cannot run and no match is returned — an unverifiable match is
-	 * exactly the kind this class exists to refuse.
-	 */
 	fun bestMatch(
 		candidates: List<Candidate>,
 		title: String,
@@ -165,29 +133,6 @@ object SearchResultsParser {
 		}
 	}
 
-	/**
-	 * Identity-title agreement for the search gate: the semantic key, or the one
-	 * bounded presentation difference YouTube introduces on its own.
-	 *
-	 * A title may embed an `@` mention, and YouTube spells it as the handle on
-	 * the search card and as the display name in the MediaSession — measured in
-	 * the 2026-08-17 overnight run, where `IFBXY61-14U` published
-	 * `@Sexyy Red` against a card reading `@SexyyRed`, and two further plays were
-	 * lost the same way. Every other word agreed, the channel agreed exactly and
-	 * the duration was within a second, but [titleKey] folds `@` to a space, so
-	 * `sexyy red` never equalled `sexyyred` and the correct id — the *first*
-	 * search result — was discarded before it could be considered.
-	 *
-	 * A mention names a channel, not the work, so it is presentation. This does
-	 * not loosen what a match is: [VideoTitleMatcher.mentionSpellingOnly]
-	 * requires the disagreement to be one contiguous run beginning at an `@` on
-	 * both sides, with at least three identical tokens around it and no more than
-	 * a channel name's worth of tokens inside it, and channel and duration remain
-	 * independently mandatory. `Cover by @alice` still contradicts
-	 * `Cover by @bob`; a run that reaches past the mention into the work —
-	 * `@SexyyRed - Different Song Entirely` — is still a contradiction; and two
-	 * uploads that both clear this rule stay ambiguous and are both refused.
-	 */
 	private fun titleAgrees(sessionTitle: String, candidateTitle: String): Boolean =
 		shortTitleMatches(sessionTitle, candidateTitle) ||
 			VideoTitleMatcher.mentionSpellingOnly(sessionTitle, candidateTitle)
@@ -278,18 +223,6 @@ object SearchResultsParser {
 		.replace(Regex("""\s+"""), " ")
 		.trim()
 
-	/**
-	 * Channel names compared with presentation punctuation removed.
-	 *
-	 * VEVO channels are written as one word — the media session reports
-	 * `systemofadownVEVO`, while search lists the owner as `System Of A Down`.
-	 * Stripping the suffix leaves `systemofadown`, which never equalled
-	 * `system of a down`, so **every VEVO track failed to resolve**: three of
-	 * the four missing `url`s in the 2026-07-28 session were this, and in each
-	 * case the correct video was the *first* search result with an exact title
-	 * and a duration one second off. Spaces, hyphens and diacritics carry no
-	 * identity meaning in a display name, so they are dropped on both sides.
-	 */
 	fun channelKey(channel: String?): String? = channel
 		?.let { TitleParser.cleanChannel(it) }
 		?.let { Normalizer.normalize(it, Normalizer.Form.NFKD) }

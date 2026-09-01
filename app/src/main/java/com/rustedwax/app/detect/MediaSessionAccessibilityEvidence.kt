@@ -76,16 +76,7 @@ object MediaSessionAccessibilityEvidence {
 	}
 
 	@Synchronized
-	/**
-	 * @param unambiguous the package has exactly one active track, so this scan
-	 * cannot belong to anything else.
-	 * @param namedThisInstance the scan carried a video id and it is the one this
-	 * instance is playing. A browser legitimately keeps YouTube playing in one tab
-	 * while the user browses another, and refusing every scan whenever a second
-	 * tab exists starved the *playing* listen of coverage and ad evidence for as
-	 * long as any other tab stayed open. A scan that names its own video attributes
-	 * itself; elimination is no longer the only way to be sure.
-	 */
+
 	fun observe(
 		scan: Scan,
 		instance: MediaSessionAdEvidence.TrackInstance,

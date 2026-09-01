@@ -56,13 +56,6 @@ class WatchPageParserTest {
 		assertNull(hostile.ownerHandle)
 	}
 
-	/**
-	 * `lengthSeconds` does two jobs. It is the duration when the media session
-	 * publishes none — 10 shorts were skipped as "no duration" in the 2026-07-29
-	 * session while this field sat in a page the app had already fetched. And
-	 * its presence is the existence proof that gates the short-clip floor: an
-	 * ad creative has no public watch page to read it from.
-	 */
 	@Test
 	fun `a parsed length counts as watch-page proof`() {
 		val json = WatchPageParser.extractJson(fixture, "ytInitialPlayerResponse")!!
@@ -79,12 +72,6 @@ class WatchPageParserTest {
 		assertEquals(false, facts.resolvedOnWatchPage)
 	}
 
-	/**
-	 * The shorts-feed ad from 2026-07-29, with the fields that actually separate
-	 * it from a real short. Fetched from the live page: `isUnlisted: true`,
-	 * `isCrawlable: false`, `viewCount: 1` — against `false`, `true` and 96229
-	 * for a real short from the same feed.
-	 */
 	@Test
 	fun `an unlisted ad creative is not a proven public video`() {
 		val facts = WatchPageParser.parsePlayerResponse(

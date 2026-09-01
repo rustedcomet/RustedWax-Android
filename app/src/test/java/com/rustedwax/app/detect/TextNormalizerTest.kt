@@ -36,11 +36,6 @@ class TextNormalizerTest {
 		assertEquals("&quot;", TextNormalizer.clean("&amp;quot;"))
 	}
 
-	/**
-	 * The §3.6 bug, exactly. `OwnerHandle` composes to NFC; the ledger did not
-	 * normalize at all, so one cedilla spelled two ways produced two dedup keys
-	 * for one listen — and a duplicate on a chain that cannot be edited.
-	 */
 	@Test
 	fun `one handle spelled two ways produces one dedup key`() {
 		val composed = "@eduardarebouçass"

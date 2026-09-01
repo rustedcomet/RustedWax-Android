@@ -12,27 +12,6 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The watch-history stand-down, driven through the production engine.
- *
- * `WatchHistoryHealth` diagnoses one thing: *this phone's playback is not being
- * written to the account RustedWax reads* — signed out, another account, or
- * incognito. The evidence it accepts is a run of tracks that a freshly read feed
- * did not contain.
- *
- * Measured 2026-08-16 on a Galaxy A36, on the shipped 0.11.0 build: three
- * ordinary YouTube Shorts ads — 23 s, 24 s and 15 s — in **57 seconds** of plain
- * swiping produced three absences with three distinct keys and stood the route
- * down for fifteen minutes. Nothing was wrong with the account. In the same
- * window four Shorts resolved exactly, out of that same account's own feed, and
- * none of them could clear it, because the clearing call lived only on the
- * ordinary-entries path. The 15-minute probe that followed at 09:10:12 was then
- * spent by a Shorts lookup that had no way to clear it either.
- *
- * The three shapes that produced that are what this file replays. The one shape
- * the diagnosis is actually for — genuinely different ordinary videos going
- * missing — must still trip it, and does.
- */
 class WatchHistoryBreakerReplayTest : ReplayScenarioTest() {
 
 	private val handle = "@mrtimeedits"
@@ -379,7 +358,7 @@ class WatchHistoryBreakerReplayTest : ReplayScenarioTest() {
 	}
 
 	/**
-	 * `<redacted-private-path>` §2 and replay requirement 1.
+	 * the watch-history breaker contract and replay requirement.
 	 *
 	 * Three ordinary native videos previewed for a few seconds each. Identity
 	 * resolution still runs — Not logged has to keep its exact hyperlink — but
@@ -668,7 +647,7 @@ class WatchHistoryBreakerReplayTest : ReplayScenarioTest() {
 
 	@Test
 	fun `a PiP Short still resolves after the three ads that used to stand the route down`() {
-		// The 2026-08-16 field order exactly: ad, ad, ad, then an untitled Short
+		// The reduced field order: ad, ad, ad, then an untitled Short
 		// finalized in picture-in-picture — the shape that has no title of its own
 		// and therefore nothing but watch history to identify it.
 		val harness = harness()

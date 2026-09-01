@@ -16,41 +16,6 @@ import java.net.URLEncoder
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
-/**
- * Checks a parsed artist/track pair against MusicBrainz.
- *
- * The parser and the description credits produce *text*, and text lies:
- * `artist: "Times Cover"` and `artist: "Shérazade"` (an uploader, not the
- * performer) both reached the chain in field testing. MusicBrainz is the open
- * canonical database of real artists and recordings — the same class of check
- * the upstream extension does against Wikipedia/Wikidata, which the original
- * port deliberately deferred.
- *
- * A confirmed match is used two ways:
- *
- *  - As **explicit music evidence** for the classifier. "Maphra - Doomed" at
- *    42 seconds carries no music vocabulary, so the short-form rule filed it
- *    as `video` — but if MusicBrainz knows the artist and the recording, that
- *    *is* the explicit evidence the rule demands.
- *  - To **canonicalize spelling** — the payload takes MusicBrainz's casing of
- *    the artist and title, so entries line up with scrobbles of the same song
- *    from anywhere else.
- *
- * ## Matching is strict on purpose
- *
- * A title-only match would be poison: "BlueBird", "Doomed" and "Film" are all
- * real recordings by *somebody*. A match requires the **artist name and the
- * recording title to both** equal the candidate (normalized), on one
- * recording, with a healthy search score. Small or new artists simply aren't
- * in the database — that's a missed rescue, never a wrong one, and the rest of
- * the classifier proceeds exactly as before.
- *
- * ## Etiquette
- *
- * MusicBrainz asks for a meaningful User-Agent and ≤1 request/second. Both are
- * honored; results (including "no match") are cached to disk so a track is
- * asked about once, ever.
- */
 class MusicBrainzVerifier(context: Context) {
 
 	/** The verdict for one artist/track pair. Cached, including negatives. */

@@ -9,43 +9,6 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.rustedwax.core.SourceSessionId
 
-/**
- * Reads the browser's address bar and explicit visible YouTube ad labels.
- *
- * Optional and off by default (decision D5). With it off nothing here runs and
- * identity falls back to notification hints, exactly as in Phase 3.
- *
- * ## Why an accessibility service
- *
- * Chromium tells the media session nothing about the page (PHASE0 Q3) and the
- * media notification only carries the origin. The address bar is the one place
- * on the device where the actual URL is legible. That buys two things nothing
- * else can:
- *
- *  - **Exact exclusivity.** "This tab is youtube.com" instead of "a
- *    notification from this browser said youtube.com".
- *  - **The video id**, which is the sole route to `url` in the payload and the
- *    precondition for enrichment.
- *
- * ## Scope
- *
- * `accessibility_service_config.xml` pins `packageNames` to the browsers in
- * [YouTubeProbe.TARGET_PACKAGES]. That is enforced by the OS, not by this
- * class: events from any other app are never delivered here at all. The class
-	 * additionally re-checks the package. It reads the URL bar for identity and,
-	 * whenever the visible host is YouTube, scans visible accessibility labels
-	 * for exact ad UI such as "Sponsored" or "Skip ad". Shorts keep their exact
-	 * id/generation path; ordinary playback is offered without a video id to the
-	 * unique active MediaSession track.
- *
- * ## Known limits
- *
- * The address bar reflects the **foreground tab**, and Chromium on Android
- * often shows only the host rather than the full path. So this may yield a host
- * with no video id, which is still an upgrade on a notification hint. What it
- * actually returns on Brave is logged verbatim on first sight, because it's a
- * measurement this project hasn't made yet — see <redacted-private-path> Q7.
- */
 class UrlWatcherService : AccessibilityService() {
 	private val refreshHandler = Handler(Looper.getMainLooper())
 	/**
@@ -324,12 +287,7 @@ class UrlWatcherService : AccessibilityService() {
 
 		/** Whether the user has enabled this service in system settings. */
 		fun isEnabled(context: Context): Boolean {
-			// Both halves, matching NativeShortsAccessibilityService.isEnabled.
-			// The list alone keeps naming a service Android has stopped sending
-			// events to, so it reports "On" for a watcher that is reading
-			// nothing. This is the §2.3 defect, left alone at the time because
-			// the file was fenced; the owner signed it off on 2026-08-05 after a
-			// day in which the service had been dropped and nothing said so.
+
 			if (Settings.Secure.getInt(context.contentResolver, ACCESSIBILITY_ENABLED, 0) != 1) {
 				return false
 			}

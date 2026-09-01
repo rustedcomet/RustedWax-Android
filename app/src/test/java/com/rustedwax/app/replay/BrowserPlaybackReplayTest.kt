@@ -9,15 +9,6 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * Brave and Chrome, replayed from the address bar and the media notification.
- *
- * These are the golden browser scenarios `<redacted-private-path>` requires to
- * keep passing through every migration phase. Each one is a complete sequence —
- * evidence arriving in field order, playback measured, the track frozen — and
- * asserts on the finalized outcome rather than on any intermediate state, so it
- * stays true when the internals move.
- */
 class BrowserPlaybackReplayTest : ReplayScenarioTest() {
 
 	// ---- fixtures ------------------------------------------------------------
@@ -247,10 +238,7 @@ class BrowserPlaybackReplayTest : ReplayScenarioTest() {
 	@Test
 	fun `a bar that named the video does not count toward the quiet-bar warning`() {
 		val harness = ReplayHarness(ReplaySource.BRAVE)
-		// The bar named it; enrichment then contradicts it. That is a different
-		// failure and must not be reported as a silent address bar — measured
-		// 2026-08-11, and the reason the counter clears rather than merely
-		// declining to increment.
+
 		harness.env.facts.put(
 			facts("fctnSdDjxiY", "A completely different video", "Another Channel", 600),
 		)

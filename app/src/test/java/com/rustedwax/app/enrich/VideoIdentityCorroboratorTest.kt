@@ -48,11 +48,7 @@ class VideoIdentityCorroboratorTest {
 				facts,
 			),
 		)
-		// A handle the enrichment fetch did not carry is absence, not
-		// contradiction: the candidate's own page proved it for this same id a
-		// moment earlier. Measured 2026-08-07, the strict rule refused an
-		// 83-second listen because the second read of one page came back without
-		// the field. A handle that is present and *different* still refuses.
+
 		assertNull(
 			VideoIdentityCorroborator.contradiction(
 				foreground,
@@ -72,18 +68,6 @@ class VideoIdentityCorroboratorTest {
 		assertFalse(VideoIdentityCorroborator.cacheable(foreground, resolution, facts.copy(ownerHandle = null)))
 	}
 
-	// ---- 2026-08-16 Brave Mix regression: the title-only veto -----------------
-
-	/**
-	 * `dE8D6WY6tQQ`, the exact field shape.
-	 *
-	 * The address bar named the right video and the page/session titles were
-	 * written differently, so the id was filed as rejected while the track was
-	 * active. Eighty seconds later the Mix queue independently returned that same
-	 * id, having matched the entry's own title, channel and duration — and the
-	 * veto threw a complete 138-of-137-second listen away for the earlier,
-	 * weaker disagreement.
-	 */
 	@Test
 	fun `a title-only rejection does not veto the same id a playlist later proves`() {
 		val session = ended(
@@ -216,17 +200,6 @@ class VideoIdentityCorroboratorTest {
 		trackStartedAtEpochSec = 1_785_000_000,
 	)
 
-	/**
-	 * Measured 2026-08-04, native YouTube, playlist `Reggaeton 2016,17,18`.
-	 *
-	 * `7J6xA1_f8as` is entry #23 and is genuinely the track that played — "Te
-	 * Busco", 234 s, 233 s of it watched. But YouTube spells its channel two
-	 * ways: the playlist page and the MediaSession both say
-	 * "Cosculluela El Principe" while the watch page says "Cosculluela - Topic".
-	 * Stripping " - Topic" leaves "Cosculluela", still not the full stage name,
-	 * so the enriched-watch-facts pass vetoed a correct id the playlist had
-	 * already corroborated and the scrobble was silently lost.
-	 */
 	@Test
 	fun `a Topic channel alias does not veto a playlist-verified native id`() {
 		val session = ended("Te Busco", "Cosculluela El Principe", 234_000).copy(
@@ -287,26 +260,6 @@ class VideoIdentityCorroboratorTest {
 		)
 	}
 
-	/**
-	 * Measured 2026-08-09, native YouTube, a Bring Me The Horizon playlist left
-	 * running while the phone installed apps in the background.
-	 *
-	 * Every VEVO upload has two names: the MediaSession publishes the artist
-	 * ("Bring Me The Horizon") and the watch page publishes the label's channel
-	 * ("BMTHOfficialVEVO"). The enriched pass called that a contradiction 46
-	 * times in one log — for Doja Cat, Nicki Minaj, Doechii, FLO, Danna Paola
-	 * and Los Enanitos Verdes as well — and none of them came from a playlist,
-	 * so the `playlistVerified` form of the exception never fired.
-	 *
-	 * The cost was not only the lost scrobble. The same corroborator answers
-	 * `resolveNativeCarryIdentity`, so the refusal left the track with no exact
-	 * id, and when YouTube's MediaSession was torn down and recreated mid-video
-	 * — constantly, on a device busy installing apps — `deferForContinuation`
-	 * would not carry the progress across. "Kool-Aid" was watched start to
-	 * finish and scored as 114s of 244s (47%) plus 130s of 244s (53%): two
-	 * halves of one complete listen, both below the 60% threshold, nothing
-	 * broadcast.
-	 */
 	@Test
 	fun `a VEVO channel alias does not veto a history-resolved native id`() {
 		val session = ended(
@@ -411,20 +364,6 @@ class VideoIdentityCorroboratorTest {
 		)
 	}
 
-	/**
-	 * What licenses the alias is the route, not the player.
-	 *
-	 * This is the 2026-08-04 case: the playlist page and the MediaSession both
-	 * said "Cosculluela El Principe" while the watch page said
-	 * "Cosculluela - Topic", and the watch page vetoed an id the playlist had
-	 * already corroborated on all three fields. It stayed vetoed in a browser
-	 * only because the 2026-08-09 repair was scoped to native sessions; the same
-	 * shape then cost a 216-second "Happy Song" listen in Brave on 2026-08-10.
-	 *
-	 * The boundary that replaced `isNative` is below: an id a *route* uniquely
-	 * resolved by matching a channel of its own against the session, versus an
-	 * id the address bar merely named.
-	 */
 	@Test
 	fun `a browser route that matched a channel of its own is trusted too`() {
 		val session = ended("Te Busco", "Cosculluela El Principe", 234_000)
@@ -676,12 +615,6 @@ class VideoIdentityCorroboratorTest {
 		)
 	}
 
-	/**
-	 * Fresh 2026-08-21 `Party` failure. The exact catalog row had already bound
-	 * work, complete credit, album, duration and id. The final enrichment for
-	 * that same id was music-client-only, so absent watch-page title/length must
-	 * not be converted into a contradiction.
-	 */
 	@Test
 	fun `catalog authority survives same-id music-client-only corroboration`() {
 		val session = ended(
@@ -752,12 +685,6 @@ class VideoIdentityCorroboratorTest {
 		)
 	}
 
-	/**
-	 * Measured 2026-08-23. A `- Topic` channel carries a different alias of the
-	 * same act than the catalogue does — `Mr. Lexx - Topic` for catalogue artist
-	 * `Lexxus` — so the page cannot be the authority on the name. The music
-	 * client, asked for that same id, returns `Lexxus`.
-	 */
 	@Test
 	fun `a topic page alias is corroborated by the music client credit for the same id`() {
 		val session = ended("Who Dem", "Lexxus", 217_000).copy(
@@ -919,15 +846,6 @@ class VideoIdentityCorroboratorTest {
 			musicVideoType = type,
 		)
 
-		// A byline whose *leader* is the ended channel, with the title and the
-		// duration also agreeing, is the same upload described at greater length
-		// — not a contradiction. Measured 2026-08-05: 12 rejections in one
-		// session on "La Melma Music and 2 more" against "La Melma Music" and
-		// "Eladio Carrion and CAZZU" against "Eladio Carrion", every one a real
-		// listen thrown away. The earlier rule additionally demanded a
-		// YouTube-Music-recognised video and a uniquely-resolved candidate, which
-		// the field showed is not how these arrive — history resolves them, so
-		// those flags are false.
 		assertNull(VideoIdentityCorroborator.contradiction(session, base, facts(type = null)))
 		assertNull(
 			VideoIdentityCorroborator.contradiction(
@@ -1000,7 +918,7 @@ class VideoIdentityCorroboratorTest {
 	}
 
 	@Test
-	fun `finalized guard shares the log 16 presentation matcher`() {
+	fun `finalized guard shares the presentation matcher`() {
 		assertTrue(
 			VideoIdentityCorroborator.titleEvidence(
 				"BAD BUNNY - SOY PEOR (Video Oficial)",
@@ -1022,13 +940,6 @@ class VideoIdentityCorroboratorTest {
 		)
 	}
 
-	/**
-	 * Measured 2026-08-05. The resolver found `QnRnooyKeZk` correctly from the
-	 * account's own watch history, and this guard then discarded it because
-	 * YouTube's uploaded title is Spanish while the phone — and the foreground
-	 * observer reading its screen — shows the auto-translated English one. One
-	 * video, two names, both from its own page.
-	 */
 	@Test
 	fun `an auto-translated displayed title is not a contradiction`() {
 		val onScreen = "The Day Karol G Experienced an Unexpected Moment During a Concert"
@@ -1096,26 +1007,6 @@ class VideoIdentityCorroboratorTest {
 		)
 	}
 
-	/**
-	 * Measured 2026-08-06 on `RTQFqbCPUGg`, and the mirror image of the Karol G
-	 * case above: there the *uploaded* title was Spanish and the screen showed
-	 * English, here the upload is Spanish and the screen shows it while the
-	 * resolver's own `en-US` fetch of the same page renders the auto-translated
-	 * English one.
-	 *
-	 * Verified by fetching the page twice on 2026-08-06:
-	 *
-	 * | `Accept-Language` | `videoDetails.title` | `videoPrimaryInfoRenderer` |
-	 * | --- | --- | --- |
-	 * | `en-US` | `#musica … #noticias` | `#music … #news` |
-	 * | `es-419` | `#musica … #noticias` | `#musica … #noticias` |
-	 *
-	 * The old guard substituted the displayed title whenever its title *key*
-	 * equalled the frozen one — and an all-hashtag title has an empty key, so
-	 * every such title matched vacuously and the English rendering replaced the
-	 * Spanish one the screen had actually shown. A page publishes two names for
-	 * one id; agreement with either is agreement.
-	 */
 	@Test
 	fun `either of a page's two titles may corroborate an all-hashtag Short`() {
 		val onScreen = "#xbox​ #trendingnow​ #rap​ #musica​ #hiphop​ " +
@@ -1225,16 +1116,6 @@ class VideoIdentityCorroboratorTest {
 		assertTrue(refusal.contains("Otra subida distinta"))
 	}
 
-	/**
-	 * Measured 2026-08-11 in Brave, browser minimized, playlist
-	 * `Best of Bring Me The Horizon`.
-	 *
-	 * `UNaYpBpRJOY` is the entry that played — 277 s of its 275 s — and the
-	 * playlist row matched the session on title, channel *and* duration. Its
-	 * watch page then names it "Avalanche (Official Video)", which is one token
-	 * once the presentation core is taken, so the weak rank fired and the whole
-	 * listen was refused. Every VEVO upload has this shape.
-	 */
 	@Test
 	fun `the watch page's shorter name for an already-matched id is not weak evidence`() {
 		val session = ended("Bring Me The Horizon - Avalanche (Official Video)", "BMTHOfficialVEVO", 275_000)

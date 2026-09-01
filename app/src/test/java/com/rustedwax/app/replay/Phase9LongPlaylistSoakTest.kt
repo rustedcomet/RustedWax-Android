@@ -5,7 +5,6 @@ import com.rustedwax.youtube.identity.VideoResolution
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/** Phase 9 load gate; synthetic because the observed 180 row bodies were not retained. */
 class Phase9LongPlaylistSoakTest : ReplayScenarioTest() {
 
 	@Test

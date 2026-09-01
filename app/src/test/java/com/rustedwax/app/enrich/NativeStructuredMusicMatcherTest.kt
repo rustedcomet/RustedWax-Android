@@ -318,11 +318,6 @@ class NativeStructuredMusicMatcherTest {
 		assertTrue(ambiguous.refusalReason.orEmpty().contains("ambiguous identity"))
 	}
 
-	/**
-	 * The 2026-08-22 field class. YouTube ingested one master twice on the same
-	 * auto-generated `- Topic` channel, so the pair is one recording rather than
-	 * two candidate works.
-	 */
 	@Test
 	fun `duplicate uploads of one recording collapse to a single deterministic id`() {
 		val first = candidate("N0a9SYSaV4M", "Amazing Grace", "Mavado - Topic", 202)
@@ -372,11 +367,6 @@ class NativeStructuredMusicMatcherTest {
 		assertNull(NativeStructuredMusicMatcher.sameRecording(emptyList()))
 	}
 
-	/**
-	 * Measured 2026-08-22 playing the Mavado album straight through. Three ingests
-	 * of one master, trimmed differently, so nothing collapses on equal lengths —
-	 * but the player published 169000 ms, which names exactly one of them.
-	 */
 	@Test
 	fun `the player's own length names one ingest out of a differently-trimmed family`() {
 		val family = listOf(
@@ -452,11 +442,6 @@ class NativeStructuredMusicMatcherTest {
 		)
 	}
 
-	/**
-	 * Measured 2026-08-23. The player wrote the credit twice — once bare, once
-	 * parenthesised — and the page wrote it once, so one stripping pass reduced
-	 * them to two different works and a fully played listen was refused.
-	 */
 	@Test
 	fun `every trailing feature marker is stripped, however many a surface wrote`() {
 		val native = "Can't Take Wi Life Ft. Di Genius (feat. Di Genius)"
@@ -471,10 +456,6 @@ class NativeStructuredMusicMatcherTest {
 		)
 	}
 
-	/**
-	 * Measured 2026-08-23. The player and the watch page order the same title's
-	 * parts differently, so a trailing-only strip left two different works.
-	 */
 	@Test
 	fun `a parenthesised credit is stripped wherever the surface put it`() {
 		val native = "Dancehall Frequency [Wavz] (feat. Jahnaton & 808 Delavega)"
@@ -488,11 +469,6 @@ class NativeStructuredMusicMatcherTest {
 		)
 	}
 
-	/**
-	 * Measured 2026-08-23. `Tan Tuddy - Raw` is a bare work, but the credit
-	 * grammar split it on the dash for the candidate and not for the player, so a
-	 * card that had already resolved was refused at finalization.
-	 */
 	@Test
 	fun `a catalog title containing a dash still matches itself`() {
 		val row = candidate("oI2Craz2f2s", "Tan Tuddy - Raw", "Aidonia", 190)

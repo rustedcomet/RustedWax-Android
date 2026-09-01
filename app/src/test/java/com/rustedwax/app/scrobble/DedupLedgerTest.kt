@@ -4,19 +4,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
-/**
- * The dedup key itself. `claim`/`release` need a `Context`, but `keyFor` is
- * pure — and it is now the shared contract between two code paths (the
- * automatic finalize and the Now card's manual button), so the pairs that must
- * and must not collide are worth pinning.
- *
- * The on-chain duplicates of 2026-07-24/25 were not a key defect — the manual
- * path simply never consulted the ledger. These guard the key against drifting
- * once both paths depend on it.
- */
 class DedupLedgerTest {
 
-	/** 2026-07-25T15:49:46Z, and a few offsets from it. */
 	private val base = 1785080986L
 
 	@Test
@@ -57,7 +46,6 @@ class DedupLedgerTest {
 		)
 	}
 
-	/** The 2026-08-11 bug: a boundary must not decide which replay is admitted. */
 	@Test
 	fun `utc hour boundaries do not change replay identity`() {
 		val boundary = (base / 3600 + 1) * 3600

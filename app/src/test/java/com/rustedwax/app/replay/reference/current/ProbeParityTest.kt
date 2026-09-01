@@ -11,24 +11,6 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The Phase 3 behavioural surface, old against new, one script at a time.
- *
- * `<redacted-private-path>` Phase 3 lists what had to move out of `Watch`:
- * progress and speed accounting, metadata refinement and track transitions,
- * session destruction/recreation and continuation, finalization decisions, and
- * picture-in-picture measurement. The Phase 2/3 report then asks for that whole
- * list to be compared rather than the four scripts the first pass covered:
- * pause/resume, seeks and rate changes, loop/wrap, metadata refinement,
- * same-second instances, destruction/replacement continuation, stopped/restart
- * timing, finalization causes, PiP accumulation, missing/changed duration, and
- * the outcomes those produce.
- *
- * Both sides here are real implementations — see [CurrentRun] — and the
- * comparison is the whole finalized snapshot, not a chosen subset. Downstream
- * outcomes (payloads, dedup, queue, EventLog, UI history) are the same scripts
- * through the engine in [ProbeEndToEndParityTest].
- */
 class ProbeParityTest {
 
 	private val native = YouTubeProbe.YOUTUBE_PACKAGE
@@ -48,8 +30,7 @@ class ProbeParityTest {
 	 *
 	 * The non-vacuity check is not decoration. A script that finalizes nothing on
 	 * either side passes every equality below while proving that neither
-	 * implementation exists, and that is precisely the failure the Phase 2/3
-	 * report caught in the previous attempt.
+	 * implementation did useful work. This guard prevents that vacuous pass.
 	 */
 	/** What one implementation did with a script: the listens and the log. */
 	private data class ProbeRun(
@@ -264,12 +245,6 @@ class ProbeParityTest {
 		),
 	)
 
-	/**
-	 * A first sighting mid-video. The unobserved lead-in is evidence about the
-	 * evidence, and both implementations have to report it the same way or the
-	 * rules downstream reach different conclusions about a listen neither of them
-	 * measured.
-	 */
 	@Test
 	fun `a session first seen mid-video records where it was`() = assertParity(
 		"lead-in",
@@ -326,10 +301,6 @@ class ProbeParityTest {
 		),
 	)
 
-	/**
-	 * A bundle that drops `DURATION` is silence about the length, not a statement
-	 * that the track has none — the 2026-08-10 "played 247s of 0s" case.
-	 */
 	@Test
 	fun `a bundle that drops the duration does not erase it`() = assertParity(
 		"duration dropped",
@@ -394,7 +365,6 @@ class ProbeParityTest {
 		),
 	)
 
-	/** The 2026-08-06 interstitial-length case: keep the listen, exclude its five seconds. */
 	@Test
 	fun `declared divergence - a shorter replacement no longer earns organic time`() {
 		val script = listOf(
@@ -569,7 +539,6 @@ class ProbeParityTest {
 		),
 	)
 
-	/** A wrap observed across the restart is still a loop. */
 	@Test
 	fun `a wrap across a session restart is a loop`() = assertParity(
 		"restart wrap",
@@ -815,38 +784,6 @@ class ProbeParityTest {
 		),
 	)
 
-	/**
-	 * **A declared divergence, not a parity failure.**
-	 *
-	 * The one behaviour where old and new are *supposed* to disagree. Nothing ends
-	 * a browser listen except a track change, a navigation or a closed tab — Brave
-	 * publishes `STATE_STOPPED` zero times in the entire retained field log — so a
-	 * video that finishes while nobody is watching keeps a `PLAYING` transport and
-	 * an accruing clock. Measured 2026-08-12: a 3:06 song accrued 1h47m and went
-	 * on-chain twice.
-	 *
-	 * `IdleFinalization` was added to bound that, and the Phase 2/3 report names
-	 * keeping it as a condition of this remediation — restoring the old `Watch`
-	 * "removes idle-finalization wiring". So the difference is asserted here,
-	 * literally and in both directions, rather than left to be discovered as an
-	 * unexplained inequality: the reference really does accrue an hour, and the
-	 * current implementation really does stop at the item's own length plus grace.
-	 *
-	 * If either half of this ever stops being true, this fails — which is the
-	 * point of writing a known difference down as a test instead of as a comment.
-	 */
-	/**
-	 * Exact 2026-08-28 device shape: YouTube resumed a 1,192-second video 17:48 in
-	 * behind two interstitials, so the position first published for the work was
-	 * an interstitial's trailing 6,058 ms. First-seen lands there, below the
-	 * 10-second bar, and the reference therefore says nothing at all — leaving
-	 * "played 124s of 1192s" reading as a lost measurement rather than a resume.
-	 *
-	 * The current implementation refuses to let the discarded surface's trailing
-	 * position establish the lead-in at all, so first-seen lands on the resume
-	 * position instead. The measurement itself is identical on both sides — this
-	 * is a divergence in what the listen *says*, not in what it counted.
-	 */
 	@Test
 	fun `declared divergence - only the current implementation reports a resumed lead-in`() {
 		val script = listOf(
@@ -976,8 +913,8 @@ class ProbeParityTest {
 	 * A native session with no readable progress, credited from the
 	 * picture-in-picture inference.
 	 *
-	 * This is the branch the Phase 2/3 report singles out: restoring the old
-	 * `Watch` "silently breaks value-typed PiP accumulation", because the old
+	 * Restoring the old `Watch` silently breaks value-typed PiP accumulation,
+	 * because the old
 	 * code advanced a mutable accumulator by side effect and the replacement
 	 * returns its successor. Two implementations with different mutation
 	 * semantics have to credit the same milliseconds here or the change was not

@@ -21,7 +21,7 @@ class TrackIdentityTest {
 	)
 
 	@Test
-	fun `log 14 227125 to 227124 is one qualifying track`() {
+	fun `227125 to 227124 is one qualifying track`() {
 		val first = cardi(227_125)
 		val refined = cardi(227_124)
 		assertTrue(first.sameTrackAs(refined))

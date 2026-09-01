@@ -15,11 +15,10 @@ import com.rustedwax.hive.PrivacySecret
  * preferences file. It is read only to sign, and never logged, never sent
  * anywhere, and never included in the exportable log.
  *
- * Not yet done (tracked in DEVELOPMENT_PLAN §7): a biometric/device-credential
- * gate on read. Right now anyone holding the unlocked phone can make the app
- * sign, which is the same exposure as an unlocked Keychain on desktop but
- * without the per-operation prompt. Do not put a key here that controls
- * anything you'd mind losing — prefer a dedicated posting key you can revoke.
+ * There is no biometric or device-credential prompt on each read. Anyone with
+ * control of an unlocked phone may therefore cause the app to sign while
+ * automatic scrobbling is enabled. Use only a posting-authority key, preferably
+ * a dedicated key that can be revoked independently.
  */
 class KeyVault(context: Context) {
 
@@ -63,7 +62,7 @@ class KeyVault(context: Context) {
 	fun loadKey(): HiveKey? = prefs.getString(KEY_WIF, null)?.let { HiveKey.fromWif(it) }
 
 	/**
-	 * The AES secret private scrobbles are encrypted under — §6.1.
+	 * The AES secret used to encrypt private scrobbles.
 	 *
 	 * Derived here rather than cached anywhere, because the derivation is a
 	 * deterministic signature over a fixed challenge: recomputing it costs one

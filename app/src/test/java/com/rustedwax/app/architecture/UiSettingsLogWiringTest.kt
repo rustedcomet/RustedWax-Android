@@ -61,14 +61,6 @@ class UiSettingsLogWiringTest {
 	private val developerSettings get() =
 		text("app/src/main/java/com/rustedwax/app/ui/DeveloperSettings.kt")
 
-	/**
-	 * Every production line that names [symbol], excluding prose.
-	 *
-	 * A comment saying "`testPayload` used to live here, and here is why it
-	 * doesn't" is not a surviving reference to it — and a test that could not
-	 * tell the difference would require the reason for a removal to be deleted
-	 * along with the code.
-	 */
 	private fun references(symbol: String): List<String> = buildList {
 		productionFiles.forEach { file ->
 			stripComments(file.readText()).lines().forEachIndexed { index, line ->

@@ -9,10 +9,8 @@ import org.junit.Test
  * The mirror is the shipping implementation, and this is what makes that
  * checkable.
  *
- * The old side of the parity gate is pinned to a recorded file by
- * `Phase01ProvenanceTest`. The new side needs the opposite guarantee: not
- * "unchanged since a recorded moment" but "identical to whatever ships **right
- * now**". A mirror that lagged production by one edit would let a regression
+ * The current side must remain identical to whatever ships now. A mirror that
+ * lagged production by one edit would let a regression
  * land in `detect/SessionProbe.kt` while the parity suite went on comparing the
  * version that did not have it.
  *
@@ -56,14 +54,6 @@ class CurrentMirrorProvenanceTest {
 		)
 	}
 
-	/**
-	 * The header transform is the whole permitted edit.
-	 *
-	 * The package has to leave `detect` so the mirror cannot be shipped, and the
-	 * `android.*` imports have to go so the stand-ins resolve. Anything else in
-	 * the header would be an unreviewed difference between the two sides of the
-	 * gate.
-	 */
 	@Test
 	fun `mirror header only moves the package and swaps the android imports`() {
 		val header = mirror().lines().takeWhile { !it.startsWith("/**") }

@@ -73,26 +73,6 @@ class DedupLedger(context: Context) {
 		private const val PREFIX = "finalized_"
 		private const val RETENTION_MS = 6 * 60 * 60 * 1000L
 
-		/**
-		 * Key for one listen.
-		 *
-		 * This deliberately uses the exact frozen start, not a clock-hour bucket.
-		 * The old bucket made the answer depend on UTC boundaries: starts at 19:57
-		 * and 20:21 were distinct, while genuine starts at 20:21 and 20:52
-		 * collided. All finalize paths for one listen carry the same start; a
-		 * replay gets a new one.
-		 *
-		 * Normalized through [TextNormalizer], not merely lowercased.
-		 *
-		 * `<redacted-private-path>` §3.6: this key folds in an artist field that may
-		 * now be an owner handle, and `OwnerHandle` composes to NFC while this
-		 * lowercased raw text. Two spellings of one cedilla therefore produced two
-		 * keys for one listen, and the ledger's whole job is to stop that landing
-		 * twice on a chain nobody can edit.
-		 *
-		 * Presentation form: a title and an artist are text a human reads, so a
-		 * ligature and its letters are the same listen.
-		 */
 		fun keyFor(title: String, artist: String?, startedAtEpochSec: Long): String {
 			return "${TextNormalizer.presentation(title)}|" +
 				"${TextNormalizer.presentation(artist)}|start:$startedAtEpochSec"

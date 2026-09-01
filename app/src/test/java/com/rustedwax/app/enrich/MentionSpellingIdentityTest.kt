@@ -5,29 +5,6 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * One channel mention, spelled two ways, at the **search** identity gate.
- *
- * The 2026-08-17 overnight Brave playlist run finalized 334 plays and
- * broadcast 331. Every one of the three misses logged
- * `video id could not be verified … among N unique search candidates`, and in
- * every one the correct upload was in fact the *first* search result — the
- * queries were fine. What rejected them was [SearchResultsParser.titleKey]
- * equality: YouTube had re-rendered an `@` mention between the MediaSession
- * title and the card, so the two keys differed by exactly that mention while
- * channel and duration agreed outright.
- *
- * | played | id | session title said | card said | len |
- * | --- | --- | --- | --- | --- |
- * | 00:42 | `aZaxQG3ggng` | `@Maggie Rudisill` | `@spitcamuniversity` | 192/193 |
- * | 02:50 | `MaE19-BdilM` | `@DaBaby and @City Girls` | `@dababy and @CityGirls` | 236/236 |
- * | 04:31 | `IFBXY61-14U` | `@Sexyy Red` | `@SexyyRed` | 207/208 |
- *
- * [com.rustedwax.app.detect.VideoTitleMatcher] already graded this shape as
- * presentation on 2026-08-16, and that rule was live in the build that ran this
- * session — it simply was not consulted here. These cases pin the search gate to
- * it, and the rejection cases below pin the parts that must not move with it.
- */
 class MentionSpellingIdentityTest {
 
 	private fun card(
@@ -182,15 +159,6 @@ class MentionSpellingIdentityTest {
 			).isEmpty(),
 		)
 	}
-
-	// --- Reaching the card in the first place -----------------------------
-	//
-	// `aZaxQG3ggng` needed more than the gate above. Its MediaSession published
-	// the display name `@Maggie Rudisill` where the upload says
-	// `@spitcamuniversity` — words that appear nowhere in the video — so all six
-	// queries searched text the correct result does not carry and it was on none
-	// of the six result pages. Verified against live search 2026-08-17: with the
-	// mention dropped the same title returns it first.
 
 	private fun queries(title: String, channel: String) =
 		VideoIdResolver().searchQueries(title, channel)

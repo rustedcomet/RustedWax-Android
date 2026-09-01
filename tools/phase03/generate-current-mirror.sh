@@ -1,9 +1,8 @@
 #!/bin/sh
 # Regenerate the current-implementation mirror used by the old/new parity gate.
 #
-# The parity gate needs *both* sides to be real. `<redacted-private-path>`
-# makes the pre-migration `SessionProbe.kt` executable on a JVM; this does the
-# same for the file that ships today, so the comparison is
+# The parity gate needs both sides to be real. This script makes the shipping
+# implementation executable on a JVM, so the comparison is
 #
 #     recorded pre-migration Watch   vs   current Android binding + MediaSessionDriver
 #

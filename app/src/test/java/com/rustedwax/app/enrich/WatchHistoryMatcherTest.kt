@@ -4,16 +4,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * What the watch-history feed is allowed to conclude.
- *
- * The cases are the measured duplicate-upload pairs from
- * `<redacted-private-path>` §10.1 — `Criminal` at `4ns8D959YtA` vs
- * `VqEbCxg2bNI` and `Unica` at `YbZwlNmnUvw` vs `7uxTya2PX3c`, each pair exactly
- * duration-identical. Those are precisely the pairs the search route was
- * measured getting wrong, so they are the pairs this route has to get right or
- * refuse.
- */
 class WatchHistoryMatcherTest {
 
 	private fun entry(id: String, title: String, channel: String, length: Long) =

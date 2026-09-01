@@ -50,29 +50,6 @@ class YouTubeSessionVault internal constructor(store: () -> SharedPreferences) {
 	 */
 	private val prefs: SharedPreferences by lazy(store)
 
-	/**
-	 * The last decrypted [Session], or `null` when nothing is cached yet.
-	 *
-	 * ## Why a cache, on the class that holds the most sensitive value here
-	 *
-	 * `EncryptedSharedPreferences` decrypts on **every** `get`: an AES-256-SIV
-	 * key lookup and an AES-256-GCM value decrypt against the Android Keystore,
-	 * four times for one [Session]. The activity's status poll reads the session
-	 * once a second, on the main thread, for as long as the composition is alive
-	 * — which is also while the UI is not on screen.
-	 *
-	 * Measured on the field device on 2026-08-26 with YouTube Music playing and
-	 * RustedWax hidden, `simpleperf` attributed **58.88%** of the poll
-	 * coroutine's main-thread time to this one property.
-	 *
-	 * What is cached is deliberately only what [Session] already exposes — a
-	 * display label and two timestamps, the fields documented above as "safe to
-	 * display or log". **The cookie is not cached**: [secretCookieHeader] still
-	 * decrypts on every call, so the credential's residency is exactly what it
-	 * was. Every writer in this class drops the cache, and this class is the only
-	 * writer, so a stale session cannot outlive a sign-in, a rotation, a relabel
-	 * or a wipe.
-	 */
 	@Volatile
 	private var cached: CachedSession? = null
 

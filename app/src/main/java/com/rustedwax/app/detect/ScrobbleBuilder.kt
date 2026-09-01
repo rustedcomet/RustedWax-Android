@@ -4,16 +4,6 @@ import com.rustedwax.app.enrich.MusicBrainzVerifier
 import com.rustedwax.app.enrich.VideoFacts
 import com.rustedwax.hive.HiveScrobblePayload
 
-/**
- * Turns an observed media session into the payload the extension would have
- * broadcast.
- *
- * Kind selection moved to [MusicClassifier] in Phase 4. PHASE0 locked in
- * "`video` for youtube.com, `song` only for music.youtube.com", which turned
- * out to under-claim music badly — covers, live takes and lyric videos are
- * music that doesn't look like `Artist - Track`. Decision D4 inverts the
- * default; see <redacted-private-path>.
- */
 object ScrobbleBuilder {
 
 	/**
@@ -49,31 +39,6 @@ object ScrobbleBuilder {
 		)
 	}
 
-	/**
-	 * The credits for the payload, which depend on the kind.
-	 *
-	 * `Artist - Track` splitting is a **music** operation. Running it on a video
-	 * asserts that the text left of a dash names a performer, and on the watch
-	 * path it usually names a film:
-	 *
-	 * ```
-	 * "Fall 2: Deadpoint (2026) Official Trailer 2 - Harriet Slater, Arsema Thomas"
-	 *   → artist: "Fall 2: Deadpoint (2026) Official Trailer 2"   ← the film
-	 *     title:  "Harriet Slater, Arsema Thomas"                 ← the cast
-	 * ```
-	 *
-	 * That went on-chain on 2026-07-29 with `kind: video`, `category:
-	 * Film & Animation` already resolved and the channel (`Lionsgate Movies`)
-	 * sitting in the notification — the kind was computed and then never
-	 * consulted. The reversed `Iran threatens to attack UK bases… - Risking
-	 * wider war | BBC News` is the same failure; `Track - Artist` ordering is
-	 * common in Spanish-language uploads and MusicBrainz can only arbitrate it
-	 * for real recordings, never for a news clip.
-	 *
-	 * So for a video: the channel is the artist and the whole title is the
-	 * title. Nothing is split, and the description credits are left alone too —
-	 * mining a description for an "original artist" only makes sense for music.
-	 */
 	fun creditsForKind(
 		kind: String,
 		session: SessionSnapshot,
@@ -158,47 +123,16 @@ object ScrobbleBuilder {
 
 	data class Parsed(val artist: String?, val track: String)
 
-	/**
-	 * The duration to measure against: the media session's, or the watch page's
-	 * when the session published none.
-	 *
-	 * Chromium omits `DURATION` often enough to matter — 10 shorts in the
-	 * 2026-07-29 session were skipped as "no duration" before any rule could
-	 * look at them, while `videoDetails.lengthSeconds` for those same ids was
-	 * already being fetched and discarded.
-	 */
 	fun effectiveDurationMs(session: SessionSnapshot, facts: VideoFacts? = null): Long? =
 		session.durationMs ?: facts?.lengthSeconds?.times(1000)
 
-	/**
-	 * Null when the session isn't broadcastable — the caller shows why.
-	 *
-	 * @param videoId the id to build `url` from. Defaults to the session's own
-	 * confirmed id; the engine passes a search-resolved one when the address
-	 * bar never named the video. Missing or malformed ids fail construction:
-	 * URL-less YouTube payloads are forbidden.
-	 * @param durationMs the effective duration. Defaults to
-	 * [effectiveDurationMs] so every caller gets the watch-page fallback without
-	 * having to know about it; the engine passes the same value it fed the rules
-	 * so the payload and the decision can't disagree.
-	 */
 	fun from(
 		session: SessionSnapshot,
 		facts: VideoFacts? = null,
 		mb: MusicBrainzVerifier.Match? = null,
 		videoId: String? = session.confirmed?.videoId,
 		durationMs: Long? = effectiveDurationMs(session, facts),
-		/**
-		 * The canonical title of the video the resolver proved, for the case
-		 * where the screen never showed one.
-		 *
-		 * A Short sent straight to picture-in-picture exposes no readable title,
-		 * and identity now comes from watch history on owner handle + duration
-		 * instead. Measured 2026-08-06: such a Short counted to 100%, resolved
-		 * correctly, and was then dropped with "payload not buildable" because
-		 * the builder had no title to write. The resolver had one all along —
-		 * it corroborated the id on that video's own watch page.
-		 */
+
 		resolvedTitle: String? = null,
 	): HiveScrobblePayload? {
 		// The session itself may not have published a duration; `durationMs` is
@@ -348,13 +282,6 @@ object ScrobbleBuilder {
 
 	private fun sourceArtist(session: SessionSnapshot, facts: VideoFacts?): String? =
 		if (session.profile.packageProvesSource) session.artist ?: facts?.author else facts?.author ?: session.artist
-
-	// `testPayload` used to live here: a fixed synthetic listen, for the
-	// `Broadcast a test scrobble` button. It answered "does signing and broadcast
-	// work?" by writing a listen that never happened onto a ledger that cannot
-	// remove it, and all it could ever report was that *something* failed.
-	// `HiveConnectionCheck` asks the same question in four read-only parts and
-	// leaves no trace.
 
 	private val YOUTUBE_VIDEO_ID = Regex("""^[A-Za-z0-9_-]{11}$""")
 }

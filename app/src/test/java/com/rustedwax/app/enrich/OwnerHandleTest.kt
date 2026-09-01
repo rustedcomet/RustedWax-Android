@@ -17,13 +17,6 @@ class OwnerHandleTest {
 		assertFalse(OwnerHandle.matches("@Status_svijet", "@Status-svijet"))
 	}
 
-	/**
-	 * Measured 2026-08-07: `Go to channel @eduardaarebouçass` was refused on
-	 * the cedilla, and since v0.9.10 the handle is the one mandatory field — so
-	 * the whole listen went with it. Every creator whose handle is not spelled in
-	 * ASCII was invisible to RustedWax, on the accessibility footer and on the
-	 * watch page alike.
-	 */
 	@Test
 	fun `a handle spelled outside ASCII is read on both surfaces`() {
 		val measured = "@eduardaarebouçass"

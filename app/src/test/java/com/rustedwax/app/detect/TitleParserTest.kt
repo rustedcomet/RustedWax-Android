@@ -6,16 +6,11 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The Q5 finding from <redacted-private-path>: a browser media session reports the *channel*
- * as ARTIST and packs the real artist into the title. These cases come from
- * real observed sessions plus the shapes upstream's YouTube rules handle.
- */
 class TitleParserTest {
 
 	@Test
 	fun `splits the observed Korn session correctly`() {
-		// Exactly what Chrome reported in Phase 0 run 2.
+		// Representative Chrome MediaSession metadata.
 		val parsed = TitleParser.parse("Korn - Trash (Official Audio)", "KornVEVO")
 		assertEquals("Korn", parsed.artist)
 		assertEquals("Trash", parsed.track)
@@ -30,11 +25,6 @@ class TitleParserTest {
 		assertEquals("Song", TitleParser.clean("Song | Official Video"))
 	}
 
-	/**
-	 * Regression: v0.2.1 stripped "(Official Video)" and "(HD)" but not the
-	 * combination, so this exact title reached the chain with its suffix
-	 * intact. Observed 2026-07-23.
-	 */
 	@Test
 	fun `strips combined promotional qualifiers`() {
 		assertEquals("Thoughtless", TitleParser.clean("Thoughtless (Official HD Video)"))
@@ -63,7 +53,7 @@ class TitleParserTest {
 	}
 
 	/**
-	 * Phase 4 decision D7 reversed this. Live and acoustic takes now fold into
+	 * Live and acoustic takes fold into
 	 * the original recording so play counts land on one entry — the point of
 	 * the change is that a cover of a song *is* a listen to that song.
 	 *
@@ -185,7 +175,7 @@ class TitleParserTest {
 	}
 
 	@Test
-	fun `log 14 song-credit fixtures are structure and channel aware`() {
+	fun `song-credit fixtures are structure and channel aware`() {
 		TitleParser.parse(
 			"Ice Spice Performs \"Think You The Sh*t (Fart)\" Live On The BET Stage! | " +
 				"BET Awards '24",
@@ -221,7 +211,7 @@ class TitleParserTest {
 	}
 
 	@Test
-	fun `log 16 quoted work with trailing credits is structure aware`() {
+	fun `quoted work with trailing credits is structure aware`() {
 		TitleParser.parse(
 			"W Sound 05 \"LA PLENA\" - Beéle, Westcol, Ovy On The Drums",
 			"W Sound",
@@ -277,7 +267,7 @@ class TitleParserTest {
 	}
 
 	@Test
-	fun `log 17 primary dash and pipe fixtures keep their proven work boundary`() {
+	fun `primary dash and pipe fixtures keep their proven work boundary`() {
 		TitleParser.parse(
 			"Bad Bunny (ft. Chencho Corleone) - Me Porto Bonito (Official Video) | Un Verano Sin Ti",
 			"Bad Bunny",
@@ -295,7 +285,7 @@ class TitleParserTest {
 	}
 
 	@Test
-	fun `log 17 featured channel cannot reverse conventional artist first input`() {
+	fun `featured channel cannot reverse conventional artist first input`() {
 		TitleParser.parse(
 			"Anuel - Ayer ft. Dj Nelson [Official Video]",
 			"DJ Nelson",
@@ -310,7 +300,7 @@ class TitleParserTest {
 	}
 
 	@Test
-	fun `log 17 explicit multi artist lists prove track first orientation`() {
+	fun `explicit multi artist lists prove track first orientation`() {
 		TitleParser.parse(
 			"🌡105F RMX - Kevvo FT Chencho Corleone, Farruko , Myke Towers, Arcangel, " +
 				"Ñengo Flow, Darell, Brytiago",
@@ -410,7 +400,7 @@ class TitleParserTest {
 	}
 
 	@Test
-	fun `log 19 paired promo year group is removed without damaging delimiters`() {
+	fun `paired promo year group is removed without damaging delimiters`() {
 		TitleParser.parse(
 			"Marlon Asher - Strictly High Grade [Official Video 2024]",
 			"Reggaeville",
@@ -440,7 +430,7 @@ class TitleParserTest {
 	}
 
 	@Test
-	fun `log 19 structurally balanced single quoted work protects its dash`() {
+	fun `structurally balanced single quoted work protects its dash`() {
 		TitleParser.parse(
 			"TVXQ! 동방신기 '주문 - MIROTIC' MV",
 			"SMTOWN",
@@ -494,7 +484,7 @@ class TitleParserTest {
 	}
 
 	@Test
-	fun `log 19 exact collapsed owner proof preserves conventional featured title`() {
+	fun `exact collapsed owner proof preserves conventional featured title`() {
 		TitleParser.parse(
 			"DJ Snake - Taki Taki ft. Selena Gomez, Ozuna, Cardi B",
 			"DJSnakeVEVO",
@@ -505,7 +495,7 @@ class TitleParserTest {
 	}
 
 	@Test
-	fun `log 20 conventional featured titles remain artist first without owner proof`() {
+	fun `conventional featured titles remain artist first without owner proof`() {
 		TitleParser.parse(
 			"6IX9INE - SIP ft. Tyga, Nicki Minaj, Blueface (RapKing Music Video)",
 			"RapKing",
@@ -548,7 +538,7 @@ class TitleParserTest {
 	}
 
 	@Test
-	fun `log 19 exact owner and bounded version suffix establish only first dash`() {
+	fun `exact owner and bounded version suffix establish only first dash`() {
 		TitleParser.parse(
 			"BENNETT - Mamma Mia (feat. Mentissa) - Techno Mix (Official Lyric Video)",
 			"BENNETT",
@@ -621,8 +611,7 @@ class TitleParserTest {
 
 	// region trailing hashtags
 	//
-	// All of these went on-chain verbatim in the 2026-07-29 session. The cost
-	// isn't only cosmetic: the tag run is part of the title, so the same clip
+	// The cost is not only cosmetic: the tag run is part of the title, so the same clip
 	// reposted with different tags dedups as a different listen.
 
 	@Test
@@ -718,10 +707,7 @@ class TitleParserTest {
 
 	@Test
 	fun `the AtVEVO channel form resolves to the artist`() {
-		// Measured 2026-08-05: stripping bare "VEVO" from "NickiMinajAtVEVO"
-		// left "NickiMinajAt", whose key never equalled "nickiminaj", so every
-		// Nicki Minaj upload was rejected as "channel contradicts ended channel"
-		// — 14 in one session — when the two names are the same channel.
+
 		assertEquals("NickiMinaj", TitleParser.cleanChannel("NickiMinajAtVEVO"))
 		assertEquals("Korn", TitleParser.cleanChannel("KornVEVO"))
 		assertEquals("Spice", TitleParser.cleanChannel("SpiceOfficialVEVO"))
@@ -732,11 +718,7 @@ class TitleParserTest {
 
 	@Test
 	fun `an ordinary name ending in at keeps its last two letters`() {
-		// Measured 2026-08-10: matched case-insensitively, the "AtVEVO" marker
-		// also ate the tail of every name ending in "at". "dojacatVEVO" became
-		// "dojac", which matches neither the "Doja Cat" a search card or a
-		// playlist row lists nor anything a person would want written as the
-		// artist of their listen.
+
 		assertEquals("dojacat", TitleParser.cleanChannel("dojacatVEVO"))
 		assertEquals("TheCat", TitleParser.cleanChannel("TheCatVEVO"))
 		assertEquals("NickiMinaj", TitleParser.cleanChannel("NickiMinajAtVEVO"))
@@ -746,10 +728,7 @@ class TitleParserTest {
 
 	@Test
 	fun `an uploader on the right of the dash is the artist, not the track`() {
-		// Measured 2026-08-11, on chain: "Runaway - Linkin Park (Hybrid Theory)"
-		// uploaded by "Linkin Park" was broadcast as
-		// artist "Runaway" / title "Linkin Park (Hybrid Theory)". Artist-first is
-		// a convention, not a fact, and the channel said which end was which.
+
 		val parsed = TitleParser.parse("Runaway - Linkin Park (Hybrid Theory)", "Linkin Park")
 		assertEquals("Linkin Park", parsed.artist)
 		assertEquals("Runaway", parsed.track)

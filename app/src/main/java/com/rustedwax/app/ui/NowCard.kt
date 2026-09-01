@@ -5,33 +5,6 @@ import com.rustedwax.app.detect.YouTubeProbe
 import com.rustedwax.hive.HiveScrobblePayload
 import kotlin.math.roundToInt
 
-/**
- * What the Now card says, and everything it is allowed to say.
- *
- * ## Why this is a model rather than a composable
- *
- * The Now card was the diagnostics screen. It drew the package name, the source
- * proof, the browser scan's coverage, the observer's coverage, the video id, the
- * canonical URL, the route that proved the id, the notification hint, the
- * MusicBrainz verdict, the YouTube Music catalogue type, why the kind came out
- * the way it did, the whole prospective payload, a monospace dump of the raw
- * MediaSession metadata, and a button that put the listen on-chain by hand.
- *
- * Every one of those is evidence about *this app*, and none of them answers the
- * question a person opens the app to ask: what is playing, and will it count.
- * That evidence has not been deleted — it is in the event log, which is where a
- * recording of what the app observed belongs, behind a switch, with a retention
- * bound and an Export button.
- *
- * What is left is a closed presentation model. It is a model rather than a
- * `Column` of `Text`s because the point of the change is the *set*: the UI
- * cannot quietly regrow a diagnostic field without changing this type and
- * the `NowCardTest` contract together.
- *
- * Nothing here participates in detection, identity, classification, measurement
- * or eligibility. Every value is read from a snapshot those paths already
- * produced; this decides only how to say it.
- */
 internal data class NowCard(
 	val platform: Platform,
 	/** The channel or artist, whichever the source published. */
@@ -106,14 +79,6 @@ internal data class NowCard(
 			}
 		}
 
-		/**
-		 * @param durationMs the length the engine would measure against, which
-		 * is not always the one the session published — see
-		 * [com.rustedwax.app.detect.ScrobbleBuilder.effectiveDurationMs].
-		 * @param identified whether an exact video is known yet. Taken as a
-		 * boolean rather than an id, so the id itself has no route onto the card.
-		 * @param kind the classified payload kind, or null while undecided.
-		 */
 		fun from(
 			session: SessionSnapshot,
 			durationMs: Long?,

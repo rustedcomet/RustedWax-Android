@@ -4,15 +4,6 @@ import com.rustedwax.core.TextNormalizer
 import java.text.Normalizer
 import java.util.Locale
 
-/**
- * Pure presentation-aware comparison for two observations of one video title.
- *
- * This does not resolve a title to a video and contains no media catalogue. It
- * only decides whether a page title can corroborate the MediaSession title for
- * an id already observed from the browser. [SessionProbe] still checks page
- * duration independently, and finalized resolution applies the same predicate
- * before any fetched facts may enter a payload.
- */
 object VideoTitleMatcher {
 
 	enum class Evidence {
@@ -23,31 +14,13 @@ object VideoTitleMatcher {
 	}
 
 	fun compare(first: String, second: String): Evidence {
-		// A title does not need letters or digits to be exact. The 2026-08-14
-		// field Short `🥰❤️` was byte-identical in the foreground proof,
-		// resolved candidate and finalized snapshot, but both token lists below
-		// were empty and therefore contradicted one another. Presentation
-		// selectors change only whether an emoji is drawn as text or color, not
-		// which title YouTube displayed; preserve every actual emoji scalar.
+
 		if (samePresentation(first, second)) return Evidence.EXACT
 		val left = tokens(first)
 		val right = tokens(second)
 		if (left.isEmpty() || right.isEmpty()) return Evidence.CONTRADICTION
 		if (left == right) return Evidence.EXACT
 
-		// One channel mention, spelled two ways. A title may embed an `@` mention,
-		// and YouTube renders it as the handle in one place and the display name
-		// in another — measured 2026-08-16 for `aZUbc6fCNDk`, whose watch page
-		// says `@yingyangtwins5139` where its own MediaSession says
-		// `@YING YANG TWINS`. Every other word of the title was byte-identical,
-		// and the correct address-bar id was rejected for the difference.
-		//
-		// A mention names a channel, not the work, so it is presentation. This is
-		// deliberately not fuzzy: the two titles must agree on everything before
-		// the mention and everything after it, the disagreement must be one
-		// contiguous run on each side, that run must begin at an `@` on both, and
-		// the identical surrounding text must be substantial. `Cover by @alice`
-		// against `Cover by @bob` shares two tokens and stays a contradiction.
 		if (mentionOnlyDifference(first, second)) return Evidence.STRONG_CONTAINMENT
 
 		val shorter = if (left.size <= right.size) left else right
@@ -71,29 +44,7 @@ object VideoTitleMatcher {
 		if (shorter.size in 1..MAX_WEAK_TOKENS && shorter == work) {
 			return Evidence.WEAK_SHORT_CANONICAL_CORE
 		}
-		// The canonical title as the *tail* of a longer presentation.
-		//
-		// Measured 2026-08-16 for `dE8D6WY6tQQ`: its watch page is titled
-		// `Bounce` and its MediaSession publishes
-		// `Ladii Rose ft Dej RoseGold Bounce (Official Video)`. The parsed-work
-		// route above cannot see it, because `ft` there joins two *artists* and
-		// [TRAILING_FEATURE_CREDITS] strips the work along with the credit,
-		// leaving `Ladii Rose`. So the correct id was graded a contradiction and
-		// filed as rejected, and the Mix queue's later independent resolution of
-		// that same id was vetoed by it.
-		//
-		// Position is what separates this from the case the rank already guards:
-		// in `Artist - Track` and `Artist ft Artist Track` the work is at the end,
-		// so a short *suffix* is the canonical core, while a short *prefix* is the
-		// uploader — `Bad Bunny` must still not corroborate
-		// `Bad Bunny - Another Song`, and does not, because it is a prefix.
-		//
-		// This remains the weak rank deliberately. It never confirms an id on its
-		// own; a caller still needs same-generation duration corroboration. What
-		// it changes is that insufficiency stops being recorded as a
-		// contradiction, so it no longer outranks stronger evidence arriving
-		// later — the rule this file's callers already state for the other weak
-		// shape.
+
 		return if (shorter.size in 1..MAX_WEAK_TOKENS &&
 			longer.takeLast(shorter.size) == shorter
 		) {
@@ -103,26 +54,6 @@ object VideoTitleMatcher {
 		}
 	}
 
-	/**
-	 * [mentionOnlyDifference] with the differing run additionally bounded to the
-	 * length of a channel name, for callers where this is the *primary* title
-	 * test rather than corroboration for an id already observed elsewhere.
-	 *
-	 * The anchoring in [mentionOnlyDifference] fixes where the disagreement
-	 * starts but not where it stops, so a run beginning at an `@` may extend
-	 * across the rest of the title:
-	 * `… Feat. @SexyyRed - Different Song Entirely (Official Video)` differs from
-	 * `… Feat. @Sexyy Red - Slut Me Out Remix (Official Video)` in one run that
-	 * starts at a mention on both sides, and the uncapped rule calls that
-	 * presentation. Corroborating an address-bar id that way is bounded by the
-	 * id's own provenance; *selecting* a search result that way is not, and the
-	 * two songs above are a plausible pair of uploads by one channel.
-	 *
-	 * [MAX_MENTION_RUN_TOKENS] is what a channel name occupies:
-	 * `@yingyangtwins5139` against `@YING YANG TWINS` (measured 2026-08-16) is
-	 * the longest observed, at three. The 2026-08-17 run's three losses are one
-	 * and two.
-	 */
 	fun mentionSpellingOnly(first: String, second: String): Boolean =
 		mentionOnlyDifference(first, second, maxRunTokens = MAX_MENTION_RUN_TOKENS)
 
@@ -207,7 +138,6 @@ object VideoTitleMatcher {
 
 	private const val MIN_STRONG_CONTAINED_TOKENS = 3
 
-	/** Longest observed channel name inside a mention run — `@YING YANG TWINS`. */
 	private const val MAX_MENTION_RUN_TOKENS = 3
 	private const val MAX_WEAK_TOKENS = 2
 	private val EMOJI_PRESENTATION_SELECTOR = Regex("[\\uFE0E\\uFE0F]")

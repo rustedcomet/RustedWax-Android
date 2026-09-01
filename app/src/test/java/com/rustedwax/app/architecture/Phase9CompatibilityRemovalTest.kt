@@ -6,7 +6,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Executable Architecture Audit Phase 9 compatibility-removal boundaries. */
+/** Executable compatibility-removal boundaries. */
 class Phase9CompatibilityRemovalTest {
 
 	private val root: File by lazy {

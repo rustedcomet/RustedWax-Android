@@ -1,42 +1,7 @@
 package com.rustedwax.app.detect
 
 import com.rustedwax.core.TextNormalizer
-/**
- * Splits `"Korn - Trash (Official Audio)"` into artist and track.
- *
- * Phase 0 run 2 established this is mandatory, not cosmetic: a browser media
- * session reports `ARTIST` as the *channel* ("KornVEVO") and packs the real
- * artist into the video title. Broadcasting raw would write
- * `artist: "KornVEVO"` to the chain, which matches no desktop scrobble of the
- * same song and poisons per-artist indexes.
- *
- * A minimal port of the YouTube rules from `@web-scrobbler/metadata-filter`
- * plus the extension's `pipeline/normalize`. Upstream's tables are far larger
- * and encode years of edge cases; this covers the common shapes.
- *
- * ## Phase 4: normalize to the original recording (decision D7)
- *
- * Cover, live, instrumental and karaoke markers are now **stripped**, so a
- * guitar cover lands on the same entry as the studio track and play counts
- * accumulate in one place instead of scattering. This is a deliberate
- * divergence from the desktop extension, which keeps them — see <redacted-private-path>.
- *
- * Two limits worth knowing:
- *
- *  - `(Live)` is stripped; `(Live at Wembley)` is kept, because a group is only
- *    dropped when *every* word in it is a known qualifier and no table can
- *    enumerate venue names. A named live recording surviving is the better
- *    failure anyway.
- *  - `(Remix)` is kept. A remix is a distinct work, usually by a different
- *    artist, so folding it into the original would be wrong rather than tidy.
- *
- * ## Trailing hashtags are stripped too
- *
- * Short-form titles are largely tag runs, and leaving them in the title makes
- * the same clip dedup as a different listen every time its tags change. See
- * [TRAILING_HASHTAGS], and [isHashtagOnly] for the case where the tags are all
- * there is.
- */
+
 object TitleParser {
 
 	data class Parsed(val artist: String?, val track: String)
@@ -80,7 +45,7 @@ object TitleParser {
 	/**
 	 * A bracketed group and its contents, ASCII and CJK.
 	 *
-	 * CJK brackets were added in Phase 4: `【Guitar Cover】` is the same
+	 * `【Guitar Cover】` is the same
 	 * construct as `(Guitar Cover)` and was previously invisible to the parser.
 	 */
 	private val BRACKETED = Regex(
@@ -129,25 +94,6 @@ object TitleParser {
 	/** A bare year, as cover uploads tend to append (`… Medusa 2023`). */
 	private val TRAILING_YEAR = Regex("""\s+(?:19|20)\d{2}\s*$""")
 
-	/**
-	 * A trailing run of hashtags, plus whatever emoji or punctuation trails it.
-	 *
-	 * Short-form titles are mostly tags. From the 2026-07-29 session, on-chain
-	 * verbatim: `katter — #guitar #dubstep #djdubstep #fnaf #fivenightsatfreddy`
-	 * and `Rony González — #plena#panama 🇵🇦`.
-	 *
-	 * Two costs, and the second is the one that matters. The entries read as
-	 * spam — and because the tag run is part of the title, the same clip
-	 * reposted with different tags dedups as a different listen and lands twice
-	 * on a chain that can't be edited.
-	 *
-	 * Only a *trailing* run is stripped. A hashtag mid-sentence is doing work
-	 * ("Song Title #2 of the series"), and no table can tell those apart.
-	 * `[\p{L}\p{N}_]` rather than `\w` so non-Latin tags are recognised — the
-	 * session was full of Turkish, Korean and Chinese ones. The trailing
-	 * `[^\p{L}\p{N}]*` is what catches `#plena#panama 🇵🇦`, where a flag emoji
-	 * sits after the last tag.
-	 */
 	private val TRAILING_HASHTAGS =
 		Regex("""(?:\s*#[\p{L}\p{N}_]+)+[^\p{L}\p{N}]*$""")
 
@@ -246,15 +192,6 @@ object TitleParser {
 		"tab", "tabs",
 	)
 
-	/**
-	 * `…AtVEVO` where the `At` is a capitalized word of its own.
-	 *
-	 * Stripping bare "VEVO" off `NickiMinajAtVEVO` leaves `NickiMinajAt`, whose
-	 * key never equals `nickiminaj` — measured 2026-08-05, 14 rejections in one
-	 * session, every Nicki Minaj upload. The preceding character has to be
-	 * lower-case or a digit and the `At` has to be capitalized, which is what
-	 * separates the marker from the ordinary letters of `dojacatVEVO`.
-	 */
 	private val AT_VEVO = Regex("""[\p{Ll}\p{N}]At[Vv][Ee][Vv][Oo]$""")
 
 	/** Channel suffixes that mark an artist-owned channel. */
@@ -378,22 +315,7 @@ object TitleParser {
 						!looksLikeExplicitMultiArtistCredits(left) &&
 						(!hasWorkPrefixBeforeFeature(right) || looksStronglyWorkShaped(left)) ->
 						Parsed(right, finishTrack(left))
-					// `Work - Owner (Album)`, which is the same proof as the left-hand
-					// case above, read from the other end.
-					//
-					// Measured 2026-08-11: "Runaway - Linkin Park (Hybrid Theory)"
-					// on the channel "Linkin Park" went on chain as
-					// `artist: "Runaway", title: "Linkin Park (Hybrid Theory)"`,
-					// because the conventional-dash rule below never consults the
-					// channel and artist-first is only a convention.
-					//
-					// Deliberately not `rightAgreement > leftAgreement`: a shared
-					// word is not proof. This wants the right side, with its
-					// bracketed groups taken off, to *be* the owner — and the left
-					// to share nothing with the owner at all, so a title that names
-					// the channel on both sides is never flipped. The artist
-					// recorded is the owner's own name, not the bracketed form,
-					// because that is what was proven.
+
 					isConventionalDash(sep) && rightSideIsTheOwner(right, left, channel) ->
 						Parsed(cleanChannel(channel), finishTrack(left))
 					// A featured artist named by the uploader/channel on the right
@@ -790,13 +712,7 @@ object TitleParser {
 		var changed = true
 		while (changed) {
 			changed = false
-			// "At" is an ownership marker only where it is its own capitalized
-			// word. Matched case-insensitively it also eats the last two letters
-			// of any name ending in "at": `dojacatVEVO` became `dojac`, which is
-			// neither the channel nor the artist, so search cards and playlist
-			// rows reading "Doja Cat" stopped matching the session — and a title
-			// with no separator would have written `dojac` to the chain as the
-			// artist. Measured 2026-08-10.
+
 			AT_VEVO.find(out)?.let { match ->
 				out = out.dropLast(match.value.length - 1).trim()
 				changed = true

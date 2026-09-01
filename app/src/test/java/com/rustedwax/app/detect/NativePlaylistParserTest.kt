@@ -4,11 +4,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * Fixtures are the literal shapes dumped from YouTube 21.30.209 on a
- * Samsung <redacted-device-model> / Android 12, 2026-08-04. See
- * `<redacted-private-path>` §4.1.
- */
 class NativePlaylistParserTest {
 
 	private val pkg = YouTubeProbe.YOUTUBE_PACKAGE

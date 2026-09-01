@@ -97,9 +97,7 @@ class ShortsAndPipReplayTest : ReplayScenarioTest() {
 
 	@Test
 	fun `a Short whose footer showed no title is still identified by handle and length`() {
-		// Measured 2026-08-06: a Short counted to 100% and was rejected for
-		// having no readable title. The title was only ever one of three
-		// agreeing fields.
+
 		val harness = ReplayHarness(ReplaySource.NATIVE_YOUTUBE)
 		harness.env.facts.put(shortFacts("shOrtVideo2", "Some Canonical Title", 20))
 		historyNames(harness, "shOrtVideo2", "Some Canonical Title", 20)
@@ -148,10 +146,7 @@ class ShortsAndPipReplayTest : ReplayScenarioTest() {
 
 	@Test
 	fun `a Short whose progress surface went away says so instead of claiming zero percent`() {
-		// Measured 2026-08-05: a PiP session reported "played 0%, below 60%
-		// threshold" and was indistinguishable from a parser bug for most of a
-		// day. It refuses either way; the difference is whether the record is
-		// honest about why.
+
 		val harness = ReplayHarness(ReplaySource.NATIVE_YOUTUBE)
 		harness.env.facts.put(shortFacts("shOrtVideo4", "#clip", 40))
 		historyNames(harness, "shOrtVideo4", "#clip", 40)
@@ -392,8 +387,7 @@ class ShortsAndPipReplayTest : ReplayScenarioTest() {
 
 	@Test
 	fun `a Short watched past its own end still earns exactly one transaction`() {
-		// Observed on-chain 2026-07-24: the same clip broadcast twice in one
-		// block at 100% and 76%, because Shorts auto-loop.
+
 		val harness = ReplayHarness(ReplaySource.NATIVE_YOUTUBE)
 		harness.env.facts.put(shortFacts("loopyShort1", "#loop", 20))
 		historyNames(harness, "loopyShort1", "#loop", 20)

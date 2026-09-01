@@ -3,40 +3,6 @@ package com.rustedwax.app.enrich
 import org.json.JSONArray
 import org.json.JSONObject
 
-/**
- * Pure extraction for YouTube Music's public WEB_REMIX search response.
- *
- * A normal YouTube search does not reliably list distributor art tracks. The
- * Music catalog does, with an exact `videoId`, structural artist links and a
- * `musicVideoType`.
- *
- * ## Why the songs filter, and what it buys
- *
- * The unfiltered search renders a song's byline as `Song • Artist` and puts the
- * play count in the third column. The **songs-filtered** search renders the same
- * row as `Artist • Album • Duration`, with the album carried as its own
- * `MUSIC_PAGE_TYPE_ALBUM` run. That difference is the whole reason this parser
- * asks for the filter.
- *
- * Measured 2026-08-21, `Jah Jah City` / `Capleton`, which the field log shows
- * being refused after a full 216 s listen:
- *
- * ```
- * oRuSuMag9CU  Capleton • Reggae Gold 1999               • 3:37
- * -uQ--ieyL-4  Capleton • The Very Best of Capleton Gold • 3:34
- * ```
- *
- * Two art tracks of one recording, same work, same artist, three seconds apart
- * — inside the resolver's duration tolerance. On title+artist+duration alone
- * they are indistinguishable, so every id was refused and the listen was lost.
- * The MediaSession published `ALBUM = "Reggae Gold 1999"`, which names exactly
- * one of them. Album is not a tie-break heuristic here; it is the field the
- * player already publishes and the catalog already indexes, and it is what makes
- * an art track uniquely identifiable at all.
- *
- * Nothing is accepted by rank. The caller still verifies every bounded candidate
- * before one id can become authority.
- */
 object YouTubeMusicCatalogSearchParser {
 
 	/**
@@ -203,41 +169,6 @@ object YouTubeMusicCatalogSearchParser {
 			NativeStructuredMusicMatcher.completeCreditsAgree(candidate.artists, nativeArtist) &&
 			NativeStructuredMusicMatcher.worksAgree(candidate.title, nativeTitle)
 
-	/**
-	 * The credited artists on one row, whether or not YouTube linked them.
-	 *
-	 * ## Why the link cannot be required
-	 *
-	 * The byline's artist runs usually carry a `MUSIC_PAGE_TYPE_ARTIST`
-	 * navigation endpoint, and those entities are the best evidence there is — so
-	 * they are still preferred. But YouTube does not always hyperlink the artist,
-	 * and this parser treated "not a link" as "no artist" and discarded the whole
-	 * row. Measured 2026-08-23 against captured search responses, every one of
-	 * these was the correct row, present in the response, thrown away:
-	 *
-	 * ```
-	 * h7YAywGQ_n8  450 • Live n' Learn • 2:42
-	 * TGZA0_vsQEE  Di Genius, Bounty Killer, Bling Dawg, Wayne Marshall, Mavado, and Busy Signal • …
-	 * fX1Ht2b0YzI  Masicka & Kraff Gad • Forever Reign • 3:11
-	 * SDD6jSFt6ZA  Intence & Armzhouse • Gun Mouth • 3:05
-	 * msy42nVSZG8  Mavado & Di Genius • Di Genius Presents-Labwork Vol.1 • 3:24
-	 * ```
-	 *
-	 * In each case the byline's artist text is *character-identical* to what the
-	 * player published, so the evidence was sitting in the response the whole
-	 * time. The credit is returned as one entry rather than pre-split, which lets
-	 * [NativeStructuredMusicMatcher.creditsAgree] compare the whole string first
-	 * and only then fall back to its own separator grammar — the same order it
-	 * uses everywhere else.
-	 *
-	 * ## Telling the two byline shapes apart
-	 *
-	 * A songs-filtered row reads `Artist • Album • Duration`; an unfiltered one
-	 * reads `Song • Artist` with a play count in the third column. They are
-	 * distinguished by their **last** segment: a running time means the former,
-	 * anything else the latter. Position alone would read the literal word
-	 * "Song" as the artist.
-	 */
 	private fun bylineArtists(byline: List<JSONObject>): List<String> {
 		val linked = byline.filter { pageType(it) == "MUSIC_PAGE_TYPE_ARTIST" }
 			.mapNotNull { it.optString("text").takeIf(String::isNotBlank) }

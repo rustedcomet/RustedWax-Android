@@ -152,7 +152,7 @@ internal class ProductionFinalizationOrchestrator(
 	private val effects: FinalizationEffects,
 	private val observer: () -> FinalizationObserver,
 ) : FinalizationOrchestrator {
-	/** The production boundary is the source-neutral Phase 2 domain object. */
+	/** The production boundary accepts the source-neutral finalized domain object. */
 	override fun execute(
 		track: FinalizedTrack,
 		trigger: FinalizationTrigger,

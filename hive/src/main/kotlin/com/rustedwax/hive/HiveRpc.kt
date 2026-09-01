@@ -27,10 +27,6 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 			MEMPOOL,
 		}
 
-		/**
-		 * Accepted and independently observed. [evidence] says whether the
-		 * observation was block inclusion or mempool relay.
-		 */
 		data class Success(
 			val txId: String,
 			val node: String,
@@ -121,33 +117,6 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 		}
 	}
 
-	/**
-	 * Broadcast, then **verify the transaction reached a block**.
-	 *
-	 * @param expectedTxId the id computed locally from the signed transaction.
-	 * Required for confirmation — `broadcast_transaction` returns an empty result,
-	 * so there is nothing to confirm against otherwise.
-	 * @param sleep injected so tests don't wait on real block time
-	 *
-	 * ## Why this doesn't just trust the RPC
-	 *
-	 * It used to. On 2026-07-30 `api.openhive.network` froze at block 108575690
-	 * and stayed there — answering every RPC normally while 77 minutes behind the
-	 * chain. It accepted five scrobbles into a pending block that would never be
-	 * produced, returned no error for any of them, and the app reported five
-	 * successes with locally-computed transaction ids. None existed on-chain.
-	 *
-	 * It then *refused* the next two with "Account ${'$'}{a} already submitted
-	 * ${'$'}{n} custom json operation(s) this block" — an error that cannot
-	 * legitimately fire for operations minutes apart, and the symptom that gave
-	 * the stall away: the node's block never advanced, so the five stuck
-	 * operations were forever "this block".
-	 *
-	 * A freshness check ([chainLagSeconds]) would have skipped that node, and does
-	 * now. But no liveness check can cover every way a node can misbehave, so
-	 * success is confirmed against a *different* node than the one that accepted
-	 * it — see [confirm].
-	 */
 	fun broadcast(
 		signedTx: JSONObject,
 		expectedTxId: String? = null,
@@ -239,30 +208,6 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 		System.currentTimeMillis() / 1000 - head
 	}.getOrNull()
 
-	/**
-	 * How strongly an independent healthy node could corroborate acceptance.
-	 *
-	 * Polls because inclusion takes a block or two; Hive produces one every
-	 * three seconds. Block, mempool, explicit unknown, and no-answer remain
-	 * separate so callers cannot accidentally display ambiguity as inclusion.
-	 *
-	 * ## What counts as confirmed, and why mempool does
-	 *
-	 * The question being asked is **"does any healthy node other than the one
-	 * that accepted it know this transaction exists?"** That is the check the
-	 * frozen node failed: it held five
-	 * transactions in a pending block it would never produce, and no other node
-	 * had ever heard of them, so every healthy node answers `unknown`.
-	 *
-	 * So `within_mempool` on the last attempt counts as independently observed,
-	 * but it is not labelled as block inclusion. A transaction that is relaying
-	 * and alive will almost always land in the next block or
-	 * two, and the alternative is worse in a specific way: reporting failure
-	 * queues it, the retry rebuilds it with a fresh expiration and therefore a new
-	 * id, and if the original *did* land the result is a duplicate on a chain that
-	 * cannot be edited. A missed entry can be earned again by watching. A
-	 * duplicate is permanent. On ambiguity, don't retry.
-	 */
 	private enum class Confirmation { BLOCK, MEMPOOL, NOT_FOUND, UNAVAILABLE }
 
 	private enum class TransactionObservation { BLOCK, MEMPOOL, UNKNOWN, UNAVAILABLE }
@@ -367,11 +312,6 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 		throw RpcException("all nodes failed: ${lastError?.message}")
 	}
 
-	/**
-	 * @param params a `JSONArray` for the positional `condenser_api` calls, or a
-	 * `JSONObject` for the newer named-argument APIs such as
-	 * `transaction_status_api`.
-	 */
 	private fun post(node: String, method: String, params: Any): JSONObject {
 		val body = JSONObject()
 			.put("jsonrpc", "2.0")
@@ -427,7 +367,6 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 		return if (needsValues && values != null) "$base $values" else base
 	}
 
-	/** Chain timestamps are `2026-07-23T05:47:34`, implicitly UTC. */
 	private fun parseChainTime(value: String): Long {
 		val fmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US)
 		fmt.timeZone = java.util.TimeZone.getTimeZone("UTC")
@@ -437,14 +376,6 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 	companion object {
 		private const val TIMEOUT_MS = 8000
 
-		/**
-		 * How far behind the chain a node may be and still be used.
-		 *
-		 * Hive produces a block every three seconds, so a healthy node is within a
-		 * few seconds. Generous enough to absorb phone-clock drift and a slow
-		 * round-trip; tight enough that the 77-minute stall which lost seven
-		 * listens on 2026-07-30 is skipped instantly.
-		 */
 		const val MAX_NODE_LAG_SEC = 90L
 
 		/** Blocks are 3s; this waits ~5 of them before giving up on inclusion. */
@@ -465,11 +396,6 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 
 		private val PLACEHOLDER = Regex("""\$\{\w+\}""")
 
-		/**
-		 * Substrings that mark a refusal as worth retrying. Narrow on purpose: the
-		 * per-block `custom_json` limit is a rate limit, and resource credits
-		 * regenerate, but a bad signature never becomes good.
-		 */
 		private val TRANSIENT_MARKERS = listOf(
 			"already submitted",
 			"custom json operation",
@@ -479,20 +405,6 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 			"rate limit",
 		)
 
-		/**
-		 * Failover order matters — the first healthy node wins, and freshness is
-		 * checked before anything is sent.
-		 *
-		 * `hive-api.arcange.eu` was dropped on 2026-07-30: it answered a broadcast
-		 * with an empty body and its DGP call with nothing at all.
-		 * `api.openhive.network` moved off the front for being the node that
-		 * froze — it is kept because a stall is a transient condition and the
-		 * freshness check now handles it, not because it is trusted more.
-		 *
-		 * Every node here was probed for a current head block *and* for
-		 * `transaction_status_api` support, which the confirmation step needs.
-		 * `anyx.io` was considered and dropped: unreachable on both counts.
-		 */
 		val DEFAULT_NODES = listOf(
 			"https://api.hive.blog",
 			"https://api.deathwing.me",

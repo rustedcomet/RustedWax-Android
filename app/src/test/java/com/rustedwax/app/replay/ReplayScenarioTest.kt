@@ -9,23 +9,6 @@ import com.rustedwax.app.enrich.VerifiedIdentityCandidateCache
 import com.rustedwax.app.scrobble.FinalizationRuntime
 import org.junit.After
 
-/**
- * Puts the process-wide state back the way it was found.
- *
- * `FinalizationRuntime` is an object and the evidence stores are objects, so a JVM
- * that has run one replay is not the JVM the next test expects. `ReplayHarness`
- * already clears everything on the way *in*, which is what makes the scenarios
- * independent of each other; this clears on the way *out*, so the replay package
- * cannot change what a test in some other package sees.
- *
- * That asymmetry is deliberate. Cleaning up after yourself is politeness;
- * refusing to trust the state you were handed is what actually makes a suite
- * order-independent, and the harness does both.
- *
- * This exists at all because of `<redacted-private-path>` §2 — mutable evidence
- * with no single owner. Phase 5 gives that state a run-scoped owner and this
- * class becomes unnecessary. Until then, one teardown in one place beats six.
- */
 abstract class ReplayScenarioTest {
 
 	/**

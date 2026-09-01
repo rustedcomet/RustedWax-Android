@@ -7,29 +7,6 @@ import java.net.URI
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 
-/**
- * Decides whether a browser media session is YouTube — and if possible, which
- * video.
- *
- * v1 scrobbles YouTube-in-Brave only. That makes this class the gate on the
- * whole pipeline, because a media session names the *package*
- * (com.brave.browser), never the site. If we can't prove the session is
- * YouTube, we don't scrobble it: guessing would attribute Spotify-web or
- * SoundCloud listens to YouTube, and wrong data on an immutable chain is worse
- * than no data.
- *
- * Evidence, in descending order of quality:
- *
- *   1. A watch URL in `METADATA_KEY_MEDIA_URI` → site *and* video id.
- *   2. An artwork URI matching `i.ytimg.com/vi/<id>` → site *and* video id.
- *   3. The page origin from the media notification's sub-text → site only.
- *
- * **Phase 0 measured that Chromium provides neither 1 nor 2** — it publishes
- * artwork as an embedded bitmap and leaves every URI key unset (<redacted-private-path>, Q3).
- * So route 3 is expected to be the one that actually fires. It proves the site
- * but cannot build a payload until the exact id is supplied by browser evidence
- * or recovered by the playlist/search/watch-page resolver.
- */
 object YouTubeProbe {
 	const val YOUTUBE_PACKAGE = "com.google.android.youtube"
 	const val YOUTUBE_MUSIC_PACKAGE = "com.google.android.apps.youtube.music"
@@ -181,16 +158,6 @@ object YouTubeProbe {
 			override val isSourceProven: Boolean get() = true
 		}
 
-		/**
-		 * Can't prove the site. Never scrobbled.
-		 *
-		 * @param provenOtherSite true when the evidence didn't merely fail to
-		 * prove YouTube but positively named a *different* site. That's a
-		 * stronger statement than "unknown", and the probe uses it to poison the
-		 * track for good — the Android session binding retains that veto. Without the
-		 * distinction, a track that was demonstrably SoundCloud could be
-		 * rehabilitated by a YouTube notification arriving from another tab.
-		 */
 		data class Unconfirmed(
 			val reason: String,
 			val provenOtherSite: Boolean = false,
@@ -265,12 +232,6 @@ object YouTubeProbe {
 	fun identifyNative(packageName: String, md: MetadataFields?): Identity =
 		identifyNative(packageName, nativeMetadataFields(md))
 
-	/**
-	 * @param md the session's metadata
-	 * @param hint the notification bound to *this* session, if any
-	 * @param url what the address bar last said, if the watcher is enabled
-	 * @param soleSession whether this is the browser's only media session
-	 */
 	fun identify(
 		md: MetadataFields?,
 		hint: NotificationHints.Hint? = null,

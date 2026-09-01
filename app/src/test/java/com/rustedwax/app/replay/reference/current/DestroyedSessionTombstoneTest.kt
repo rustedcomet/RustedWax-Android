@@ -17,38 +17,6 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * A destroyed session, listed again by the platform.
- *
- * ## The production fault
- *
- * `SessionProbe.syncControllers` files watches under `sessionToken.toString()`
- * and builds a watch for any key it does not already hold. Android may keep
- * returning a released controller from `getActiveSessions` for a short time, so
- * the sequence "watch removed by the departure sweep, dead token offered again"
- * produced a **second** watch over one logical listen.
- *
- * Measured on <redacted-device-model> / API 31 while closing the replacement gate: two watches
- * for one package, both reaching the track-change branch — "track change after
- * 5s played" from the one holding the carried progress and "after 2s played"
- * from the resurrected one — with the winner varying between runs.
- * `<redacted-private-path>` gates on "no duplicate transaction after MediaSession
- * recreation", so a nondeterministic second watch is a gate failure rather than
- * a test inconvenience.
- *
- * ## This is a declared divergence from the reference
- *
- * The pre-migration `Watch` has the same fault — the tombstone is a **fix made
- * during Phase 3**, not behaviour the extraction preserved. `<redacted-private-path>`
- * allows that only on terms: "Production bug fixes should not be mixed with
- * structural migration unless the bug is first reproduced in the replay corpus
- * and the behavior change is explicitly documented."
- *
- * So both halves are asserted here, in both directions: the reference really does
- * resurrect the dead token, and the current implementation really does refuse it.
- * If either stops being true this fails, which is what makes the divergence a
- * recorded fact rather than a claim in a comment.
- */
 class DestroyedSessionTombstoneTest {
 
 	private val native = YouTubeProbe.YOUTUBE_PACKAGE

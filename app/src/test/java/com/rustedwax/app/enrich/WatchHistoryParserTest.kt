@@ -5,18 +5,6 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The watch-history feed, which is the only surface that names an exact video
- * id for native playback outside a playlist.
- *
- * The signed-out shape is taken from the **real** page measured on 2026-08-04
- * (`http=200 bytes=770396`, `responseContext.mainAppWebResponseContext.loggedOut
- * = true`, zero `videoRenderer` nodes, a `messageRenderer` reading "Keep track
- * of what you watch" with a "Sign in" button). The signed-in shape uses the
- * ordinary `videoRenderer` the search page serves, which is what the feed is
- * built from; the live authenticated markup is checked in the field test rather
- * than assumed here.
- */
 class WatchHistoryParserTest {
 
 	private fun row(id: String, title: String, channel: String, length: String) =
@@ -144,11 +132,6 @@ class WatchHistoryParserTest {
 		assertEquals("YbZwlNmnUvw", entries.single().videoId)
 	}
 
-	/**
-	 * A foreground Short knows its owner by `@handle`; the feed writes a display
-	 * name. The handle is taken from the byline's own canonical link, so a
-	 * display name that merely looks like a handle can never be read as one.
-	 */
 	@Test
 	fun `reads the owner handle from the byline's canonical link`() {
 		val withHandle = """{"responseContext":{"mainAppWebResponseContext":{"loggedOut":false}},
@@ -178,13 +161,6 @@ class WatchHistoryParserTest {
 		assertNull(entry.ownerHandle)
 	}
 
-	/**
-	 * The cause of the reported "Shorts are being skipped". A Short is not a
-	 * `videoRenderer` at all — measured 2026-08-05, a public search page served
-	 * 26 `shortsLockupViewModel` cards and zero `videoRenderer` — so a
-	 * Shorts-only viewing session left the ordinary list unchanged and every
-	 * Short refused.
-	 */
 	@Test
 	fun `reads Shorts, and keeps them out of the ordinary entry list`() {
 		val withShorts = """{"responseContext":{"mainAppWebResponseContext":{"loggedOut":false}},

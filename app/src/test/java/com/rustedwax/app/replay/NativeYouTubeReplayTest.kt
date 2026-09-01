@@ -115,10 +115,7 @@ class NativeYouTubeReplayTest : ReplayScenarioTest() {
 
 	@Test
 	fun `a VEVO channel alias does not refuse an id the route already proved`() {
-		// Measured 2026-08-09: 46 correct ids refused in one day because the
-		// MediaSession names the artist and the watch page names the label's
-		// channel. No rule normalises "BMTHOfficialVEVO" into "Bring Me The
-		// Horizon", and none should — the id is what licenses the alias.
+
 		val harness = ReplayHarness(ReplaySource.NATIVE_YOUTUBE)
 		harness.env.facts.put(facts("UNaYpBpRJOY", "Avalanche (Official Video)", "Bring Me The Horizon", 275))
 		harness.env.identity.search = {
@@ -154,9 +151,7 @@ class NativeYouTubeReplayTest : ReplayScenarioTest() {
 
 	@Test
 	fun `a title YouTube auto-translated is the same video and not a second candidate`() {
-		// Measured 2026-08-05: the resolver found the video correctly and the
-		// corroborator threw it away because the screen showed the Spanish
-		// rendering while `videoDetails` kept the uploaded English one.
+
 		val harness = ReplayHarness(ReplaySource.NATIVE_YOUTUBE)
 		harness.env.facts.put(
 			facts("QnRnooyKeZk", "The Day Karol G Experienced Something New", "A Channel", 610),
@@ -306,10 +301,7 @@ class NativeYouTubeReplayTest : ReplayScenarioTest() {
 
 	@Test
 	fun `a carry that no longer revalidates falls through instead of losing the listen`() {
-		// Measured 2026-08-06: "Nicki Minaj - Barbie Tingz" had its id named by
-		// watch history during playback; at finalize the carry route refused and
-		// returned, so history was never asked again and a listen it could still
-		// identify was thrown away.
+
 		val harness = ReplayHarness(ReplaySource.NATIVE_YOUTUBE)
 		harness.env.facts.put(facts("BarbieTing1", "Nicki Minaj - Barbie Tingz", "NickiMinajAtVEVO", 200))
 		harness.env.watchHistory.hasSession = true

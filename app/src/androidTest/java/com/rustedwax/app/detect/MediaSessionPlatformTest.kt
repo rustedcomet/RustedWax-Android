@@ -266,25 +266,6 @@ class MediaSessionPlatformTest {
 	 */
 	// ---- Defect 4 root cause: stale metadata survives a later id-less playback ----
 
-	/**
-	 * A session keeps its last metadata under a later playback that publishes none.
-	 *
-	 * This is the platform fact behind FIELD log 26's four teardown refusals. YouTube
-	 * published `TITLE`/`DURATION` for one Short, that Short ended and scrobbled, and
-	 * minutes later a *different*, id-less playback finalized carrying the first
-	 * Short's title and its length — "#amapiano Shuffle Vol 1", 66s of 66s, published
-	 * 9m41s earlier; "amapiano vibes", 34s of 34s, 6m37s earlier; one title 1h28m old.
-	 *
-	 * The organic race that produces an id-less native session could not be summoned
-	 * on demand (ten methods, 2.7% of field sessions). The *mechanism* it depends on
-	 * can be: if the controller keeps serving stale metadata across a new playback,
-	 * then anything reading it at teardown attributes the old Short's identity and
-	 * length to whatever played later. That is what this proves, on the real classes.
-	 *
-	 * Load-bearing for the teardown-identity gate: it is why freshness has to be
-	 * proven against the current lifecycle rather than assumed from metadata being
-	 * present, and why the gate must fail closed.
-	 */
 	@Test
 	fun metadata_survives_a_later_playback_that_publishes_none() {
 		publishMetadata {

@@ -9,14 +9,6 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * What an enabled event log is allowed to keep.
- *
- * Measured on the field device on 2026-08-25 before this existed: 22,606,065
- * bytes across 240,631 lines, going back days. The log is a recording of what
- * somebody watched, so an unbounded one is both a diagnostic and a liability,
- * and "twelve hours" is the window a fault is actually diagnosed in.
- */
 class LogRetentionTest {
 
 	private val format = SimpleDateFormat(LogRetention.STAMP_PATTERN, Locale.US).apply {
@@ -59,12 +51,6 @@ class LogRetentionTest {
 		assertEquals(512L * 1024L, LogRetention.MAX_BYTES)
 	}
 
-	/**
-	 * A pre-upgrade log is stamped `HH:mm:ss.SSS` with no date at all, so its
-	 * age cannot be established — and 240,631 such lines were sitting on the
-	 * field device. An age that cannot be proven inside the window fails closed
-	 * rather than being kept on the assumption it is recent.
-	 */
 	@Test
 	fun `an undated legacy line has no readable age`() {
 		assertNull(retention().timestampOf("21:10:46.534  [health] browser evidence dropped"))
@@ -135,21 +121,6 @@ class LogRetentionTest {
 		assertEquals(once, retention(maxBytes = 400).prune(once))
 	}
 
-	/**
-	 * The defect this exists to stop.
-	 *
-	 * Trimming to *exactly* the ceiling leaves the very next line over it, so the
-	 * hard cap re-arms on every single append and a whole-file read, reparse and
-	 * rewrite lands in the path of a line written several times a second. The
-	 * three documented cadences — 200 lines, 64 KiB, five minutes — never get to
-	 * govern anything, because the ceiling fires first, always.
-	 *
-	 * Measured on the field device on 2026-08-26 with the log sitting at 524,263
-	 * bytes across 4,497 lines: 302 skipped frames — five seconds of frozen UI —
-	 * at playback start, gone entirely once the retained window was emptied.
-	 *
-	 * So a prune has to reclaim *headroom*, not merely return to the ceiling.
-	 */
 	@Test
 	fun `pruning reclaims headroom rather than stopping at the ceiling`() {
 		val lines = (0 until 400).map { line((400 - it) * 1_000L, "[n] entry $it padding padding") }

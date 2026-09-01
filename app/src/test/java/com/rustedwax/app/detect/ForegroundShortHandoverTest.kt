@@ -4,15 +4,6 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * What the MediaSession is allowed to throw away when the foreground Shorts
- * route takes the player.
- *
- * Measured 2026-08-07: a 104-second trailer reached 85 seconds, the viewer
- * opened the Shorts tab, and the whole listen was deleted with no finalize.
- * Discarding is only correct when the Short taking over is the same item the
- * session was already describing.
- */
 class ForegroundShortHandoverTest {
 
 	@Test fun `a trailer is not the Short that takes over from it`() {

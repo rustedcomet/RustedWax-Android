@@ -80,14 +80,6 @@ class SourceAdapterRoutingTest {
 		)
 	}
 
-	/**
-	 * Only a native session can name its own item, and only from the id keys.
-	 *
-	 * `MEDIA_ID` is not one of the URI keys a browser identity is allowed to read
-	 * — Chromium leaves every URI key unset (`<redacted-private-path>` Q3) and a media id it
-	 * happened to publish would not be a YouTube video id. The two adapters
-	 * therefore reach opposite verdicts from the identical bundle.
-	 */
 	@Test
 	fun `an exact media id identifies the native listen and not the browser one`() {
 		val withMediaId = listOf(

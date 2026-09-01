@@ -77,19 +77,6 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 		}
 	}
 
-	/**
-	 * Poll slowly for the playlist bar while nothing is latched.
-	 *
-	 * The Shorts observer is event-driven, which suits Shorts: the user scrolls
-	 * constantly, so callbacks never stop. Ordinary watch playback is the
-	 * opposite — once a song is playing the UI is static and YouTube emits no
-	 * accessibility events at all. Measured 2026-08-04: after the service
-	 * reconnected, six minutes of playback produced **zero** observations, so
-	 * the playlist was never captured and every track fell back to search.
-	 *
-	 * Once a playlist is latched this stops: the latch survives on its own and
-	 * a change of playlist comes with UI activity, which fires events anyway.
-	 */
 	private fun playlistAcquisitionDue(): Boolean {
 		if (nativePlaylistCurrent() != null) return false
 		val now = SystemClock.elapsedRealtime()
@@ -308,27 +295,8 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 		)?.let { EventLog.append("native-shorts", it) }
 	}
 
-	/**
-	 * Whether something is playing in YouTube right now, or `null` for "cannot
-	 * tell".
-	 *
-	 * Deliberately independent of the accessibility tree, because the tree is
-	 * the thing suspected of failing, and independent of the MediaSession, which
-	 * measured 2026-08-06 publishes `active=false`, `state=1` and no metadata at
-	 * all while a Short plays. The audio-plus-visible-window pair built for
-	 * picture-in-picture is the only signal that answers the question without
-	 * asking the suspect.
-	 *
-	 * Read regardless of the picture-in-picture switch: that switch governs
-	 * whether time may be *credited*, and this credits nothing.
-	 */
 	private fun unmeasuredPlayback(): Boolean? {
-		// Ordinary watch playback is measured by the MediaSession, which
-		// publishes a title and a duration for it — measured 2026-08-06, a Short
-		// publishes neither. So a titled native YouTube session means the
-		// playback is already being counted and nothing is being lost, however
-		// quiet the accessibility tree is. Without this the detector would fire
-		// on every long video, which is the failure mode it exists to avoid.
+
 		if (nativeWatchSessionMeasuring()) return false
 		if (!pipProbe.hasUsageAccess()) return null
 		return runCatching {
@@ -346,12 +314,7 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 		ProbeHolder.current?.sessions?.value.orEmpty().any {
 			it.packageName == YouTubeProbe.YOUTUBE_PACKAGE &&
 				it.profile.packageProvesSource &&
-				// A foreground Short's snapshot carries the title the *observer*
-				// read off the screen, not one the MediaSession published — so
-				// the title alone matches Shorts too, and measured 2026-08-06 it
-				// silenced the detector on exactly the staged outage it was
-				// supposed to catch. Watch playback is the case where the title
-				// came from the session itself.
+
 				!it.isForegroundShort &&
 				!it.title.isNullOrBlank()
 		}
@@ -511,13 +474,7 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 		// callbacks are not: a latched Short is measured by the 1s poll while
 		// YouTube emits no events at all.
 		if (absent != null) {
-			// Time the picture-in-picture inference is already crediting is not
-			// time being lost, so it is not an outage either — but only while
-			// there is a latched Short to credit it to. Measured 2026-08-06: with
-			// the proof already ended, audio playing and nothing latched,
-			// suppressing on `inferredPlaying` alone silenced the detector in
-			// exactly the state it exists for. `shouldRefresh` is the probe
-			// asking for the next frame of a Short it is still tracking.
+
 			val crediting = inferredPlaying && NativeShortsObserver.shouldRefresh()
 			if (!crediting) reportEventSilence(ObservedSurface.YOUTUBE_NO_PLAYER)
 		} else {
@@ -752,23 +709,12 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 		private const val MAX_PLAYLIST_ANCHORS = 4
 		private const val MAX_PLAYLIST_NODES = 150
 
-		/**
-		 * Present on every measured watch screen and absent in the miniplayer.
-		 * `watch_player` and `player_view` survive into the miniplayer and are
-		 * therefore useless here.
-		 */
 		private const val WATCH_SCREEN_ID = ID_PREFIX + "watch_panel"
 
 		private data class CaptureBudget(var remaining: Int = MAX_NODES, var exceeded: Boolean = false)
 
 		fun isEnabled(context: Context): Boolean {
-			// Both halves, and the master switch is not redundant. Replacing the
-			// APK turns accessibility off wholesale but leaves this service
-			// *named* in the list, so the list alone reports "Granted" for a
-			// service Android is no longer sending a single event to. That exact
-			// state cost several misleading test runs on 2026-08-04 and is what
-			// `<redacted-private-path>` §11.3 warns about — the app was
-			// making the same mistake `dumpsys accessibility` does.
+
 			if (Settings.Secure.getInt(context.contentResolver, ACCESSIBILITY_ENABLED, 0) != 1) {
 				return false
 			}

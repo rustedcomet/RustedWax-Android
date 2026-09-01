@@ -77,11 +77,6 @@ object ScreenWorkClassifier {
 	private const val CATEGORY_SHOWS = "shows"
 	private const val CATEGORY_MOVIES = "movies"
 
-	/**
-	 * @param enrichedCategory YouTube's own category for the video, when known.
-	 * @return null when this is not recognisably a film or an episode, which is
-	 * the common case and not a failure.
-	 */
 	fun classify(
 		rawTitle: String,
 		durationMs: Long?,

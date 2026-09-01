@@ -42,11 +42,6 @@ internal object ThumbnailFetch {
 	private const val HTTP_NOT_FOUND = 404
 	private const val HTTP_GONE = 410
 
-	/**
-	 * @param status the HTTP response code
-	 * @param byteCount how much of the body was read, capped at [MAX_BYTES] + a
-	 * read buffer, which is how an oversized body is told from a whole one
-	 */
 	fun classify(status: Int, byteCount: Int): Fetched = when {
 		status == HTTP_OK && byteCount > MAX_BYTES -> Fetched.Unavailable
 		status == HTTP_OK && byteCount < MIN_BYTES -> Fetched.Absent

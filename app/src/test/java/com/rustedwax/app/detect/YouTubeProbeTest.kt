@@ -7,18 +7,6 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * Address-bar corroboration — the rule that decides whether a payload gets a
- * `url`.
- *
- * These pass `md = null` so no Android `MediaMetadata` is needed: route 0 (the
- * address bar) is evaluated before the metadata routes and is exactly what
- * these cases exercise.
- *
- * Field data 2026-07-25: 20 of 133 scrobbles reached the chain with no `url`.
- * Part of that was a hint with an unparseable host vetoing a perfectly good
- * video id — the case pinned below.
- */
 class YouTubeProbeTest {
 
 	private class Fields(private val values: Map<String, Any>) : MetadataFields {

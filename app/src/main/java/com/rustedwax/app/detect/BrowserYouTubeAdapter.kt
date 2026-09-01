@@ -7,34 +7,6 @@ import com.rustedwax.core.PlaybackSourceCapabilities
 import com.rustedwax.core.SourceSessionId
 import com.rustedwax.core.TrackInstanceId
 
-/**
- * YouTube inside a Chromium browser.
- *
- * ## What this owns
- *
- * `<redacted-private-path>` lists it: browser notifications; address-bar and
- * tab evidence; browser accessibility and ad observations; selection among real
- * same-package sessions; browser session recreation. Every one of those was a
- * `!isNative` guard inside the legacy `Watch` before this file existed, which
- * is `<redacted-private-path>` §1's complaint in its most literal form — the
- * browser's evidence stack was written *inside the shared state machine*, so a
- * browser fix reached native YouTube by construction.
- *
- * ## Why a browser is the awkward one
- *
- * A browser MediaSession names the **package**, never the site. Chromium
- * publishes one for any video on any page, and Phase 0 measured that it sets no
- * URI metadata at all (`<redacted-private-path>` Q3). So this source has to prove what it is
- * from three weak, late, independently-failing channels — the media
- * notification's sub-text, the address bar, and a bounded accessibility scan of
- * the visible root — none of which is bound to a session token. Everything odd
- * about this file follows from that: the tab-title filter, the sole-session
- * qualifier on notifications, the URL generation, the instance tokens the ad and
- * coverage stores are keyed by.
- *
- * The native adapters have none of this, and that is exactly why they should not
- * have had to share a class with it.
- */
 class BrowserYouTubeAdapter(
 	override val packageName: String,
 	override val appLabel: String,
@@ -160,12 +132,7 @@ class BrowserYouTubeAdapter(
 			?.takeUnless { it.videoId != null && it.videoId in request.rejectedItemIds }
 
 		var context = request.resolverContext
-		// A playlist is context, not a position. `UrlEvidence.playlistByPackage`
-		// keeps the last `list=` for three hours rather than the five minutes a
-		// video id gets, because the bar stops naming individual videos within
-		// seconds while the playlist keeps advancing. Measured 2026-08-11: a
-		// 180-entry playlist named at 23:44 was gone by 00:00, and entry 41 of it
-		// went to search instead of to the exact bounded lookup.
+
 		if (context.playlistId == null) {
 			(if (evidenceCoordinator != null) {
 				evidenceCoordinator.playlistFor(sourceSession)
@@ -222,9 +189,9 @@ class BrowserYouTubeAdapter(
 	 * The choice itself is [BrowserScanBinding], which is pure and separately
 	 * tested; this is what makes it *this source's* decision rather than the
 	 * host's. `SessionProbe` used to filter the candidates, build them, call the
-	 * selector and resolve the answer back to a watch — so the browser's
-	 * multiple-tab policy lived in the shared registry, which is exactly the
-	 * ownership the Phase 4 table assigns here.
+	 * selector and resolve the answer back to a watch, so the browser's
+	 * multiple-tab policy belongs to this source adapter rather than the shared
+	 * registry.
 	 */
 	override fun selectForHostObservation(
 		request: SourceHostObservationRequest,
