@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+	<!--
+		The launcher badge sits on the vinyl's own near-black rather than on the
+		cream, so the pink banner reads at 48dp the way it does in the artwork.
+	-->
+	<color name="ic_launcher_background">#0C0A10</color>
+
+	<!--
+		Only the pre-Compose window, which is what the launch animation crossfades
+		from. Kept in step with `RustedWaxTheme`'s background so a cold start does
+		not flash a white rectangle before the first frame. `MainActivity` paints
+		over this once the *stored* preference is known — this resource can only
+		follow the system, which the in-app switch is allowed to disagree with.
+	-->
+	<color name="window_background">#FAF8F6</color>
+</resources>

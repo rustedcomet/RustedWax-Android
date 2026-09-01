@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+	Themed-icon layer for Android 13+. A single-colour stencil has no room for
+	the banner, so it keeps the part of the mark that survives at 48dp with the
+	colour thrown away: the record, its grooves, and the label.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+	android:width="108dp"
+	android:height="108dp"
+	android:viewportWidth="108"
+	android:viewportHeight="108">
+	<path
+		android:fillColor="#FFFFFFFF"
+		android:pathData="M54,20a34,34 0 1,0 0.01,0zM54,26a28,28 0 1,1 -0.01,0z" />
+	<path
+		android:fillColor="#FFFFFFFF"
+		android:pathData="M54,31a23,23 0 1,0 0.01,0zM54,35a19,19 0 1,1 -0.01,0z" />
+	<path
+		android:fillColor="#FFFFFFFF"
+		android:pathData="M54,40a14,14 0 1,0 0.01,0zM54,44a10,10 0 1,1 -0.01,0z" />
+	<path
+		android:fillColor="#FFFFFFFF"
+		android:pathData="M54,48a6,6 0 1,0 0.01,0z" />
+</vector>
