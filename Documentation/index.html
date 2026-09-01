@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RustedWax — Android scrobbling for Hive</title>
+<meta name="description" content="RustedWax is an Android app that turns verified YouTube and YouTube Music listens into Hive scrobbles.">
+<link rel="icon" href="Assets/logo.png">
+<meta property="og:title" content="RustedWax">
+<meta property="og:description" content="Android scrobbling for Hive — measured, verified, and visible.">
+<meta property="og:image" content="Assets/logo.png">
+<style>
+	:root {
+		--pink: #ec3f75;
+		--pink-light: #ff5c8f;
+		--wash: #fde3ec;
+		--bg: #faf8f6;
+		--surface: #fffdfb;
+		--ink: #1b181c;
+		--muted: #6e6a6c;
+		--edge: #e9e2de;
+		--accent: var(--pink);
+	}
+
+	@media (prefers-color-scheme: dark) {
+		:root {
+			--wash: #3e1226;
+			--bg: #070608;
+			--surface: #0e0d11;
+			--ink: #f2ece6;
+			--muted: #aaa5a7;
+			--edge: #28242d;
+			--accent: var(--pink-light);
+		}
+	}
+
+	* { box-sizing: border-box; }
+
+	html { scroll-behavior: smooth; }
+
+	body {
+		margin: 0;
+		background: var(--bg);
+		color: var(--ink);
+		font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+			"Helvetica Neue", Arial, sans-serif;
+		-webkit-font-smoothing: antialiased;
+	}
+
+	a { color: var(--accent); }
+
+	.wrap {
+		width: min(920px, calc(100% - 40px));
+		margin: 0 auto;
+	}
+
+	header {
+		padding: 76px 0 64px;
+		text-align: center;
+		background: radial-gradient(800px 360px at 50% -130px, rgba(236, 63, 117, .18), transparent 72%);
+	}
+
+	.logo {
+		width: 132px;
+		height: 132px;
+		filter: drop-shadow(0 10px 28px rgba(0, 0, 0, .28));
+	}
+
+	h1 {
+		margin: 18px 0 8px;
+		font-size: clamp(2.5rem, 8vw, 4rem);
+		line-height: 1;
+		letter-spacing: -.04em;
+	}
+
+	.tagline {
+		margin: 0;
+		color: var(--accent);
+		font-size: 1.15rem;
+		font-weight: 700;
+	}
+
+	.lede {
+		max-width: 640px;
+		margin: 20px auto 0;
+		color: var(--muted);
+		font-size: 1.08rem;
+	}
+
+	.actions {
+		display: flex;
+		justify-content: center;
+		gap: 12px;
+		flex-wrap: wrap;
+		margin-top: 28px;
+	}
+
+	.button {
+		display: inline-block;
+		padding: 11px 21px;
+		border: 1px solid var(--edge);
+		border-radius: 10px;
+		background: var(--surface);
+		color: var(--ink);
+		font-weight: 700;
+		text-decoration: none;
+	}
+
+	.button.primary {
+		border-color: var(--accent);
+		background: var(--accent);
+		color: #fff;
+	}
+
+	.button:hover,
+	.button:focus-visible {
+		border-color: var(--accent);
+		background: var(--wash);
+		color: var(--accent);
+	}
+
+	.button.primary:hover,
+	.button.primary:focus-visible {
+		background: var(--accent);
+		color: #fff;
+		filter: brightness(1.1);
+	}
+
+	section {
+		padding: 52px 0;
+		border-top: 1px solid var(--edge);
+	}
+
+	h2 {
+		margin: 0 0 8px;
+		font-size: 1.55rem;
+		letter-spacing: -.02em;
+	}
+
+	.intro {
+		margin: 0 0 26px;
+		color: var(--muted);
+	}
+
+	.features {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 14px;
+	}
+
+	.feature {
+		padding: 19px;
+		border: 1px solid var(--edge);
+		border-radius: 14px;
+		background: var(--surface);
+	}
+
+	.feature h3 {
+		margin: 0 0 6px;
+		font-size: 1rem;
+	}
+
+	.feature p {
+		margin: 0;
+		color: var(--muted);
+		font-size: .94rem;
+	}
+
+	.preview {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 18px;
+		margin-top: 26px;
+	}
+
+	.preview img {
+		display: block;
+		width: 100%;
+		aspect-ratio: 4 / 3;
+		object-fit: cover;
+		object-position: top;
+		border: 1px solid var(--edge);
+		border-radius: 16px;
+		background: var(--surface);
+	}
+
+	.install {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 18px;
+		padding: 0;
+		list-style: none;
+		counter-reset: steps;
+	}
+
+	.install li {
+		position: relative;
+		padding-left: 44px;
+		counter-increment: steps;
+	}
+
+	.install li::before {
+		position: absolute;
+		left: 0;
+		top: 0;
+		display: grid;
+		width: 30px;
+		height: 30px;
+		place-items: center;
+		border-radius: 50%;
+		background: var(--wash);
+		color: var(--accent);
+		content: counter(steps);
+		font-weight: 800;
+	}
+
+	.install strong { display: block; margin-bottom: 5px; }
+	.install span { color: var(--muted); font-size: .92rem; }
+
+	.note {
+		margin: 26px 0 0;
+		padding: 14px 16px;
+		border-left: 3px solid var(--accent);
+		background: var(--wash);
+		font-size: .9rem;
+	}
+
+	.more {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 20px;
+	}
+
+	.more p { margin: 0; color: var(--muted); }
+
+	footer {
+		padding: 32px 0 48px;
+		border-top: 1px solid var(--edge);
+		color: var(--muted);
+		font-size: .84rem;
+		text-align: center;
+	}
+
+	@media (max-width: 700px) {
+		header { padding: 56px 0 46px; }
+		section { padding: 40px 0; }
+		.features,
+		.install { grid-template-columns: 1fr; }
+		.preview { gap: 10px; }
+		.more { align-items: flex-start; flex-direction: column; }
+	}
+</style>
+</head>
+<body>
+
+<header>
+	<div class="wrap">
+		<img class="logo" src="Assets/logo.png" alt="RustedWax logo">
+		<h1>RustedWax</h1>
+		<p class="tagline">Android scrobbling for Hive.</p>
+		<p class="lede">
+			RustedWax watches what you actually play in YouTube, YouTube Music, Brave,
+			and Chrome, then writes verified listens to the Hive blockchain.
+		</p>
+		<div class="actions">
+			<a class="button primary" href="#install">How to install</a>
+			<a class="button" href="https://github.com/rustedcomet/rustedwax">View on GitHub</a>
+		</div>
+	</div>
+</header>
+
+<main class="wrap">
+	<section>
+		<h2>What it does</h2>
+		<p class="intro">A transparent listening history you control, backed by public Hive transactions.</p>
+		<div class="features">
+			<article class="feature">
+				<h3>Works across YouTube</h3>
+				<p>Supports the native YouTube and YouTube Music apps plus YouTube playback in Brave and Chrome.</p>
+			</article>
+			<article class="feature">
+				<h3>Only logs verified listens</h3>
+				<p>Playback is measured and the video is identified before anything is allowed onto the chain.</p>
+			</article>
+			<article class="feature">
+				<h3>Shows every result</h3>
+				<p>History includes Hive transaction IDs, while rejected tracks explain why they were not logged.</p>
+			</article>
+			<article class="feature">
+				<h3>Keeps your key on your phone</h3>
+				<p>Your posting key is protected by Android Keystore; transactions are signed locally.</p>
+			</article>
+		</div>
+		<div class="preview">
+			<img src="Assets/screenshots/settings-dark.png" alt="RustedWax settings screen">
+			<img src="Assets/screenshots/history-dark.png" alt="RustedWax listening history with Hive transactions">
+		</div>
+	</section>
+
+	<section id="install">
+		<h2>Install</h2>
+		<p class="intro">RustedWax is currently a prototype built from source; there is no public signed release yet.</p>
+		<ol class="install">
+			<li>
+				<strong>Build the APK</strong>
+				<span>Clone the repository and build it with Android Studio or Gradle.</span>
+			</li>
+			<li>
+				<strong>Install and sign in</strong>
+				<span>Install the APK, then add your Hive username and posting key.</span>
+			</li>
+			<li>
+				<strong>Grant media access</strong>
+				<span>Allow Notification Access; add browser, Shorts, or PiP grants only if you want them.</span>
+			</li>
+		</ol>
+		<p class="note">
+			Use only a Hive <strong>posting key</strong>—never an active or owner key.
+			<a href="https://github.com/rustedcomet/rustedwax/blob/main/Documentation/Product/SETUP.md">Read the complete setup guide</a>.
+		</p>
+	</section>
+
+	<section class="more">
+		<div>
+			<h2>Want the details?</h2>
+			<p>Architecture, behavior rules, testing evidence, and project history live in the full documentation.</p>
+		</div>
+		<a class="button" href="https://github.com/rustedcomet/rustedwax/blob/main/Documentation/README.md">Browse documentation</a>
+	</section>
+</main>
+
+<footer>
+	<div class="wrap">
+		Prototype software · MIT licensed · Not affiliated with scrobble.life, Hive Scrobbler, or Web Scrobbler
+	</div>
+</footer>
+
+</body>
+</html>

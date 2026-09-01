@@ -1,0 +1,2259 @@
+package com.rustedwax.app.scrobble
+
+import android.content.Context
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import com.rustedwax.core.Clock
+import com.rustedwax.hive.HiveRpc
+import com.rustedwax.hive.HiveScrobblePayload
+import com.rustedwax.hive.PrivateScrobble
+import com.rustedwax.app.detect.ScrobbleBuilder
+import com.rustedwax.app.detect.FinalizedTrack
+import com.rustedwax.app.detect.SessionProbe
+import com.rustedwax.app.detect.SessionSnapshot
+import com.rustedwax.app.detect.TitleParser
+import com.rustedwax.app.detect.EventLog
+import com.rustedwax.app.detect.NativeSourceSwitches
+import com.rustedwax.app.detect.NativePreResolvedRoute
+import com.rustedwax.app.detect.YouTubeProbe
+import com.rustedwax.app.enrich.WatchHistoryHealth
+import com.rustedwax.app.enrich.FactsCache
+import com.rustedwax.app.enrich.MetadataResolver
+import com.rustedwax.app.enrich.MusicBrainzVerifier
+import com.rustedwax.app.enrich.VideoFacts
+import com.rustedwax.app.enrich.VideoIdentityCorroborator
+import com.rustedwax.youtube.identity.VideoResolution
+import com.rustedwax.youtube.identity.VideoResolutionAttempt
+import com.rustedwax.youtube.identity.VideoResolutionFailure
+import com.rustedwax.identity.api.IdentityOutcomeKind
+import com.rustedwax.identity.api.IdentityStrategyOutcome
+import com.rustedwax.youtube.identity.ProductionIdentityContext
+import com.rustedwax.youtube.identity.ProductionIdentityStrategies
+import com.rustedwax.youtube.identity.VideoIdentityRepositoryAttempt
+import com.rustedwax.youtube.identity.YouTubeIdentityContext
+import com.rustedwax.youtube.identity.YouTubeIdentityStrategyRepository
+import com.rustedwax.app.enrich.VerifiedIdentityCandidateCache
+import com.rustedwax.app.enrich.WatchHistoryResolver
+import com.rustedwax.app.enrich.YouTubePageResolver
+import com.rustedwax.app.storage.YouTubeSessionVault
+
+/**
+ * Turns finished tracks into on-chain scrobbles.
+ *
+ * The pipeline, mirroring what `hive-scrobbler.ts` does across its finalize and
+ * broadcast paths:
+ *
+ *   finalize → identity → prefilter ┊ enrich → rules → dedup → sign → broadcast
+ *                                   ┊                                ↘ queue on failure
+ *
+ * The `┊` is the thread boundary. Everything left of it is cheap and
+ * synchronous; everything right of it may touch the network. The rules run on
+ * the far side because two of their inputs — the recovered duration and the
+ * watch-page proof behind the short-clip floor — don't exist until enrichment
+ * has answered. [ScrobbleRules.prefilter] is what keeps that from meaning "one
+ * fetch per finalize".
+ *
+ * A singleton because the detection host ([com.rustedwax.app.detect.RustedWaxListenerService])
+ * and the UI are separate processes-in-spirit that must share one ledger and
+ * one queue. Initialised once from application context.
+ */
+object FinalizationRuntime {
+
+	/**
+	 * Every device, disk and network this object touches — see [EnginePorts].
+	 *
+	 * Held as one field rather than eleven so that "which wiring is installed"
+	 * is a single readable fact. [init] installs the real one;
+	 * [installPortsForReplay] installs a scripted one for the replay harness,
+	 * and nothing between here and the chain can tell the difference. That is
+	 * the point: the harness has to exercise this code, not a copy of it.
+	 */
+	private lateinit var ports: EnginePorts
+
+	private val vault: PostingIdentity get() = ports.identity
+	private val ledger: DedupClaims get() = ports.claims
+	private val queue: RetryQueue get() = ports.retryQueue
+	private val settings: ScrobblePolicy get() = ports.policy
+	private val resolver: MetadataResolver get() = ports.metadata
+	private val factsCache: FactsStore get() = ports.facts
+	private val musicBrainz: MusicVerifier get() = ports.music
+	private val muted: MuteList get() = ports.mutes
+	private val youtubeSession: AccountSessionStore get() = ports.accountSession
+	private val history: WatchHistorySource get() = ports.watchHistory
+	private val idResolver: VideoIdentitySource get() = ports.videoIdentity
+	private val broadcaster: PayloadBroadcaster get() = ports.broadcaster
+	private val clock: Clock get() = ports.clock
+	private val verifiedPlaybackSequence = VerifiedPlaybackSequence()
+
+	/**
+	 * Video ids a prefetch has already been launched for this session. Never
+	 * cleared on failure: a video that couldn't be resolved once (offline,
+	 * markup drift) shouldn't be re-fetched every second by the UI tick that
+	 * triggers identity checks.
+	 */
+	private val prefetches = PrefetchCompletionRegistry()
+
+	/**
+	 * Where finalization runs. Application-lifetime IO in production.
+	 *
+	 * Injectable for one reason: a replay needs the launched work to have
+	 * finished by the time it asserts, and waiting on a real dispatcher is how
+	 * a suite acquires the flaky test that eventually gets deleted along with
+	 * the coverage.
+	 */
+	private var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+	private val broadcastLock = Mutex()
+	internal lateinit var finalizeTrack: FinalizeTrackUseCase
+	private lateinit var dispatcher: ScrobbleDispatcher
+
+	/**
+	 * Told what became of each finalized track — see [FinalizationOutcome].
+	 *
+	 * [FinalizationObserver.None] in production, which is the whole point: the
+	 * seam costs one virtual call per finalize and changes nothing a user can
+	 * see. The replay harness installs a recorder so it can assert on the branch
+	 * the engine actually took rather than reconstructing it from the skip list
+	 * and the broadcast list afterwards.
+	 */
+	@Volatile
+	internal var finalizationObserver: FinalizationObserver = FinalizationObserver.None
+
+	@Volatile
+	private var initialised = false
+
+	data class ScrobbleRecord(
+		val title: String,
+		val artist: String?,
+		val percentPlayed: Int,
+		val atEpochSec: Long,
+		val status: String,
+		val txId: String? = null,
+		val queued: Boolean = false,
+		/**
+		 * The exact video this entry came from. User-facing history is a hyperlink
+		 * surface, so an entry that cannot prove this value is not a history row.
+		 */
+		val videoId: String,
+	)
+
+	/**
+	 * A track that finished and did *not* become an entry, with the reason.
+	 *
+	 * The reasons were always computed — they went to the event log and nowhere
+	 * else. From the user's side that made "watched 20 shorts, got 6 entries"
+	 * indistinguishable from a broken app: there was no artifact anywhere in the
+	 * UI saying the other 14 were seen and why each was declined. A gap you can
+	 * explain is a policy; a silent one reads as a bug every time.
+	 */
+	data class SkipRecord(
+		val title: String,
+		val artist: String?,
+		val reason: String,
+		val atEpochSec: Long,
+		val playedSeconds: Long,
+		val durationSeconds: Long?,
+		/** The exact video this row opens. Not-logged rows are hyperlinks too. */
+		val videoId: String,
+	)
+
+	/**
+	 * Below this, a finalize is a metadata transition rather than a listen
+	 * anyone will go looking for.
+	 *
+	 * Not a guess: the 2026-07-29 session produced 198 "no duration" skips, and
+	 * 165 of them had played for under three seconds — the browser swapping a
+	 * placeholder title for the real one as a page loads. Recording those would
+	 * bury the 33 that a person might actually wonder about.
+	 */
+	private const val MIN_NOTABLE_PLAYED_MS = 3_000L
+
+	/**
+	 * Fresh-history checks after an immediate cache bypass, expressed as gaps.
+	 * The resulting observations are at roughly 5, 20, 60 and 150 seconds.
+	 *
+	 * The field failure on 2026-08-15 took 137 seconds for YouTube's history
+	 * feed to expose the first of three completed Shorts. Stopping at one minute
+	 * would preserve that exact loss; 150 seconds covers it while keeping both
+	 * time and requests strictly bounded.
+	 */
+	private val SHORT_HISTORY_RETRY_DELAYS_MS = longArrayOf(
+		5_000L,
+		15_000L,
+		40_000L,
+		90_000L,
+	)
+
+	private val _recent = MutableStateFlow<List<ScrobbleRecord>>(emptyList())
+	val recent: StateFlow<List<ScrobbleRecord>> = _recent.asStateFlow()
+
+	private val _skipped = MutableStateFlow<List<SkipRecord>>(emptyList())
+	val skipped: StateFlow<List<SkipRecord>> = _skipped.asStateFlow()
+
+	/**
+	 * Consecutive finalized tracks that ended with no video id at all.
+	 *
+	 * This is the counter behind the "the address bar has gone quiet" warning, and
+	 * it exists because of a 13-minute hole in the 2026-07-29 session. The watcher
+	 * reported `connected`, then read the collapsed omnibox once —
+	 * `host=m.youtube.com video=—` — and said nothing again for 13 minutes.
+	 *
+	 * The visible cost was five shorts scrobbled with no `url`. The invisible cost
+	 * was larger: four more were **lost entirely**, because with no id there is no
+	 * `/shorts/` proof, so the short-clip floor couldn't apply and 15 s, 21 s and
+	 * 25 s clips were held to the 30-second minimum.
+	 *
+	 * Nothing told the user. The app knew the watcher was on and knew it hadn't
+	 * identified a single track in nine finalizes — the same "silence reads as
+	 * broken" failure the Not-logged tab was built for, one layer down.
+	 *
+	 * Counted per *finalize* rather than on a timer, because that measures the
+	 * actual harm. A long watch-page video legitimately produces one id and then
+	 * silence for an hour; that must not warn.
+	 */
+	private val _tracksWithoutVideoId = MutableStateFlow(0)
+	val tracksWithoutVideoId: StateFlow<Int> = _tracksWithoutVideoId.asStateFlow()
+
+	/** Consecutive misses before the UI says so. Three is a pattern, one is a page load. */
+	const val QUIET_BAR_THRESHOLD = 3
+
+	private val _queueSize = MutableStateFlow(0)
+	val queueSize: StateFlow<Int> = _queueSize.asStateFlow()
+
+	@Synchronized
+	fun init(context: Context) {
+		if (initialised) return
+		val appContext = context.applicationContext
+		// The one construction order that is not the adapter's business: the
+		// page resolver writes through the same cache the Now card reads, so
+		// both ports have to be built from a single [FactsCache] instance.
+		val factsCache = FactsCache(appContext)
+		install(
+			EnginePorts.forDevice(
+				context = appContext,
+				factsCache = factsCache,
+				metadata = YouTubePageResolver(factsCache),
+			),
+			CoroutineScope(SupervisorJob() + Dispatchers.IO),
+		)
+	}
+
+	@Synchronized
+	private fun install(installed: EnginePorts, installedScope: CoroutineScope) {
+		ports = installed
+		scope = installedScope
+		wireFinalization()
+		initialised = true
+		ledger.prune()
+		_queueSize.value = queue.size()
+	}
+
+	/** Phase 7 production composition root. Rebuilt with every device/replay port set. */
+	private fun wireFinalization() {
+		dispatcher = object : ScrobbleDispatcher {
+			override val hasPostingAccount: Boolean get() = vault.account != null
+
+			override fun claim(
+				claims: DedupClaims,
+				payload: HiveScrobblePayload,
+				startedAtEpochSec: Long,
+			): Boolean {
+				val key = DedupLedger.keyFor(payload.title, payload.artist, startedAtEpochSec)
+				return claims.claim(key)
+			}
+
+			override fun release(
+				claims: DedupClaims,
+				payload: HiveScrobblePayload,
+				startedAtEpochSec: Long,
+			) = claims.release(DedupLedger.keyFor(payload.title, payload.artist, startedAtEpochSec))
+
+			override fun dispatch(
+				payload: HiveScrobblePayload,
+				sourceItemId: String,
+				sourcePackage: String,
+				sourceEpoch: Long?,
+				automaticTransportCommitted: Boolean,
+				trigger: FinalizationTrigger,
+				onFeedback: ((String, Boolean) -> Unit)?,
+			) = enqueueAndSend(
+				payload = payload,
+				videoId = sourceItemId,
+				sourcePackage = sourcePackage,
+				sourceEpoch = sourceEpoch,
+				automaticTransportCommitted = automaticTransportCommitted,
+				trigger = trigger,
+				onFeedback = onFeedback,
+			)
+
+			override fun retryDue() = retryQueuedPayloads()
+		}
+		finalizeTrack = FinalizeTrackUseCase(ProductionFinalizationOrchestrator(
+			scope = scope,
+			settings = settings,
+			sequence = verifiedPlaybackSequence,
+			claims = ledger,
+			history = history,
+			identity = IdentityService { session, sequence, runHistory ->
+				when (ports.identityResolverMode) {
+					IdentityResolverMode.TYPED -> resolveVideoId(session, sequence, runHistory)
+					IdentityResolverMode.LEGACY -> session.confirmed?.let { confirmed ->
+						VideoResolutionAttempt(resolution = frozenResolution(session, confirmed))
+					} ?: resolveVideoIdLegacy(session, sequence, runHistory)
+				}
+			},
+			enrichment = object : EnrichmentService {
+				override suspend fun facts(videoId: String): VideoFacts? = enrich(videoId)
+				override suspend fun music(
+					session: SessionSnapshot,
+					facts: VideoFacts?,
+				): MusicBrainzVerifier.Match? = verifyMusic(session, facts)
+			},
+			classification = object : ClassificationService {
+				override fun contradiction(
+					session: SessionSnapshot,
+					resolution: VideoResolution,
+					facts: VideoFacts?,
+				): String? = VideoIdentityCorroborator.contradiction(session, resolution, facts)
+
+				override fun rememberVerified(
+					session: SessionSnapshot,
+					resolution: VideoResolution,
+					facts: VideoFacts?,
+					shadow: Boolean,
+				) {
+					if (!shadow && VideoIdentityCorroborator.cacheable(session, resolution, facts)) {
+						VerifiedIdentityCandidateCache.remember(
+							packageName = session.packageName,
+							videoId = resolution.videoId,
+							title = session.title,
+							channel = session.artist,
+							durationMs = session.durationMs,
+							ownerHandle = session.ownerHandle,
+						)
+						EventLog.append(
+							"resolve",
+							"remembered ${resolution.videoId} as a bounded run-local verified candidate",
+						)
+					}
+				}
+
+				override fun isMuted(sourceItemId: String): Boolean = muted.isMuted(sourceItemId)
+			},
+			eligibility = object : EligibilityPolicy {
+				override fun prefilter(session: SessionSnapshot): String? = ScrobbleRules.prefilter(
+					playedMs = session.playedMs,
+					durationMs = session.durationMs,
+					threshold = settings.scrobbleThreshold,
+					explicitAdSignal = session.explicitAdSignal,
+					progressSurfaceLost = session.foregroundProgressLost,
+					inferredMs = session.inferredPlayedMs,
+					unobservedLeadInMs = session.unobservedLeadInMs,
+				)
+
+				override fun decide(
+					session: SessionSnapshot,
+					facts: VideoFacts?,
+					durationMs: Long?,
+				): ScrobbleRules.Decision = ScrobbleRules.decide(
+					playedMs = session.playedMs,
+					durationMs = durationMs,
+					threshold = settings.scrobbleThreshold,
+					isShort = session.hasShortSourceProof,
+					videoResolved = facts?.resolvedOnWatchPage == true,
+					videoUnlisted = facts?.isUnlisted,
+					explicitAdSignal = session.explicitAdSignal,
+					progressSurfaceLost = session.foregroundProgressLost,
+					inferredMs = session.inferredPlayedMs,
+					unobservedLeadInMs = session.unobservedLeadInMs,
+				)
+
+				override fun prefilter(track: FinalizedTrack): String? = ScrobbleRules.prefilter(
+					playedMs = track.measurement.playedMs,
+					durationMs = track.measurement.durationMs,
+					threshold = settings.scrobbleThreshold,
+					explicitAdSignal = track.evidence.explicitAdSignal,
+					progressSurfaceLost = track.measurement.progressSurfaceLost,
+					inferredMs = track.measurement.inferredPlayedMs,
+				)
+
+				override fun decide(
+					track: FinalizedTrack,
+					durationMs: Long?,
+				): ScrobbleRules.Decision = ScrobbleRules.decide(
+					playedMs = track.measurement.playedMs,
+					durationMs = durationMs,
+					threshold = settings.scrobbleThreshold,
+					isShort = false,
+					videoResolved = false,
+					videoUnlisted = null,
+					explicitAdSignal = track.evidence.explicitAdSignal,
+					progressSurfaceLost = track.measurement.progressSurfaceLost,
+					inferredMs = track.measurement.inferredPlayedMs,
+				)
+			},
+			payloads = object : PayloadFactory {
+				override fun effectiveDurationMs(
+					session: SessionSnapshot,
+					facts: VideoFacts?,
+				): Long? = ScrobbleBuilder.effectiveDurationMs(session, facts)
+
+				override fun build(
+					session: SessionSnapshot,
+					facts: VideoFacts?,
+					music: MusicBrainzVerifier.Match?,
+					identity: VideoResolution,
+					durationMs: Long?,
+				): HiveScrobblePayload? = ScrobbleBuilder.from(
+					session,
+					facts,
+					music,
+					identity.videoId,
+					durationMs,
+					resolvedTitle = identity.title,
+				)
+
+				override fun cap(
+					decision: ScrobbleRules.Decision,
+					payload: HiveScrobblePayload,
+					session: SessionSnapshot,
+				): List<Int> = ScrobbleRules.capForKind(
+					decision.percentages,
+					payload.kind,
+					isShort = session.hasShortSourceProof,
+					loopDetected = session.loopDetected,
+					positionCorroborated = session.firstObservedPositionMs != null,
+				)
+
+				override fun buildSourceNeutral(
+					track: FinalizedTrack,
+					durationMs: Long?,
+				): HiveScrobblePayload? {
+					val title = track.metadata.title?.trim()?.takeIf(String::isNotEmpty) ?: return null
+					val duration = durationMs?.takeIf { it > 0 } ?: return null
+					return HiveScrobblePayload(
+						title = title,
+						artist = track.metadata.artist?.trim()?.takeIf(String::isNotEmpty),
+						album = track.metadata.album?.trim()?.takeIf(String::isNotEmpty),
+						timestamp = HiveScrobblePayload.isoTimestamp(track.measurement.startedAtEpochSec),
+						duration = HiveScrobblePayload.formatDuration(duration / 1000),
+						percentPlayed = ((track.measurement.playedMs.toDouble() / duration) * 100)
+							.toInt().coerceIn(0, 100),
+						platform = track.source.originName.lowercase(),
+						url = track.evidence.canonicalLink,
+					)
+				}
+
+				override fun cap(
+					decision: ScrobbleRules.Decision,
+					payload: HiveScrobblePayload,
+					track: FinalizedTrack,
+				): List<Int> = ScrobbleRules.capForKind(
+					decision.percentages,
+					payload.kind,
+					isShort = false,
+					loopDetected = track.measurement.loopDetected,
+					positionCorroborated = track.measurement.firstObservedPositionMs != null,
+				)
+			},
+			dispatcher = dispatcher,
+			effects = object : FinalizationEffects {
+				override fun skip(
+					report: FinalizationReport,
+					session: SessionSnapshot,
+					reason: String,
+					durationMs: Long?,
+					log: Boolean,
+					videoId: String?,
+					resolvedTitle: String?,
+				) = this@FinalizationRuntime.skip(
+					report, session, reason, durationMs, log, videoId, resolvedTitle,
+				)
+
+				override fun couldBecomeUserFacingSkip(session: SessionSnapshot): Boolean =
+					this@FinalizationRuntime.couldBecomeUserFacingSkip(session)
+
+				override fun noteIdentity(
+					session: SessionSnapshot,
+					sourceItemId: String?,
+					shadow: Boolean,
+				) = noteVideoIdOutcome(session, sourceItemId, shadow)
+			},
+			observer = { finalizationObserver },
+		))
+	}
+
+	/**
+	 * Run the concrete finalization runtime against scripted ports, for replay only.
+	 *
+	 * Deliberately not guarded by `initialised`: a replay installs a fresh set
+	 * of ports per scenario, and a singleton that could only be configured once
+	 * would make every scenario after the first one read the previous
+	 * scenario's ledger. See `replay/ReplayHarness.kt`.
+	 */
+	internal fun installPortsForReplay(replayPorts: EnginePorts, replayScope: CoroutineScope) {
+		synchronized(this) { initialised = false }
+		prefetches.reset()
+		verifiedPlaybackSequence.clear()
+		_recent.value = emptyList()
+		_skipped.value = emptyList()
+		_tracksWithoutVideoId.value = 0
+		install(replayPorts, replayScope)
+	}
+
+	/**
+	 * Cancel work already launched, as a teardown would.
+	 *
+	 * The runtime's real scope is cancelled by the process or by the listener
+	 * service going away; neither is reachable from a JVM replay. This cancels
+	 * the children of the installed scope and nothing else, so a scenario can put
+	 * a finalization in flight and then take the scope away underneath it — which
+	 * is the race that used to end a finalization with no terminal outcome at
+	 * all. Replay only; no production caller.
+	 */
+	internal fun cancelInFlightForReplay() {
+		scope.coroutineContext[Job]?.children?.forEach { it.cancel() }
+	}
+
+	/** Put the singleton back to "never initialised", between replay scenarios. */
+	internal fun resetForReplay() {
+		synchronized(this) { initialised = false }
+		finalizationObserver = FinalizationObserver.None
+		prefetches.reset()
+		verifiedPlaybackSequence.clear()
+		_recent.value = emptyList()
+		_skipped.value = emptyList()
+		_tracksWithoutVideoId.value = 0
+		_queueSize.value = 0
+	}
+
+	val isReady: Boolean get() = initialised
+
+	fun autoScrobbleEnabled(): Boolean = initialised && settings.autoScrobble
+
+	/** Stamp a newly established logical listen with the current opt-in interval. */
+	internal fun automaticWriteAuthorization(): com.rustedwax.core.AutomaticWriteAuthorization =
+		if (initialised) {
+			settings.automaticWriteAuthorization
+		} else {
+			com.rustedwax.core.AutomaticWriteAuthorization(0, enabledAtStart = false)
+		}
+
+	fun setAutoScrobble(enabled: Boolean) {
+		settings.autoScrobble = enabled
+		EventLog.append("engine", "auto-scrobble ${if (enabled) "on" else "off"}")
+	}
+
+	/**
+	 * Whether a vanished MediaSession has already earned prompt automatic
+	 * disposition.
+	 *
+	 * `SessionProbe` still decides no threshold: it supplies measurement and uses
+	 * this boolean only to select the existing one-minute replacement window or
+	 * the long resumable-position window. Full eligibility remains in
+	 * [ScrobbleRules] at finalization, where identity, ads, duration floors,
+	 * enrichment, mute and dedup evidence are available.
+	 */
+	internal fun shouldFinalizeContinuationPromptly(
+		playedMs: Long,
+		durationMs: Long?,
+	): Boolean {
+		if (!initialised || !settings.monitoringEnabled || !settings.autoScrobble) return false
+		val duration = durationMs?.takeIf { it > 0 } ?: return false
+		return playedMs.toDouble() / duration >= settings.scrobbleThreshold
+	}
+
+	fun resolveNativeCarryIdentity(
+		session: SessionSnapshot,
+		callback: (SessionProbe.NativeResolvedIdentity?) -> Unit,
+	) {
+		if (!initialised || !settings.monitoringEnabled || !settings.enrichment ||
+			!session.profile.packageProvesSource || session.isForegroundShort ||
+			!NativeSourceSwitches.isSnapshotCurrent(session.packageName, session.sourceEpoch)
+		) {
+			callback(null)
+			return
+		}
+		scope.launch {
+			val attempt = resolveVideoId(session, verifiedPlaybackSequence, history)
+			val resolution = attempt.resolution
+			if (resolution == null) {
+				EventLog.append(
+					"native-carry",
+					"${session.packageName} pre-resolution refused \"${session.title}\": " +
+						(attempt.refusalReason ?: "no unique candidate corroborated"),
+				)
+				callback(null)
+				return@launch
+			}
+			val facts = enrich(resolution.videoId)
+			val contradiction = VideoIdentityCorroborator.contradiction(session, resolution, facts)
+			if (contradiction != null ||
+				!NativeSourceSwitches.isSnapshotCurrent(session.packageName, session.sourceEpoch)
+			) {
+				EventLog.append(
+					"native-carry",
+					"${session.packageName} pre-resolution refused \"${session.title}\": " +
+						(contradiction ?: "native source generation changed"),
+				)
+				callback(null)
+				return@launch
+			}
+			callback(
+				SessionProbe.NativeResolvedIdentity(
+					videoId = resolution.videoId,
+					route = when {
+						resolution.playlistVerified -> NativePreResolvedRoute.PLAYLIST
+						resolution.historyVerified -> NativePreResolvedRoute.HISTORY
+						resolution.structuredNativeMusic ->
+							NativePreResolvedRoute.STRUCTURED_MUSIC
+
+						else -> NativePreResolvedRoute.RAW_TITLE_CHANNEL
+					},
+				),
+			)
+		}
+	}
+
+	/**
+	 * The artist/track pairs worth asking MusicBrainz about, most likely
+	 * first: the parsed pair, then the *swapped* pair. The swap exists because
+	 * `Title | Channel`-shaped uploads split backwards (observed on-chain:
+	 * artist "Michael Jackson MTV Awards 1995…" title "Remastered HD") — when
+	 * the reversed pair is the real recording, MusicBrainz says so, and its
+	 * canonical fields land in the payload the right way round.
+	 */
+	private fun mbCandidates(credits: ScrobbleBuilder.Parsed): List<Pair<String, String>> {
+		val artist = credits.artist?.takeIf { it.isNotBlank() } ?: return emptyList()
+		val out = mutableListOf(artist to credits.track)
+		if (!credits.track.equals(artist, ignoreCase = true)) {
+			out += credits.track to artist
+		}
+		return out
+	}
+
+	/**
+	 * Best-effort MusicBrainz confirmation of the artist/track the payload
+	 * would carry. Null when disabled, unparseable, or the network couldn't
+	 * answer — every path degrades to the pre-MusicBrainz behaviour.
+	 */
+	private suspend fun verifyMusic(
+		session: SessionSnapshot,
+		facts: VideoFacts?,
+	): MusicBrainzVerifier.Match? {
+		if (!settings.enrichment) return null
+		val credits = ScrobbleBuilder.creditsOf(session, facts) ?: return null
+		var last: MusicBrainzVerifier.Match? = null
+		for ((artist, track) in mbCandidates(credits)) {
+			val match = runCatching { musicBrainz.verify(artist, track) }.getOrElse {
+				EventLog.append("musicbrainz", "verifier threw: ${it.message}")
+				null
+			}
+			if (match?.found == true) return match
+			last = match ?: last
+		}
+		return last
+	}
+
+	/** Cache-only MusicBrainz verdict for the Now-tab preview. */
+	fun cachedMusicMatch(
+		session: SessionSnapshot,
+		facts: VideoFacts?,
+	): MusicBrainzVerifier.Match? {
+		if (!initialised || !settings.enrichment) return null
+		val credits = ScrobbleBuilder.creditsOf(session, facts) ?: return null
+		var last: MusicBrainzVerifier.Match? = null
+		for ((artist, track) in mbCandidates(credits)) {
+			val match = musicBrainz.cached(artist, track)
+			if (match?.found == true) return match
+			last = match ?: last
+		}
+		return last
+	}
+
+	/**
+	 * Start resolving a video's facts the moment it's identified, instead of
+	 * at finalize minutes later.
+	 *
+	 * Two reasons this matters beyond latency. The broadcast path stops
+	 * depending on a live network at the exact moment a track ends. And the
+	 * Now-tab preview reads the same cache via [cachedFacts], so the kind it
+	 * shows is the kind that will be broadcast — during the field test the
+	 * preview classified from the title alone while enrichment later said
+	 * otherwise, and the mismatch made the filter look arbitrary.
+	 */
+	fun prefetch(videoId: String, onComplete: ((available: Boolean) -> Unit)? = null) {
+		if (!initialised || !settings.enrichment) {
+			onComplete?.invoke(false)
+			return
+		}
+		if (cachedFacts(videoId) != null) {
+			onComplete?.invoke(true)
+			return
+		}
+		val registration = prefetches.register(videoId, onComplete)
+		registration.completed?.let { completed ->
+			onComplete?.invoke(completed)
+			return
+		}
+		val launch = registration.launch ?: return
+		scope.launch {
+			val facts = runCatching { resolver.resolve(videoId) }
+				.onFailure { EventLog.append("enrich", "prefetch failed: ${it.message}") }
+				.getOrNull()
+			// The completion says only whether the shared cache now has the page. The
+			// The Android binding re-reads that cache on its main-thread handoff; facts never cross
+			// the ownership boundary and a stale lifecycle cannot consume them.
+			val available = facts != null && cachedFacts(videoId) != null
+			prefetches.complete(launch, available).forEach { callback ->
+				runCatching { callback(available) }
+					.onFailure { EventLog.append("enrich", "prefetch completion failed: ${it.message}") }
+			}
+			if (facts == null) return@launch
+			// Chain the MusicBrainz check so the Now card's verdict is warm by
+			// the time anyone looks. Same credits derivation as the payload.
+			val rawTitle = facts.title ?: return@launch
+			val parsed = TitleParser.parse(rawTitle, facts.author)
+			val credits = ScrobbleBuilder.Parsed(
+				artist = facts.originalArtist ?: parsed.artist,
+				track = facts.originalTitle?.let { TitleParser.clean(it) } ?: parsed.track,
+			)
+			for ((artist, track) in mbCandidates(credits)) {
+				val match = runCatching { musicBrainz.verify(artist, track) }.getOrNull()
+				if (match?.found == true) break
+			}
+		}
+	}
+
+	/**
+	 * Never scrobble this video again.
+	 *
+	 * The user's escape hatch for promoted content the rules can't see — see
+	 * [MutedVideos]. It cannot unwrite what is already on-chain; it stops the
+	 * same video counting again when the feed brings it back.
+	 */
+	fun mute(videoId: String, label: String) {
+		if (!initialised) return
+		muted.mute(videoId, label)
+		EventLog.append("engine", "muted $videoId — \"$label\" will not scrobble again")
+	}
+
+	fun unmute(videoId: String) {
+		if (!initialised) return
+		muted.unmute(videoId)
+		EventLog.append("engine", "unmuted $videoId")
+	}
+
+	fun isMuted(videoId: String): Boolean = initialised && muted.isMuted(videoId)
+
+	/** Muted ids with the labels they were muted under, for the UI list. */
+	fun mutedVideos(): Map<String, String> = if (initialised) muted.all() else emptyMap()
+
+	/** Already-resolved facts, memory/disk only — never the network. */
+	fun cachedFacts(videoId: String): VideoFacts? =
+		if (initialised) factsCache.get(videoId) else null
+
+	/**
+	 * The two facts the probe uses to disprove a latched video id, cache-only.
+	 *
+	 * Kept here rather than in the probe so the probe never learns about
+	 * `VideoFacts`: it corroborates identity, it doesn't consume metadata.
+	 */
+	fun knownVideo(videoId: String): SessionProbe.KnownVideo? =
+		cachedFacts(videoId)?.let {
+			SessionProbe.KnownVideo(
+				title = it.title,
+				channel = it.author,
+				lengthSeconds = it.lengthSeconds,
+			)
+		}
+
+	/**
+	 * Best-effort lookup of the video's own metadata.
+	 *
+	 * Returns null on every metadata failure path — disabled, network down, or
+	 * markup changed. Video identity is a separate mandatory gate that has
+	 * already passed before this method runs.
+	 */
+	private suspend fun enrich(videoId: String): VideoFacts? {
+		if (!settings.enrichment) return null
+		return runCatching { resolver.resolve(videoId) }.getOrElse {
+			EventLog.append("enrich", "resolver threw: ${it.message}")
+			null
+		}
+	}
+
+	/**
+	 * Search-based recovery of a video id the address bar never supplied.
+	 *
+	 * Gated behind the same "Look videos up" switch — it is off-device traffic
+	 * — and fails closed. If the match is not certain, finalization records the
+	 * item in Not logged and never constructs an on-chain entry.
+	 */
+	/**
+	 * The playlist entry this session is playing, or null.
+	 *
+	 * Browsers supply the playlist id from the address bar. Native YouTube
+	 * supplies only the playlist *name*, read off the watch screen, so it is
+	 * resolved to an id here — once per playlist, cached including the misses.
+	 * After the first fetch every remaining track in that playlist is free.
+	 */
+	private suspend fun nativePlaylistResolution(
+		session: SessionSnapshot,
+		title: String,
+		durationSec: Long?,
+	): VideoResolution? {
+		val list = session.resolverContext.playlistId
+			?: session.resolverContext.nativePlaylistName?.let { name ->
+				idResolver.resolveNativePlaylistId(
+					playlistName = name,
+					ownerName = session.resolverContext.nativePlaylistOwner,
+					total = session.resolverContext.nativePlaylistTotal,
+				)
+			}
+			?: return null
+		return idResolver.resolveEvidenceFromPlaylist(
+			playlistId = list,
+			title = title,
+			channel = session.artist,
+			durationSec = durationSec,
+			seedVideoId = session.resolverContext.observedVideoId,
+		)
+	}
+
+	/**
+	 * The exact id from the signed-in account's watch history, or null when the
+	 * route does not apply at all.
+	 *
+	 * Null and a refusal are different answers: null means "this session is not
+	 * eligible for the route", which must fall through to search silently, while
+	 * a [VideoResolutionAttempt] with a reason means the route ran and declined,
+	 * which is worth reading in the log.
+	 *
+	 * Native `com.google.android.youtube`, and a browser playing YouTube once
+	 * every other route has come up empty. YouTube Music keeps a separate history
+	 * and is out of scope (§7.1).
+	 *
+	 * The browser half was withheld under §11.1 on the reasoning that browsers
+	 * have the address bar. Measured 2026-08-09: they have it only while the
+	 * address-bar watcher is alive, and Android disables an accessibility service
+	 * when it crashes — which is the exact failure `AccessibilityGrantHealth`
+	 * exists to report. With it dropped, a Brave Shorts session produced
+	 * `YouTube (site only, no video id)` on every poll, and two Shorts measured at
+	 * 89% and 100% were refused because search could not name a video titled
+	 * `#hoyoverse`.
+	 *
+	 * This cannot change browser behaviour when the address bar is working:
+	 * `resolveVideoId` only runs when no id has been proven at all, so a
+	 * confirmed URL always wins and never reaches here. It is a floor under the
+	 * browser path, not a change to it.
+	 */
+	private suspend fun watchHistoryResolution(
+		session: SessionSnapshot,
+		title: String?,
+		durationSec: Long?,
+		history: WatchHistorySource,
+	): VideoResolutionAttempt? {
+		if (!settings.watchHistory || !history.hasSession) return null
+		val nativeYouTube = session.profile.packageProvesSource &&
+			session.packageName == YouTubeProbe.YOUTUBE_PACKAGE
+		// A browser session must be proven YouTube before its own account's
+		// history is consulted about it; anything else is a different site.
+		val browserYouTube = !session.profile.packageProvesSource && session.isYouTube
+		if (!nativeYouTube && !browserYouTube) return null
+		// `<redacted-private-path>` §2. An absence is evidence about the account only when
+		// the listen was established enough that the account really should have
+		// recorded it. Identity resolution still runs for anything briefer — a
+		// Not logged row has to keep its exact hyperlink — but that lookup is
+		// explicitly not evidence.
+		//
+		// This is the dominant false-miss path, not an edge: the native carry
+		// pre-resolution asks for an id a few seconds into *every* ordinary
+		// video, long before the account's feed could contain it, and each of
+		// those absences was being counted. Three ordinary previews stood the
+		// route down for fifteen minutes.
+		val establishedNativeVideo = durationSec != null && durationSec > 0 &&
+			session.playedMs >= (durationSec * 1_000.0 * settings.scrobbleThreshold)
+		val nativeAccountEvidence = nativeYouTube &&
+			session.explicitAdSignal == null &&
+			!session.hasShortSourceProof &&
+			establishedNativeVideo
+		// A foreground Short is a different question. Its history row is a
+		// `shortsLockupViewModel`, which carries an id and a title and
+		// deliberately no channel and no duration, so it can never satisfy the
+		// ordinary three-field gate and is kept out of it entirely. What the
+		// feed does supply is the exact id — which is precisely what the search
+		// route cannot find for these: measured 2026-08-04, six of eleven Shorts
+		// failed at "no candidate matched exact title+duration+owner handle",
+		// their titles being mostly hashtags and emoji.
+		//
+		// So history names the candidates and the *existing* owner-handle
+		// verification decides: each id's own watch page is re-fetched and must
+		// agree on title, duration and @handle, uniquely. No rule is relaxed;
+		// the proven gate is simply handed the right ids.
+		val handle = session.ownerHandle
+		if (handle != null) {
+			var previousCandidates: List<String>? = null
+			var lastAttempt: VideoResolutionAttempt? = null
+
+			suspend fun attemptFromShortHistory(forceRefresh: Boolean): VideoResolutionAttempt? {
+				val candidates = history.recentShortIds(
+					title,
+					forceRefresh,
+					countsAsAccountEvidence = nativeYouTube,
+				)
+				if (candidates.isEmpty()) {
+					previousCandidates = emptyList()
+					return lastAttempt
+				}
+				// A history refresh is cheap; re-fetching the same eight candidate
+				// watch pages is not. An unchanged candidate list cannot produce a new
+				// corroboration result, so wait for the feed itself to change.
+				if (candidates == previousCandidates) {
+					EventLog.append(
+						"history",
+						"fresh Shorts feed still offers the same ${candidates.size} candidates; " +
+							"skipping duplicate watch-page verification",
+					)
+					return lastAttempt
+				}
+				previousCandidates = candidates
+				val attempt = idResolver.resolveVerifiedCandidates(
+					videoIds = candidates,
+					title = title,
+					channel = session.artist,
+					durationSec = durationSec,
+					ownerHandle = handle,
+				)
+				lastAttempt = attempt
+				// The account's own feed named this id and its own watch page then
+				// agreed on title, owner and duration. That is the same fact an
+				// ordinary-entry match establishes, and until now only the ordinary
+				// list could report it — so a phone watching nothing but Shorts could
+				// never clear a stand-down its ads had caused.
+				// Native playback only. A browser Short landing in this account's feed
+				// is not evidence about the native YouTube app's account, so it may
+				// not clear a pause that native playback earned.
+				if (attempt.resolution != null && nativeYouTube) history.recordShortCorroborated()
+				EventLog.append(
+					"history",
+					attempt.resolution?.let {
+						"resolved Short ${title?.let { t -> "\"$t\"" } ?: "with no readable title"} " +
+							"→ ${it.videoId} from watch history, corroborated on its own watch page"
+					} ?: "watch-history Short candidates did not corroborate " +
+						"${title?.let { t -> "\"$t\"" } ?: "this untitled Short"}: " +
+						attempt.refusalReason,
+				)
+				return attempt
+			}
+
+			val initial = attemptFromShortHistory(forceRefresh = false)
+			if (initial?.resolution != null) return initial
+			// Only a proven foreground Short receives the propagation window. The
+			// route never delays an ordinary video or guesses that a browser page is
+			// a Short. First bypass a possibly stale 15-second cache immediately.
+			if (!nativeYouTube || !session.isForegroundShort) return initial
+			var current = attemptFromShortHistory(forceRefresh = true)
+			if (current?.resolution != null) return current
+			for (waitMillis in SHORT_HISTORY_RETRY_DELAYS_MS) {
+				EventLog.append(
+					"history",
+					"Short identity is not in the current feed; retrying a fresh history read " +
+						"after ${waitMillis / 1000}s",
+				)
+				ports.historyRetryDelay.wait(waitMillis)
+				if (!NativeSourceSwitches.isSnapshotCurrent(
+						session.packageName,
+						session.sourceEpoch,
+					)
+				) {
+					return VideoResolutionAttempt(
+						refusalReason = "source generation changed while watch history was catching up",
+					)
+				}
+				current = attemptFromShortHistory(forceRefresh = true)
+				if (current?.resolution != null) return current
+			}
+			return current ?: lastAttempt
+		}
+
+		// Every non-Short route still needs a title; only the handle path above
+		// can stand without one.
+		if (title == null) return null
+
+		// A Short watched in a browser has no owner handle — that field is the
+		// native footer's — but it does have the channel, and history's Shorts
+		// rows carry the exact ids. Measured 2026-08-09: `#hoyoverse` /
+		// `Mr Time Edits` was watched to 89% and then 98% in Brave and refused
+		// both times, because search cannot name a video whose title is one
+		// hashtag: "no verified id … among 73 unique search candidates".
+		//
+		// Same route the native Short takes, with the channel standing where the
+		// handle would: history names the candidates, and each candidate's own
+		// watch page must still agree on title, channel and duration, uniquely.
+		// No rule is relaxed — `resolveVerifiedCandidates` still refuses without
+		// a length when there is no handle to carry the check.
+		// Not gated on "this is a Short": without the address bar there is nothing
+		// that could prove it. It costs nothing to ask — history returns Shorts
+		// whose title matches exactly, so a regular video simply gets an empty
+		// list and falls through to the ordinary evidence gate below.
+		if (!session.profile.packageProvesSource) {
+			// Browser-scoped: this read may not spend the probe a stood-down route
+			// allows native playback, and its outcome is not evidence either way.
+			// Deliberately *not* used to decide whether this track is a Short:
+			// `recentShortIds` falls back to the most recent Shorts when no title
+			// matches, so a non-empty list can be the feed's fallback rather than a
+			// match, and an ordinary browser video would be classified as a Short by
+			// nothing more than the feed having Shorts in it.
+			val shortCandidates = history.recentShortIds(
+				title,
+				forceRefresh = false,
+				countsAsAccountEvidence = false,
+			)
+			if (shortCandidates.isNotEmpty()) {
+				val attempt = idResolver.resolveVerifiedCandidates(
+					videoIds = shortCandidates,
+					title = title,
+					channel = session.artist,
+					durationSec = durationSec,
+				)
+				EventLog.append(
+					"history",
+					attempt.resolution?.let {
+						"resolved browser Short \"$title\" → ${it.videoId} from watch history, " +
+							"corroborated on its own watch page"
+					} ?: "watch-history Short candidates did not corroborate \"$title\": " +
+						attempt.refusalReason,
+				)
+				if (attempt.resolution != null) return attempt
+			}
+		}
+		return history.resolveEvidence(
+			title = title,
+			channel = session.artist,
+			durationSec = durationSec,
+			ownerHandle = null,
+			// Four things reach here whose absence says nothing about which account
+			// the *native YouTube app* is signed into:
+			//
+			// - an ad, which is not a watch-history row in any account;
+			// - a Short, which the parser keeps in its own list and out of the
+			//   ordinary entries, so its absence from that window is a property of
+			//   the parser;
+			// - anything played in a browser, which is not the native app at all;
+			// - a video of unknown length, or one previewed below the threshold,
+			//   which the account may simply not have recorded yet.
+			countsAsAccountEvidence = nativeAccountEvidence,
+		)
+	}
+
+	private fun frozenResolution(
+		session: SessionSnapshot,
+		confirmed: YouTubeProbe.Identity.Confirmed,
+	): VideoResolution = VideoResolution(
+		videoId = confirmed.videoId,
+		source = "frozen ${confirmed.source}",
+		title = session.resolverContext.knownTitle,
+		channel = session.resolverContext.knownChannel,
+		ownerHandle = session.ownerHandle,
+		lengthSeconds = session.resolverContext.knownDurationSeconds,
+	)
+
+	private fun VideoResolutionAttempt.asRepositoryAttempt(): VideoIdentityRepositoryAttempt {
+		val typedKind = when {
+			resolution != null -> IdentityOutcomeKind.RESOLVED
+			failure == VideoResolutionFailure.NOT_APPLICABLE -> IdentityOutcomeKind.NOT_APPLICABLE
+			failure == VideoResolutionFailure.AMBIGUOUS -> IdentityOutcomeKind.AMBIGUOUS
+			failure == VideoResolutionFailure.CONTRADICTION -> IdentityOutcomeKind.CONTRADICTION
+			failure == VideoResolutionFailure.TEMPORARY_FAILURE ->
+				IdentityOutcomeKind.TEMPORARY_FAILURE
+			else -> IdentityOutcomeKind.NO_MATCH
+		}
+		return VideoIdentityRepositoryAttempt(
+			resolution = resolution,
+			kind = typedKind,
+			diagnostic = refusalReason ?: resolution?.source ?: "identity route returned no diagnostic",
+		)
+	}
+
+	private fun IdentityStrategyOutcome.asVideoAttempt(): VideoResolutionAttempt = when (this) {
+		is IdentityStrategyOutcome.Resolved -> {
+			val video = identity as? VideoResolution
+			if (video != null) {
+				VideoResolutionAttempt(resolution = video)
+			} else {
+				VideoResolutionAttempt(
+					refusalReason = "resolved source identity was not a YouTube video",
+					failure = VideoResolutionFailure.CONTRADICTION,
+				)
+			}
+		}
+		is IdentityStrategyOutcome.NotApplicable -> VideoResolutionAttempt(
+			refusalReason = diagnostic.message,
+			failure = VideoResolutionFailure.NOT_APPLICABLE,
+		)
+		is IdentityStrategyOutcome.NoMatch -> VideoResolutionAttempt(
+			refusalReason = diagnostic.message,
+			failure = VideoResolutionFailure.NO_MATCH,
+		)
+		is IdentityStrategyOutcome.Ambiguous -> VideoResolutionAttempt(
+			refusalReason = diagnostic.message,
+			failure = VideoResolutionFailure.AMBIGUOUS,
+		)
+		is IdentityStrategyOutcome.Contradiction -> VideoResolutionAttempt(
+			refusalReason = diagnostic.message,
+			failure = VideoResolutionFailure.CONTRADICTION,
+		)
+		is IdentityStrategyOutcome.TemporaryFailure -> VideoResolutionAttempt(
+			refusalReason = diagnostic.message,
+			failure = VideoResolutionFailure.TEMPORARY_FAILURE,
+		)
+	}
+
+	private suspend fun typedFrozenExactAttempt(
+		session: SessionSnapshot,
+		durationSec: Long?,
+		history: WatchHistorySource,
+	): VideoResolutionAttempt {
+		session.confirmed?.let {
+			return VideoResolutionAttempt(resolution = frozenResolution(session, it))
+		}
+		val preResolvedNativeId = session.resolverContext.preResolvedNativeVideoId
+			?: return VideoResolutionAttempt(
+				refusalReason = "no frozen exact id",
+				failure = VideoResolutionFailure.NOT_APPLICABLE,
+			)
+		if (!settings.enrichment) {
+			return VideoResolutionAttempt(refusalReason = "video lookup is disabled")
+		}
+		val title = session.title
+			?: return VideoResolutionAttempt(refusalReason = "the finalized title is missing")
+		val artist = session.artist
+			?: return VideoResolutionAttempt(refusalReason = "the finalized native artist is missing")
+		val duration = durationSec
+			?: return VideoResolutionAttempt(refusalReason = "the finalized native duration is missing")
+		val preResolvedRoute = session.resolverContext.preResolvedNativeRoute
+			?: return VideoResolutionAttempt(
+				refusalReason = "pre-resolved native authority omitted its resolver route",
+			)
+		EventLog.append(
+			"resolve",
+			"re-fetching pre-resolved native carry authority $preResolvedNativeId " +
+				"($preResolvedRoute) for \"$title\"",
+		)
+		val attempt = runCatching {
+			when (preResolvedRoute) {
+				NativePreResolvedRoute.STRUCTURED_MUSIC ->
+					idResolver.revalidatePreResolvedNativeMusic(
+						preResolvedNativeId, title, artist, duration,
+					)
+				NativePreResolvedRoute.RAW_TITLE_CHANNEL ->
+					idResolver.resolveVerifiedCandidates(
+						listOf(preResolvedNativeId), title, artist, duration,
+					)
+				NativePreResolvedRoute.HISTORY -> if (settings.watchHistory && history.hasSession) {
+					history.revalidate(
+						preResolvedNativeId,
+						title,
+						artist,
+						duration,
+						countsAsAccountEvidence = session.profile.packageProvesSource &&
+							session.packageName == YouTubeProbe.YOUTUBE_PACKAGE &&
+							session.explicitAdSignal == null &&
+							!session.hasShortSourceProof &&
+							session.playedMs >=
+							(duration * 1_000.0 * settings.scrobbleThreshold),
+					)
+				} else {
+					VideoResolutionAttempt(
+						refusalReason = "watch history was disconnected while \"$title\" was playing, " +
+							"so the id it supplied cannot be re-verified",
+					)
+				}
+				NativePreResolvedRoute.PLAYLIST -> {
+					val current = observedPlaylistAttempt(session, title, duration)
+					val currentResolution = current.resolution
+					when {
+						currentResolution == null -> VideoResolutionAttempt(
+							refusalReason = "pre-resolved playlist id $preResolvedNativeId " +
+								"no longer matches any entry of the playlist being played",
+						)
+						currentResolution.videoId != preResolvedNativeId -> VideoResolutionAttempt(
+							refusalReason = "playlist now resolves \"$title\" to " +
+								"${currentResolution.videoId}, not the carried $preResolvedNativeId",
+						)
+						else -> current
+					}
+				}
+			}
+		}.getOrElse {
+			VideoResolutionAttempt(
+				refusalReason = "pre-resolved native revalidation failed: ${it.message}",
+				failure = VideoResolutionFailure.TEMPORARY_FAILURE,
+			)
+		}
+		if (attempt.resolution == null) {
+			EventLog.append(
+				"resolve",
+				"carried $preResolvedNativeId ($preResolvedRoute) no longer revalidates " +
+					"for \"$title\" — ${attempt.refusalReason}; asking the ordinary routes " +
+					"rather than refusing the listen",
+			)
+			// A stale carry is one route losing authority, not a contradiction that
+			// may veto independently corroborating lower-priority evidence.
+			return attempt.copy(failure = VideoResolutionFailure.NO_MATCH)
+		}
+		return attempt
+	}
+
+	private suspend fun observedPlaylistAttempt(
+		session: SessionSnapshot,
+		title: String,
+		durationSec: Long?,
+	): VideoResolutionAttempt {
+		val explicitList = session.resolverContext.playlistId
+		val nativeName = session.resolverContext.nativePlaylistName
+		if (explicitList == null && nativeName == null) {
+			return VideoResolutionAttempt(
+				refusalReason = "no observed playlist context",
+				failure = VideoResolutionFailure.NOT_APPLICABLE,
+			)
+		}
+		val list = explicitList ?: idResolver.resolveNativePlaylistId(
+			playlistName = checkNotNull(nativeName),
+			ownerName = session.resolverContext.nativePlaylistOwner,
+			total = session.resolverContext.nativePlaylistTotal,
+		) ?: return VideoResolutionAttempt(
+			refusalReason = "the observed native playlist name did not resolve",
+		)
+		return idResolver.resolveEvidenceFromPlaylistAttempt(
+			playlistId = list,
+			title = title,
+			channel = session.artist,
+			durationSec = durationSec,
+			seedVideoId = session.resolverContext.observedVideoId,
+		)
+	}
+
+	private suspend fun resolveVideoId(
+		session: SessionSnapshot,
+		sequence: VerifiedPlaybackSequence,
+		history: WatchHistorySource,
+	): VideoResolutionAttempt {
+		val durationSec = (
+			session.resolverContext.presentationDurationMs ?: session.durationMs
+		)?.div(1000)
+		val shortHistoryOnly = session.isForegroundShort &&
+			session.ownerHandle != null &&
+			(session.title == null || durationSec == null)
+		var searchPipeline: VideoResolutionAttempt? = null
+
+		suspend fun searchAttempt(): VideoResolutionAttempt {
+			searchPipeline?.let { return it }
+			val computed = when {
+				!settings.enrichment ->
+					VideoResolutionAttempt(refusalReason = "video lookup is disabled")
+				shortHistoryOnly -> VideoResolutionAttempt(
+					refusalReason = "this Short's ${if (session.title == null) "title" else "length"} " +
+						"could not be read and watch history could not identify it from what was left; " +
+						(history.refusedBecause?.let { "the route is not running: $it" }
+							?: "sign-in and the watch-history switch are what make these resolvable"),
+				)
+				session.title == null ->
+					VideoResolutionAttempt(refusalReason = "the finalized title is missing")
+				else -> runCatching {
+					idResolver.resolveEvidenceAttempt(
+						session.title,
+						session.artist,
+						durationSec,
+						session.ownerHandle,
+						allowStructuredNativeMusic = session.profile.packageProvesSource &&
+							!session.isForegroundShort,
+						allowYouTubeMusicCatalog =
+							session.packageName == YouTubeProbe.YOUTUBE_MUSIC_PACKAGE,
+						album = session.album,
+						durationMs = session.resolverContext.presentationDurationMs
+							?: session.durationMs,
+					)
+				}.getOrElse {
+					EventLog.append("resolve", "resolver threw: ${it.message}")
+					VideoResolutionAttempt(
+						refusalReason = "resolver failed: ${it.message ?: "unknown error"}",
+						failure = VideoResolutionFailure.TEMPORARY_FAILURE,
+					)
+				}
+			}
+			searchPipeline = computed
+			return computed
+		}
+
+		val repository = object : YouTubeIdentityStrategyRepository {
+			override suspend fun frozenExactId(): VideoIdentityRepositoryAttempt =
+				typedFrozenExactAttempt(session, durationSec, history).asRepositoryAttempt()
+
+			override suspend fun runLocalCandidate(): VideoIdentityRepositoryAttempt {
+				if (!settings.enrichment || shortHistoryOnly || session.title == null) {
+					return VideoIdentityRepositoryAttempt(
+						kind = IdentityOutcomeKind.NOT_APPLICABLE,
+						diagnostic = if (!settings.enrichment) {
+							"video lookup is disabled"
+						} else {
+							"run-local candidate route did not apply"
+						},
+					)
+				}
+				val cachedIds = VerifiedIdentityCandidateCache.candidates(
+					packageName = session.packageName,
+					title = session.title,
+					channel = session.artist,
+					durationMs = session.durationMs,
+					ownerHandle = session.ownerHandle,
+				)
+				if (cachedIds.isEmpty()) {
+					return VideoIdentityRepositoryAttempt(
+						kind = IdentityOutcomeKind.NO_MATCH,
+						diagnostic = "no run-local verified candidate",
+					)
+				}
+				EventLog.append(
+					"resolve",
+					"${cachedIds.size} run-local candidate(s) for \"${session.title}\" — re-fetching",
+				)
+				return runCatching {
+					idResolver.resolveVerifiedCandidates(
+						cachedIds,
+						session.title,
+						session.artist,
+						durationSec,
+						session.ownerHandle,
+					)
+				}.getOrElse {
+					VideoResolutionAttempt(
+						refusalReason = "run-local candidate re-fetch failed: ${it.message}",
+						failure = VideoResolutionFailure.TEMPORARY_FAILURE,
+					)
+				}.asRepositoryAttempt()
+			}
+
+			override suspend fun consecutivePlaylist(): VideoIdentityRepositoryAttempt {
+				if (!settings.enrichment || shortHistoryOnly || session.title == null) {
+					return VideoIdentityRepositoryAttempt(
+						kind = IdentityOutcomeKind.NOT_APPLICABLE,
+						diagnostic = "consecutive playlist route did not apply",
+					)
+				}
+				val predecessors = sequence.predecessors(session.trackInstance)
+					?: return VideoIdentityRepositoryAttempt(
+						kind = IdentityOutcomeKind.NOT_APPLICABLE,
+						diagnostic = "two verified adjacent predecessors were unavailable",
+					)
+				return idResolver.resolveEvidenceFromAdjacentPredecessorsAttempt(
+					firstVideoId = predecessors.first.videoId,
+					secondVideoId = predecessors.second.videoId,
+					firstTitle = predecessors.first.title,
+					secondTitle = predecessors.second.title,
+					title = session.title,
+					channel = session.artist,
+					durationSec = durationSec,
+				).asRepositoryAttempt()
+			}
+
+			override suspend fun observedPlaylist(): VideoIdentityRepositoryAttempt {
+				if (!settings.enrichment || shortHistoryOnly || session.title == null) {
+					return VideoIdentityRepositoryAttempt(
+						kind = IdentityOutcomeKind.NOT_APPLICABLE,
+						diagnostic = "observed playlist route did not apply",
+					)
+				}
+				return observedPlaylistAttempt(session, session.title, durationSec)
+					.asRepositoryAttempt()
+			}
+
+			override suspend fun watchHistory(): VideoIdentityRepositoryAttempt {
+				if (!settings.enrichment) {
+					return VideoIdentityRepositoryAttempt(
+						kind = IdentityOutcomeKind.NOT_APPLICABLE,
+						diagnostic = "video lookup is disabled",
+					)
+				}
+				val attempt = watchHistoryResolution(
+					session, session.title, durationSec, history,
+				)
+				if (attempt != null) return attempt.asRepositoryAttempt()
+				return VideoIdentityRepositoryAttempt(
+					kind = IdentityOutcomeKind.NOT_APPLICABLE,
+					diagnostic = "watch history was disconnected or not applicable",
+				)
+			}
+
+			override suspend fun structuredNativeMusic(): VideoIdentityRepositoryAttempt {
+				if (!settings.enrichment || shortHistoryOnly ||
+					!session.profile.packageProvesSource || session.isForegroundShort
+				) {
+					return VideoIdentityRepositoryAttempt(
+						kind = IdentityOutcomeKind.NOT_APPLICABLE,
+						diagnostic = "structured native music route did not apply",
+					)
+				}
+				val attempt = searchAttempt()
+				return if (attempt.resolution?.structuredNativeMusic == true) {
+					attempt.asRepositoryAttempt()
+				} else {
+					VideoIdentityRepositoryAttempt(
+						kind = IdentityOutcomeKind.NOT_APPLICABLE,
+						diagnostic = "the legacy search repository selected no structured native result",
+					)
+				}
+			}
+
+			override suspend fun search(): VideoIdentityRepositoryAttempt =
+				searchAttempt().asRepositoryAttempt()
+		}
+
+		val result = ProductionIdentityStrategies.chain().resolve(
+			ProductionIdentityContext(
+				publishedIdentity = session.identity,
+				youTube = YouTubeIdentityContext,
+				repository = repository,
+			),
+		)
+		return result.outcome.asVideoAttempt()
+	}
+
+	/**
+	 * @param sequence the adjacency this resolution may read and record against —
+	 * the live one for a live finalization, the run's detached copy in shadow.
+	 * Passed rather than read from the field so a shadow resolution cannot reach
+	 * the shared sequence by taking a different route into this function.
+	 */
+	private suspend fun resolveVideoIdLegacy(
+		session: SessionSnapshot,
+		sequence: VerifiedPlaybackSequence,
+		history: WatchHistorySource,
+	): VideoResolutionAttempt {
+		if (!settings.enrichment) {
+			return VideoResolutionAttempt(refusalReason = "video lookup is disabled")
+		}
+		// Threshold measurement deliberately keeps the longest duration established
+		// for one logical listen. Identity must instead corroborate the exact item
+		// currently presented by the source (for example YouTube Music's shorter
+		// Song item after its longer Video item), or the resolver reacquires the
+		// wrong presentation's id.
+		val durationSec = (
+			session.resolverContext.presentationDurationMs ?: session.durationMs
+			)?.div(1000)
+		// A foreground Short may legitimately arrive with no title: the footer
+		// lost its resource ids and YouTube keeps restyling it, so the title is
+		// the least reliable thing on screen. Its owner handle and its seekbar
+		// duration are not, and the watch-history route resolves on exactly those.
+		// Every other source still requires a title, because nothing else has a
+		// second discriminator to fall back on.
+		// A foreground Short now reaches here in three shapes: with a title and a
+		// length, with a length but no title (the footer restyle), and — since
+		// YouTube stopped rendering the Shorts seekbar — with a title but no
+		// length at all. Watch history is the only route that can answer any of
+		// them, because it is the only one that knows what this account played.
+		if (session.isForegroundShort &&
+			session.ownerHandle != null &&
+			(session.title == null || durationSec == null)
+		) {
+			// Straight to watch history: the search and playlist routes below all
+			// need a title *and* a length to query with, and the pre-resolved
+			// carry can only exist for a Short that already had both. History
+			// needs neither — it names what this account played, and whichever of
+			// the two fields survived still has to match, uniquely, on the
+			// candidate's own watch page.
+			val missing = if (session.title == null) "title" else "length"
+			return watchHistoryResolution(session, session.title, durationSec, history)
+				?: VideoResolutionAttempt(
+					refusalReason = "this Short's $missing could not be read and watch history " +
+						"could not identify it from what was left; " +
+						// Naming the actual state, when there is one, rather than
+						// always pointing at sign-in: measured 2026-08-06, two of
+						// these were refused with this wording while the route was
+						// standing itself down for fifteen minutes.
+						(
+							history.refusedBecause?.let { "the route is not running: $it" }
+								?: "sign-in and the watch-history switch are what make these resolvable"
+							),
+				)
+		}
+		val title = session.title
+			?: return VideoResolutionAttempt(refusalReason = "the finalized title is missing")
+		val preResolvedNativeId = session.resolverContext.preResolvedNativeVideoId
+		if (preResolvedNativeId != null) {
+			val artist = session.artist ?: return VideoResolutionAttempt(
+				refusalReason = "the finalized native artist is missing",
+			)
+			val duration = durationSec ?: return VideoResolutionAttempt(
+				refusalReason = "the finalized native duration is missing",
+			)
+			val preResolvedRoute = session.resolverContext.preResolvedNativeRoute
+				?: return VideoResolutionAttempt(
+					refusalReason = "pre-resolved native authority omitted its resolver route",
+				)
+			EventLog.append(
+				"resolve",
+				"re-fetching pre-resolved native carry authority $preResolvedNativeId " +
+					"($preResolvedRoute) for \"$title\"",
+			)
+			val carryAttempt = runCatching {
+				when (preResolvedRoute) {
+					NativePreResolvedRoute.STRUCTURED_MUSIC ->
+						idResolver.revalidatePreResolvedNativeMusic(
+							preResolvedNativeId, title, artist, duration,
+						)
+					NativePreResolvedRoute.RAW_TITLE_CHANNEL ->
+						idResolver.resolveVerifiedCandidates(
+							listOf(preResolvedNativeId), title, artist, duration,
+						)
+
+					// Re-ask the feed that produced it. History is a live list,
+					// so a listen it has since re-described must refuse rather
+					// than carry a stale answer onto a chain nothing can edit.
+					NativePreResolvedRoute.HISTORY -> {
+						val revalidated = if (settings.watchHistory && history.hasSession) {
+							history.revalidate(
+								preResolvedNativeId,
+								title,
+								artist,
+								duration,
+								// Same rule as the ordinary gate: a carried id the feed
+								// no longer names is only evidence about the account
+								// once the listen was established. See `<redacted-private-path>` §2.
+								countsAsAccountEvidence = session.profile.packageProvesSource &&
+									session.packageName == YouTubeProbe.YOUTUBE_PACKAGE &&
+									session.explicitAdSignal == null &&
+									!session.hasShortSourceProof &&
+									session.playedMs >=
+									(duration * 1_000.0 * settings.scrobbleThreshold),
+							)
+						} else {
+							VideoResolutionAttempt(
+								refusalReason = "watch history was disconnected while " +
+									"\"$title\" was playing, so the id it supplied " +
+									"cannot be re-verified",
+							)
+						}
+						revalidated
+					}
+
+					// Re-verify against the authority that produced it. The
+					// playlist entry list is already cached, so this is a lookup,
+					// and requiring the same id back preserves the immutability
+					// the carry depends on.
+					NativePreResolvedRoute.PLAYLIST -> {
+						val revalidated = nativePlaylistResolution(session, title, duration)
+						when {
+							revalidated == null -> VideoResolutionAttempt(
+								refusalReason = "pre-resolved playlist id $preResolvedNativeId " +
+									"no longer matches any entry of the playlist being played",
+							)
+
+							revalidated.videoId != preResolvedNativeId -> VideoResolutionAttempt(
+								refusalReason = "playlist now resolves \"$title\" to " +
+									"${revalidated.videoId}, not the carried $preResolvedNativeId",
+							)
+
+							else -> VideoResolutionAttempt(resolution = revalidated)
+						}
+					}
+				}
+			}.getOrElse {
+				VideoResolutionAttempt(
+					refusalReason = "pre-resolved native revalidation failed: ${it.message}",
+				)
+			}
+			if (carryAttempt.resolution != null) return carryAttempt
+
+			// A carry that no longer revalidates is not proof that the track is
+			// unidentifiable — only that *this* route can no longer vouch for it.
+			// Measured 2026-08-06: "Nicki Minaj - Barbie Tingz" had its id named
+			// by watch history during playback, and at finalize the carry route
+			// refused and returned, so the history route was never asked again
+			// and a listen that history could still identify was thrown away.
+			//
+			// Falling through costs nothing in rigour: every remaining route has
+			// its own uniqueness proof, and VideoIdentityCorroborator still runs
+			// on whatever any of them returns.
+			EventLog.append(
+				"resolve",
+				"carried $preResolvedNativeId ($preResolvedRoute) no longer revalidates " +
+					"for \"$title\" — ${carryAttempt.refusalReason}; asking the ordinary " +
+					"routes rather than refusing the listen",
+			)
+		}
+		return runCatching {
+			val cachedIds = VerifiedIdentityCandidateCache.candidates(
+				packageName = session.packageName,
+				title = session.title,
+				channel = session.artist,
+				durationMs = session.durationMs,
+				ownerHandle = session.ownerHandle,
+			)
+			if (cachedIds.isNotEmpty()) {
+				EventLog.append(
+					"resolve",
+					"${cachedIds.size} run-local candidate(s) for \"$title\" — re-fetching",
+				)
+				val cachedAttempt = idResolver.resolveVerifiedCandidates(
+					cachedIds, title, session.artist, durationSec, session.ownerHandle,
+				)
+				if (cachedAttempt.resolution != null ||
+					cachedAttempt.failure == VideoResolutionFailure.AMBIGUOUS
+				) {
+					return@runCatching cachedAttempt
+				}
+				EventLog.append(
+					"resolve",
+					"run-local recovery did not corroborate — continuing to playlist/search",
+				)
+			}
+			// When neither source can publish the current id, recover the public
+			// playlist from the immediately preceding two verified uploads. This is
+			// shared by Brave and the native YouTube app and needs no visible UI.
+			// It deliberately precedes the carried playlist context: if playback
+			// moved to a new list while the browser was backgrounded, that carried
+			// id is the stale list from the exact gap this route repairs.
+			val predecessors = sequence.predecessors(session.trackInstance)
+			EventLog.append(
+				"sequence",
+				"${session.packageName} predecessor lookup for start=${session.trackStartedAtEpochSec}: " +
+					"${predecessors ?: "unavailable"}; " +
+					sequence.describe(session.packageName),
+			)
+			predecessors?.let { (first, second) ->
+				idResolver.resolveEvidenceFromAdjacentPredecessors(
+					firstVideoId = first.videoId,
+					secondVideoId = second.videoId,
+					firstTitle = first.title,
+					secondTitle = second.title,
+					title = title,
+					channel = session.artist,
+					durationSec = durationSec,
+				)?.let { recovered ->
+					return@runCatching VideoResolutionAttempt(resolution = recovered)
+				}
+			}
+
+			// The playlist is exact where search is only plausible, and after
+			// the first fetch it costs nothing for the rest of the playlist.
+			val playlistResolution = nativePlaylistResolution(session, title, durationSec)
+			if (playlistResolution != null) {
+				return@runCatching VideoResolutionAttempt(resolution = playlistResolution)
+			}
+
+			// Then the account's own watch history, which is the only route that
+			// names an exact id for native playback with no playlist around it —
+			// a single video, or anything played with the screen off. Ahead of
+			// search because search has been measured choosing a
+			// duration-identical wrong upload (§10.1); behind the playlist
+			// because the playlist needs no credentials and is already proven.
+			val historyAttempt = watchHistoryResolution(session, title, durationSec, history)
+			if (historyAttempt?.resolution != null) {
+				return@runCatching historyAttempt
+			}
+
+			idResolver.resolveEvidenceAttempt(
+				title,
+				session.artist,
+				durationSec,
+				session.ownerHandle,
+				allowStructuredNativeMusic = session.profile.packageProvesSource &&
+					!session.isForegroundShort,
+				allowYouTubeMusicCatalog =
+					session.packageName == YouTubeProbe.YOUTUBE_MUSIC_PACKAGE,
+				// Only YouTube Music publishes a real album, and only its catalog
+				// route reads this. The YouTube app puts the channel in the artist
+				// slot and nothing in the album slot, so nothing here changes for
+				// it or for the browser.
+				album = session.album,
+				// Unrounded, because `durationSec` above is truncated and the
+				// duplicate-family selection needs the player's real length.
+				durationMs = session.resolverContext.presentationDurationMs
+					?: session.durationMs,
+			)
+		}.getOrElse {
+			EventLog.append("resolve", "resolver threw: ${it.message}")
+			VideoResolutionAttempt(refusalReason = "resolver failed: ${it.message ?: "unknown error"}")
+		}
+	}
+
+	/** Monitoring/package reset boundary for the memory-only identity index. */
+	fun clearVerifiedIdentityCandidates(packageName: String? = null) {
+		if (packageName == null) VerifiedIdentityCandidateCache.clearAll()
+		else VerifiedIdentityCandidateCache.clear(packageName)
+		verifiedPlaybackSequence.clear(packageName)
+		// The history route's "your app is on another account" diagnosis is a
+		// run of consecutive misses; a monitoring or package boundary makes the
+		// old run meaningless, so it starts over rather than carrying a verdict
+		// across a state change the user may have made to fix it.
+		if (initialised && packageName == null) history.reset()
+	}
+
+	// ---- watch history, the user-facing surface --------------------------------
+
+	/** Whether an account is connected for watch-history lookups. */
+	fun youTubeSession(): YouTubeSessionVault.Session? =
+		if (initialised) youtubeSession.session else null
+
+	fun watchHistoryEnabled(): Boolean = initialised && settings.watchHistory
+
+	fun setWatchHistoryEnabled(enabled: Boolean) {
+		if (!initialised) return
+		settings.watchHistory = enabled
+		history.reset()
+		EventLog.append(
+			"history",
+			"watch-history lookups ${if (enabled) "on" else "off"}",
+		)
+	}
+
+	/** The exact reason the route is standing down, or null when it is running. */
+	fun watchHistoryRefusal(): String? = if (initialised) history.refusedBecause else null
+
+	/**
+	 * The same refusal as a typed cause, for a surface that has to offer the
+	 * right recovery. [watchHistoryRefusal] is prose for a person to read and is
+	 * never branched on.
+	 */
+	fun watchHistoryRefusalKind(): WatchHistoryHealth.Refusal? =
+		if (initialised) history.refusedAs else null
+
+	/**
+	 * Store a session the user signed in for. The cookie never passes through a
+	 * log, a state flow or the UI — only this call, and only into the vault.
+	 */
+	fun connectYouTubeSession(cookieHeader: String, accountLabel: String?) {
+		if (!initialised) return
+		youtubeSession.save(cookieHeader, accountLabel)
+		settings.watchHistory = true
+		history.reset()
+		EventLog.append(
+			"history",
+			"connected a YouTube account for watch-history lookups" +
+				(accountLabel?.let { " (@$it)" } ?: "") + "; the session is stored encrypted " +
+				"and is never logged or sent anywhere but youtube.com",
+		)
+	}
+
+	/** Prove a freshly connected session can actually read history. */
+	suspend fun probeWatchHistory(): WatchHistoryResolver.Probe =
+		if (initialised) {
+			history.probe()
+		} else {
+			WatchHistoryResolver.Probe.Faulted(null, "the engine is not initialised")
+		}
+
+	fun disconnectYouTubeSession() {
+		if (!initialised) return
+		youtubeSession.forget()
+		settings.watchHistory = false
+		history.reset()
+		EventLog.append("history", "YouTube account disconnected and its session wiped")
+	}
+
+	/** Retry anything waiting in the queue. Safe to call often. */
+	fun flushQueue() {
+		if (!initialised) return
+		dispatcher.retryDue()
+	}
+
+	/** Transport-only queue retry. No finalized listen can enter this method. */
+	private fun retryQueuedPayloads() {
+		scope.launch {
+			broadcastLock.withLock {
+					val account = vault.account ?: return@withLock
+					val key = vault.loadKey() ?: return@withLock
+					for (entry in queue.due()) {
+						if (!entry.username.equals(account.username, ignoreCase = true)) {
+							EventLog.append(
+								"queue",
+								"waiting for @${entry.username}: current key belongs to " +
+									"@${account.username}; entry left untouched",
+							)
+							continue
+						}
+						val result = runCatching {
+							broadcaster.broadcastJson(account.username, key, entry.json)
+						}.getOrElse { HiveRpc.BroadcastResult.NetworkFailure(it.message ?: "error") }
+
+						when (result) {
+							is HiveRpc.BroadcastResult.Success -> {
+								val removed = queue.remove(entry.id)
+								EventLog.append(
+									"engine",
+									"queued scrobble sent (${result.evidence.name.lowercase()}): " +
+										"${entry.label} — tx ${result.txId}",
+								)
+								note(
+									entry.label,
+									if (removed) {
+										"sent from queue"
+									} else {
+										"sent, but retry-queue removal failed — do not retry"
+									},
+									result.txId,
+									entry.percentPlayed,
+									videoId = entry.videoId,
+								)
+							}
+
+						is HiveRpc.BroadcastResult.AcceptedUnconfirmed -> {
+							// The accepting node has it. Retrying with a new
+							// expiration would create a different tx id and can
+							// permanently duplicate the listen.
+								val removed = queue.remove(entry.id)
+							EventLog.append(
+								"engine",
+								"queued scrobble accepted but confirmation unavailable: " +
+									"${entry.label} — tx ${result.txId}",
+							)
+								note(
+									entry.label,
+									if (removed) {
+										"accepted — confirmation unavailable"
+									} else {
+										"accepted, but retry-queue removal failed — do not retry"
+									},
+									result.txId,
+									entry.percentPlayed,
+									videoId = entry.videoId,
+								)
+							}
+
+							is HiveRpc.BroadcastResult.Rejected -> {
+								// The chain will keep rejecting this; don't loop.
+								val removed = queue.remove(entry.id)
+								EventLog.append(
+									"engine",
+									"queued scrobble dropped (rejected): ${result.message}",
+								)
+								note(
+									entry.label,
+									if (removed) {
+										"queue failed permanently: ${result.message}"
+									} else {
+										"rejected; retry-queue removal failed"
+									},
+									null,
+									entry.percentPlayed,
+									videoId = entry.videoId,
+								)
+							}
+
+						// Still owed. Left in the queue with its failure recorded so
+						// the backoff applies — dropping it here is the bug that lost
+							// two listens to a stalled node on 2026-07-30.
+							is HiveRpc.BroadcastResult.Deferred -> {
+								handleQueuedFailure(entry, result.message)
+							}
+
+							is HiveRpc.BroadcastResult.NetworkFailure -> {
+								handleQueuedFailure(entry, result.message)
+							}
+					}
+				}
+				_queueSize.value = queue.size()
+				if (account.username.isNotEmpty()) ledger.prune()
+			}
+		}
+	}
+
+	private fun handleQueuedFailure(entry: BroadcastQueue.Entry, message: String) {
+		when (queue.recordFailure(entry.id, message)) {
+			BroadcastQueue.FailureOutcome.RETAINED ->
+				EventLog.append("engine", "queued scrobble still waiting: $message")
+
+			BroadcastQueue.FailureOutcome.DROPPED -> {
+				EventLog.append(
+					"engine",
+					"queued scrobble exhausted retry limit and was removed: ${entry.label}",
+				)
+				note(
+					entry.label,
+					"failed after 8 queued attempts: $message",
+					null,
+					entry.percentPlayed,
+					videoId = entry.videoId,
+				)
+			}
+
+			BroadcastQueue.FailureOutcome.NOT_FOUND ->
+				EventLog.append("queue", "retry entry disappeared before failure could be recorded")
+
+			BroadcastQueue.FailureOutcome.STORAGE_ERROR -> {
+				EventLog.append(
+					"queue",
+					"STORAGE ERROR recording retry failure for ${entry.label}",
+				)
+				note(
+					entry.label,
+					"retry state could not be persisted — export the log",
+					null,
+					entry.percentPlayed,
+					videoId = entry.videoId,
+				)
+			}
+		}
+	}
+
+	private fun enqueueAndSend(
+		payload: HiveScrobblePayload,
+		videoId: String?,
+		sourcePackage: String?,
+		sourceEpoch: Long?,
+		automaticTransportCommitted: Boolean,
+		trigger: FinalizationTrigger,
+		onFeedback: ((String, Boolean) -> Unit)?,
+	) {
+		// Automatic dispatch is transport-only after the use case's linearizable
+		// commit. Refuse a miswired caller before account access, privacy-secret
+		// derivation, key loading, queueing or the broadcaster seam.
+		if (trigger == FinalizationTrigger.AUTOMATIC && !automaticTransportCommitted) {
+			EventLog.append(
+				"engine",
+				"automatic transport reached dispatch without a committed authorization — broadcast cancelled",
+			)
+			onFeedback?.invoke("Automatic transport was not authorized. Nothing sent.", true)
+			return
+		}
+		val account = vault.account
+		if (account == null) {
+			EventLog.append("engine", "no key saved — scrobble dropped")
+			onFeedback?.invoke("No key saved — add one on the Account tab first.", true)
+			return
+		}
+		val label = "${payload.artist?.plus(" — ") ?: ""}${payload.title}"
+		// §6.1. When privacy is on for this kind, what goes on chain is the
+		// envelope, not the payload — and if the envelope cannot be built the
+		// listen is dropped rather than published in the clear. A ledger has no
+		// undo, so "we could not encrypt it, so we sent it anyway" is the one
+		// outcome this feature must never produce.
+		val category = PrivateScrobble.categoryFor(payload.kind)
+		val json = if (settings.privacyEnabledFor(category)) {
+			val envelope = PrivateScrobble.envelope(payload, vault.privacySecret())
+			if (envelope == null) {
+				EventLog.append(
+					"privacy",
+					"private ${payload.kind} scrobble held back: the privacy key could not be " +
+						"derived, and a private listen is never broadcast in the clear",
+				)
+				onFeedback?.invoke("Private scrobble could not be encrypted. Nothing sent.", true)
+				return
+			}
+			EventLog.append("privacy", "encrypted a ${payload.kind} scrobble before broadcast")
+			envelope
+		} else {
+			payload.toJson()
+		}
+
+		scope.launch {
+			broadcastLock.withLock {
+				if (sourcePackage != null &&
+					!NativeSourceSwitches.isSnapshotCurrent(sourcePackage, sourceEpoch)
+				) {
+					EventLog.append(
+						"native",
+						"$sourcePackage opt-in/lifecycle changed before signing — broadcast cancelled",
+					)
+					onFeedback?.invoke("That source was disabled or reset. Nothing sent.", true)
+					return@withLock
+				}
+				val key = vault.loadKey()
+				if (key == null) {
+					EventLog.append("engine", "key unreadable — scrobble dropped")
+					onFeedback?.invoke("The posting key could not be read. Nothing sent.", true)
+					return@withLock
+				}
+				EventLog.append("engine", "broadcasting: $json")
+				val result = runCatching {
+					broadcaster.broadcastJson(account.username, key, json)
+				}.getOrElse { HiveRpc.BroadcastResult.NetworkFailure(it.message ?: "error") }
+
+				when (result) {
+					is HiveRpc.BroadcastResult.Success -> {
+						val evidence = result.evidence.name.lowercase()
+						EventLog.append(
+							"engine",
+							"scrobbled ($evidence): $label — tx ${result.txId}",
+						)
+						note(
+							label,
+							if (result.evidence == HiveRpc.BroadcastResult.Evidence.BLOCK) {
+								"confirmed in block"
+							} else {
+								"seen relaying in mempool"
+							},
+							result.txId,
+							payload.percentPlayed,
+							videoId = videoId,
+						)
+						onFeedback?.invoke("Confirmed in a block — tx ${result.txId}", false)
+					}
+
+					is HiveRpc.BroadcastResult.AcceptedUnconfirmed -> {
+						EventLog.append(
+							"engine",
+							"accepted but confirmation unavailable: $label — tx ${result.txId}",
+						)
+						note(
+							label,
+							"accepted — confirmation unavailable; not retried",
+							result.txId,
+							payload.percentPlayed,
+							videoId = videoId,
+						)
+						onFeedback?.invoke(
+							"Accepted, but confirmation was unavailable — do not retry" +
+								(result.txId?.let { " — tx $it" } ?: ""),
+							false,
+						)
+					}
+
+					is HiveRpc.BroadcastResult.Rejected -> {
+						// Bad auth, malformed op — this will fail identically
+						// forever, so queuing would only loop.
+						EventLog.append("engine", "rejected: ${result.message}")
+						note(label, "rejected: ${result.message}", null, payload.percentPlayed, videoId = videoId)
+						onFeedback?.invoke("Chain rejected it: ${result.message}", true)
+					}
+
+					// Refused for a reason that should pass later, or accepted and
+					// never included. The listen is still owed, so it queues.
+						is HiveRpc.BroadcastResult.Deferred -> {
+							if (trigger == FinalizationTrigger.MANUAL) {
+								onFeedback?.invoke(
+									"Not on-chain yet — ${result.message}. Try again in a moment.",
+									true,
+								)
+								return@withLock
+							}
+							val persisted = queue.add(
+								account.username,
+								json,
+								label,
+								payload.percentPlayed,
+								videoId,
+							)
+							_queueSize.value = queue.size()
+							EventLog.append(
+								"engine",
+								if (persisted) {
+									"queued for retry: ${result.message}"
+								} else {
+									"QUEUE STORAGE FAILURE — scrobble could not be persisted"
+								},
+							)
+							note(
+								label,
+								if (persisted) {
+									"waiting to retry — ${result.message}"
+								} else {
+									"failed to persist retry — export the log"
+								},
+								null,
+								payload.percentPlayed,
+								queued = persisted,
+								videoId = videoId,
+							)
+						}
+
+						is HiveRpc.BroadcastResult.NetworkFailure -> {
+							if (trigger == FinalizationTrigger.MANUAL) {
+								onFeedback?.invoke("Couldn't reach a node: ${result.message}", true)
+								return@withLock
+							}
+							val persisted = queue.add(
+								account.username,
+								json,
+								label,
+								payload.percentPlayed,
+								videoId,
+							)
+							_queueSize.value = queue.size()
+							EventLog.append(
+								"engine",
+								if (persisted) {
+									"queued (offline): $label"
+								} else {
+									"QUEUE STORAGE FAILURE while offline: $label"
+								},
+							)
+							note(
+								label,
+								if (persisted) "queued — offline" else "failed to persist offline retry",
+								null,
+								payload.percentPlayed,
+								queued = persisted,
+								videoId = videoId,
+							)
+						}
+				}
+			}
+		}
+	}
+
+	/**
+	 * Log a refusal and surface it in the UI only with a verified hyperlink.
+	 *
+	 * Deliberately not called for the two *global* refusals above — monitoring
+	 * stopped and auto-scrobble off. Those fire for every track while the switch
+	 * is off, and a list of a hundred "auto-scrobble off" rows explains nothing
+	 * that the switch itself isn't already saying.
+	 *
+	 * @param log false when the caller already wrote a better line (the dedup
+	 * path logs the key, which is what makes a duplicate diagnosable)
+	 * @param videoId the id this track was **proven** to be, when the caller is
+	 * past the resolution stage and holds one. The snapshot's own `confirmed` is
+	 * only populated where the exact id came from the MediaSession or the address
+	 * bar; a native track identified through watch history or the resolver has
+	 * every bit as much proof, and it lives in a local rather than on the
+	 * snapshot. Without it the refusal remains in the terminal outcome and event
+	 * log, but cannot become a **Not logged** row — see the v0.11.0 behavior
+	 * contract §7.
+	 * @param resolvedTitle canonical title recovered while proving [videoId]. It is
+	 * used only when the frozen surface had no title of its own.
+	 */
+	private fun skip(
+		report: FinalizationReport,
+		session: SessionSnapshot,
+		reason: String,
+		durationMs: Long? = session.durationMs,
+		log: Boolean = true,
+		videoId: String? = session.confirmed?.videoId,
+		resolvedTitle: String? = null,
+	) {
+		// Filed first, and unconditionally. Every early return below is about
+		// whether the *user* is shown this row; none of them are about whether the
+		// track was refused. Reporting after those guards is how a refusal that is
+		// deliberately invisible — a session never proven to be YouTube, a
+		// sub-three-second metadata transition — would have become a finalization
+		// with no outcome at all.
+		report.refused(reason)
+		if (log) EventLog.append("engine", "skipped: $reason")
+		// A shadow run has decided; what it must not do is write the decision
+		// down. The Not-logged list is a durable, user-visible record.
+		if (report.shadow) return
+		if (session.playedMs < MIN_NOTABLE_PLAYED_MS) return
+		// §4.1. The Not-logged tab is a durable record too, and a session that was
+		// never proven to be YouTube is a page the user watched somewhere else —
+		// listing its title there is the same disclosure the event log stopped
+		// making. It is also useless as an explanation: "why wasn't this
+		// scrobbled" does not need answering about a site this app never scrobbles.
+		if (!session.isYouTube) return
+		val title = session.title?.takeIf { it.isNotBlank() }
+			?: resolvedTitle?.takeIf { it.isNotBlank() }
+			?: return
+		val linkedVideoId = videoId
+			?.takeIf { YouTubeProbe.canonicalWatchUrl(it) != null }
+			?: return
+		val record = SkipRecord(
+			title = title,
+			artist = session.artist,
+			reason = reason,
+			atEpochSec = clock.nowEpochSeconds(),
+			playedSeconds = session.playedMs / 1000,
+			durationSeconds = durationMs?.takeIf { it > 0 }?.div(1000),
+			videoId = linkedVideoId,
+		)
+		// `update` rather than a plain assignment: unlike every other list here,
+		// this one is written from two threads — the prefilter rejects on the
+		// media-session callback while the post-enrichment rules reject on the IO
+		// scope, and a shorts feed can have both in flight.
+		_skipped.update { (listOf(record) + it).take(50) }
+	}
+
+	/** Whether a prefiltered refusal is substantial enough to resolve for the UI. */
+	private fun couldBecomeUserFacingSkip(session: SessionSnapshot): Boolean =
+		session.playedMs >= MIN_NOTABLE_PLAYED_MS && (
+			!session.title.isNullOrBlank() ||
+				(session.hasShortSourceProof && !session.ownerHandle.isNullOrBlank())
+		)
+
+	/**
+	 * Track whether identity produced a video id, and say so once when a run of
+	 * misses starts. Logged at the threshold only — the individual finalizes are
+	 * already visible in Not logged.
+	 *
+	 * Only a bar that actually said nothing counts. The warning names one cause
+	 * and prescribes one fix — check Accessibility, tap the toolbar — so it has
+	 * to be raised by the evidence it names and nothing else. Measured
+	 * 2026-08-11: three corroboration refusals in a row raised it at 13:04:58
+	 * while the address bar had just named `fctnSdDjxiY` correctly, and the user
+	 * spent the next while restarting Brave, restarting RustedWax and
+	 * re-granting Accessibility against a card that could not clear. A track
+	 * whose id the bar supplied and the corroborator then declined is a
+	 * different failure, and it is already reported as itself in Not logged.
+	 */
+	/**
+	 * @param shadow when true, the counter is not touched. It drives a card the
+	 * user sees, so a run that is deliberately not happening must not advance it
+	 * — nor reset it, which would hide a warning the live path had earned.
+	 */
+	private fun noteVideoIdOutcome(session: SessionSnapshot, videoId: String?, shadow: Boolean) {
+		if (shadow) return
+		if (session.origin != YouTubeProbe.Origin.BROWSER) return
+		if (videoId != null) {
+			_tracksWithoutVideoId.value = 0
+			return
+		}
+		val barNamedThisTrack = session.confirmed != null ||
+			session.resolverContext.observedVideoId != null ||
+			session.resolverContext.urlGeneration != null
+		if (barNamedThisTrack) {
+			// A bar that named this video is not a quiet bar, whatever happened to
+			// the id afterwards. Clearing rather than merely not counting is what
+			// makes the card dismissable by the one thing that disproves it.
+			_tracksWithoutVideoId.value = 0
+			return
+		}
+		val misses = _tracksWithoutVideoId.updateAndGet { it + 1 }
+		if (misses == QUIET_BAR_THRESHOLD) {
+			EventLog.append(
+				"url",
+				"the address bar has named no video for $misses tracks in a row — " +
+					"unresolved tracks will not be broadcast. Check Accessibility is still " +
+					"granted, or tap the toolbar once to expand it.",
+			)
+		}
+	}
+
+	private fun note(
+		label: String,
+		status: String,
+		txId: String?,
+		percent: Int? = null,
+		queued: Boolean = false,
+		videoId: String? = null,
+	) {
+		val linkedVideoId = videoId
+			?.takeIf { YouTubeProbe.canonicalWatchUrl(it) != null }
+			?: return
+		val artist = label.substringBefore(" — ", "").ifEmpty { null }
+		val title = label.substringAfter(" — ", label)
+		_recent.value = (
+			listOf(
+				ScrobbleRecord(
+					title = title,
+					artist = artist,
+					percentPlayed = percent ?: 0,
+					atEpochSec = clock.nowEpochSeconds(),
+					status = status,
+					txId = txId,
+					queued = queued,
+					videoId = linkedVideoId,
+				),
+			) + _recent.value
+			).take(50)
+	}
+}

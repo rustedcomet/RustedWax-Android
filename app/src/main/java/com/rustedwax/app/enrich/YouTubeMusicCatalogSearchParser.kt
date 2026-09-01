@@ -1,0 +1,313 @@
+package com.rustedwax.app.enrich
+
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * Pure extraction for YouTube Music's public WEB_REMIX search response.
+ *
+ * A normal YouTube search does not reliably list distributor art tracks. The
+ * Music catalog does, with an exact `videoId`, structural artist links and a
+ * `musicVideoType`.
+ *
+ * ## Why the songs filter, and what it buys
+ *
+ * The unfiltered search renders a song's byline as `Song • Artist` and puts the
+ * play count in the third column. The **songs-filtered** search renders the same
+ * row as `Artist • Album • Duration`, with the album carried as its own
+ * `MUSIC_PAGE_TYPE_ALBUM` run. That difference is the whole reason this parser
+ * asks for the filter.
+ *
+ * Measured 2026-08-21, `Jah Jah City` / `Capleton`, which the field log shows
+ * being refused after a full 216 s listen:
+ *
+ * ```
+ * oRuSuMag9CU  Capleton • Reggae Gold 1999               • 3:37
+ * -uQ--ieyL-4  Capleton • The Very Best of Capleton Gold • 3:34
+ * ```
+ *
+ * Two art tracks of one recording, same work, same artist, three seconds apart
+ * — inside the resolver's duration tolerance. On title+artist+duration alone
+ * they are indistinguishable, so every id was refused and the listen was lost.
+ * The MediaSession published `ALBUM = "Reggae Gold 1999"`, which names exactly
+ * one of them. Album is not a tie-break heuristic here; it is the field the
+ * player already publishes and the catalog already indexes, and it is what makes
+ * an art track uniquely identifiable at all.
+ *
+ * Nothing is accepted by rank. The caller still verifies every bounded candidate
+ * before one id can become authority.
+ */
+object YouTubeMusicCatalogSearchParser {
+
+	/**
+	 * YouTube Music's "Songs" search filter.
+	 *
+	 * Opaque protobuf, sent verbatim the way the web client sends it. It is what
+	 * switches the byline from `Song • Artist` to `Artist • Album • Duration`;
+	 * without it neither [Candidate.album] nor [Candidate.durationSeconds] is
+	 * present in the response at all.
+	 */
+	const val SONGS_FILTER_PARAMS = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D"
+
+	data class Config(
+		val apiKey: String,
+		val clientVersion: String,
+		val clientNameHeader: String,
+	)
+
+	data class Candidate(
+		val videoId: String,
+		val title: String,
+		val artists: List<String>,
+		val musicVideoType: String,
+		/** The release this row belongs to; null on an unfiltered response. */
+		val album: String? = null,
+		/** Exact Music browse endpoint for [album], used only for bounded album recovery. */
+		val albumBrowseId: String? = null,
+		/** Catalog running time; null on an unfiltered response. */
+		val durationSeconds: Long? = null,
+	)
+
+	private val VIDEO_ID = Regex("""^[A-Za-z0-9_-]{11}$""")
+	private val DURATION = Regex("""^(?:(\d+):)?(\d{1,2}):(\d{2})$""")
+
+	/** YouTube's byline field separator, as it renders it. */
+	private val BYLINE_SEPARATOR = Regex("""\s*•\s*""")
+
+	/** Read current public client coordinates from the Music shell. */
+	fun config(shell: String): Config? {
+		fun quoted(name: String): String? = Regex(
+			""""${Regex.escape(name)}"\s*:\s*"([^"]+)"""",
+		).find(shell)?.groupValues?.get(1)?.takeIf(String::isNotBlank)
+		fun number(name: String): String? = Regex(
+			""""${Regex.escape(name)}"\s*:\s*([0-9]+)""",
+		).find(shell)?.groupValues?.get(1)?.takeIf(String::isNotBlank)
+
+		return Config(
+			apiKey = quoted("INNERTUBE_API_KEY") ?: return null,
+			clientVersion = quoted("INNERTUBE_CLIENT_VERSION") ?: return null,
+			clientNameHeader = number("INNERTUBE_CONTEXT_CLIENT_NAME") ?: return null,
+		)
+	}
+
+	fun candidates(json: String): List<Candidate> {
+		val out = LinkedHashMap<String, Candidate>()
+		walk(JSONObject(json)) { node ->
+			val renderer = node.optJSONObject("musicResponsiveListItemRenderer") ?: return@walk
+			val videoId = renderer.optJSONObject("playlistItemData")
+				?.optString("videoId")
+				?.takeIf(VIDEO_ID::matches)
+				?: return@walk
+			val columns = renderer.optJSONArray("flexColumns") ?: return@walk
+			val title = columnRuns(columns, 0)
+				.firstOrNull()?.optString("text")?.takeIf(String::isNotBlank)
+				?: return@walk
+			val byline = columnRuns(columns, 1)
+			val artists = bylineArtists(byline)
+			if (artists.isEmpty()) return@walk
+			// The album link, when the songs filter put one in the byline. Taken
+			// by its own page type rather than by position: a row may carry two,
+			// one or no separator runs before it depending on the artist count.
+			val album = byline.firstOrNull { pageType(it) == "MUSIC_PAGE_TYPE_ALBUM" }
+				?.optString("text")?.takeIf(String::isNotBlank)
+			val albumBrowseId = byline.firstOrNull {
+				pageType(it) == "MUSIC_PAGE_TYPE_ALBUM"
+			}?.let(::browseId)
+			// The trailing `m:ss` run. Recognised by shape, because it is the one
+			// byline field YouTube renders as plain text with no endpoint on it.
+			val durationSeconds = byline.asReversed().firstNotNullOfOrNull { run ->
+				run.optString("text")?.let(::durationSeconds)
+			}
+			val musicVideoType = firstObject(renderer, "watchEndpointMusicConfig")
+				?.optString("musicVideoType")?.takeIf(String::isNotBlank)
+				?: return@walk
+			out.putIfAbsent(
+				videoId,
+				Candidate(
+					videoId, title, artists, musicVideoType, album, albumBrowseId, durationSeconds,
+				),
+			)
+		}
+		return out.values.toList()
+	}
+
+	/**
+	 * Exact track rows from one already-selected album page.
+	 *
+	 * The broad Songs search can index a single release instead of the album
+	 * release the player named. The album page is a closed catalog set and carries
+	 * the missing id, title, structured artist credit and fixed-column duration.
+	 * [album] comes from the exact browse endpoint selected by the caller; it is
+	 * not guessed from row position.
+	 */
+	fun albumCandidates(json: String, album: String): List<Candidate> {
+		if (album.isBlank()) return emptyList()
+		val out = LinkedHashMap<String, Candidate>()
+		walk(JSONObject(json)) { node ->
+			val renderer = node.optJSONObject("musicResponsiveListItemRenderer") ?: return@walk
+			val videoId = renderer.optJSONObject("playlistItemData")
+				?.optString("videoId")?.takeIf(VIDEO_ID::matches) ?: return@walk
+			val columns = renderer.optJSONArray("flexColumns") ?: return@walk
+			val title = columnRuns(columns, 0)
+				.firstOrNull()?.optString("text")?.takeIf(String::isNotBlank) ?: return@walk
+			val artists = columnRuns(columns, 1)
+				.filter { pageType(it) == "MUSIC_PAGE_TYPE_ARTIST" }
+				.mapNotNull { it.optString("text").takeIf(String::isNotBlank) }
+				.distinct()
+			if (artists.isEmpty()) return@walk
+			val duration = fixedColumnRuns(renderer.optJSONArray("fixedColumns"), 0)
+				.asReversed().firstNotNullOfOrNull { durationSeconds(it.optString("text")) }
+				?: return@walk
+			val musicVideoType = firstObject(renderer, "watchEndpointMusicConfig")
+				?.optString("musicVideoType")?.takeIf(String::isNotBlank) ?: return@walk
+			out.putIfAbsent(
+				videoId,
+				Candidate(
+					videoId = videoId,
+					title = title,
+					artists = artists,
+					musicVideoType = musicVideoType,
+					album = album,
+					durationSeconds = duration,
+				),
+			)
+		}
+		return out.values.toList()
+	}
+
+	/** `3:37` / `1:02:11` → seconds. Null for anything that is not a running time. */
+	fun durationSeconds(text: String?): Long? {
+		val match = DURATION.matchEntire(text?.trim().orEmpty()) ?: return null
+		val hours = match.groupValues[1].toLongOrNull() ?: 0L
+		val minutes = match.groupValues[2].toLongOrNull() ?: return null
+		val seconds = match.groupValues[3].toLongOrNull() ?: return null
+		if (seconds >= 60 || (match.groupValues[1].isNotEmpty() && minutes >= 60)) return null
+		return hours * 3600 + minutes * 60 + seconds
+	}
+
+	/**
+	 * Exact catalog work and complete artist credit; never rank or substring.
+	 *
+	 * The artist test is a **set** comparison, and that is the correction rather
+	 * than a loosening. It used to hand [NativeStructuredMusicMatcher] one catalog
+	 * artist at a time against the player's whole credit string, so a
+	 * collaboration could not match at any candidate: YouTube Music publishes
+	 * `ARTIST = "Walshy Fire, Lizi & Mr. Vegas"` while the catalog row carries
+	 * `["Mr. Vegas", "Lizi", "Walshy Fire"]`, and `"mrvegas"` is not
+	 * `"walshyfirelizimrvegas"`. Comparing the complete credit on both sides is
+	 * strictly *more* selective than the single-name test it replaces — a
+	 * different collaboration on the same work still fails.
+	 */
+	fun matches(candidate: Candidate, nativeTitle: String, nativeArtist: String): Boolean =
+		YouTubeMusicParser.isRecognisedMusicType(candidate.musicVideoType) &&
+			NativeStructuredMusicMatcher.completeCreditsAgree(candidate.artists, nativeArtist) &&
+			NativeStructuredMusicMatcher.worksAgree(candidate.title, nativeTitle)
+
+	/**
+	 * The credited artists on one row, whether or not YouTube linked them.
+	 *
+	 * ## Why the link cannot be required
+	 *
+	 * The byline's artist runs usually carry a `MUSIC_PAGE_TYPE_ARTIST`
+	 * navigation endpoint, and those entities are the best evidence there is — so
+	 * they are still preferred. But YouTube does not always hyperlink the artist,
+	 * and this parser treated "not a link" as "no artist" and discarded the whole
+	 * row. Measured 2026-08-23 against captured search responses, every one of
+	 * these was the correct row, present in the response, thrown away:
+	 *
+	 * ```
+	 * h7YAywGQ_n8  450 • Live n' Learn • 2:42
+	 * TGZA0_vsQEE  Di Genius, Bounty Killer, Bling Dawg, Wayne Marshall, Mavado, and Busy Signal • …
+	 * fX1Ht2b0YzI  Masicka & Kraff Gad • Forever Reign • 3:11
+	 * SDD6jSFt6ZA  Intence & Armzhouse • Gun Mouth • 3:05
+	 * msy42nVSZG8  Mavado & Di Genius • Di Genius Presents-Labwork Vol.1 • 3:24
+	 * ```
+	 *
+	 * In each case the byline's artist text is *character-identical* to what the
+	 * player published, so the evidence was sitting in the response the whole
+	 * time. The credit is returned as one entry rather than pre-split, which lets
+	 * [NativeStructuredMusicMatcher.creditsAgree] compare the whole string first
+	 * and only then fall back to its own separator grammar — the same order it
+	 * uses everywhere else.
+	 *
+	 * ## Telling the two byline shapes apart
+	 *
+	 * A songs-filtered row reads `Artist • Album • Duration`; an unfiltered one
+	 * reads `Song • Artist` with a play count in the third column. They are
+	 * distinguished by their **last** segment: a running time means the former,
+	 * anything else the latter. Position alone would read the literal word
+	 * "Song" as the artist.
+	 */
+	private fun bylineArtists(byline: List<JSONObject>): List<String> {
+		val linked = byline.filter { pageType(it) == "MUSIC_PAGE_TYPE_ARTIST" }
+			.mapNotNull { it.optString("text").takeIf(String::isNotBlank) }
+			.distinct()
+		if (linked.isNotEmpty()) return linked
+		val segments = byline.joinToString("") { it.optString("text").orEmpty() }
+			.split(BYLINE_SEPARATOR)
+			.map(String::trim)
+			.filter(String::isNotEmpty)
+		if (segments.size < 2) return emptyList()
+		val index = if (durationSeconds(segments.last()) != null) 0 else 1
+		return listOfNotNull(segments.getOrNull(index)?.takeIf(String::isNotBlank))
+	}
+
+	private fun pageType(run: JSONObject): String? = run
+		.optJSONObject("navigationEndpoint")
+		?.optJSONObject("browseEndpoint")
+		?.optJSONObject("browseEndpointContextSupportedConfigs")
+		?.optJSONObject("browseEndpointContextMusicConfig")
+		?.optString("pageType")
+		?.takeIf(String::isNotBlank)
+
+	private fun browseId(run: JSONObject): String? = run
+		.optJSONObject("navigationEndpoint")
+		?.optJSONObject("browseEndpoint")
+		?.optString("browseId")
+		?.takeIf(String::isNotBlank)
+
+	private fun columnRuns(columns: JSONArray, index: Int): List<JSONObject> {
+		val runs = columns.optJSONObject(index)
+			?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
+			?.optJSONObject("text")
+			?.optJSONArray("runs")
+			?: return emptyList()
+		return buildList {
+			for (i in 0 until runs.length()) runs.optJSONObject(i)?.let(::add)
+		}
+	}
+
+	private fun fixedColumnRuns(columns: JSONArray?, index: Int): List<JSONObject> {
+		val runs = columns?.optJSONObject(index)
+			?.optJSONObject("musicResponsiveListItemFixedColumnRenderer")
+			?.optJSONObject("text")
+			?.optJSONArray("runs")
+			?: return emptyList()
+		return buildList {
+			for (i in 0 until runs.length()) runs.optJSONObject(i)?.let(::add)
+		}
+	}
+
+	private fun firstObject(node: Any?, key: String): JSONObject? {
+		when (node) {
+			is JSONObject -> {
+				node.optJSONObject(key)?.let { return it }
+				for (name in node.keys()) firstObject(node.opt(name), key)?.let { return it }
+			}
+			is JSONArray -> for (i in 0 until node.length()) {
+				firstObject(node.opt(i), key)?.let { return it }
+			}
+		}
+		return null
+	}
+
+	private fun walk(node: Any?, visit: (JSONObject) -> Unit) {
+		when (node) {
+			is JSONObject -> {
+				visit(node)
+				for (name in node.keys()) walk(node.opt(name), visit)
+			}
+			is JSONArray -> for (i in 0 until node.length()) walk(node.opt(i), visit)
+		}
+	}
+}

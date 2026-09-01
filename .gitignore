@@ -1,0 +1,30 @@
+*.iml
+.gradle/
+build/
+dist/
+local.properties
+.idea/
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Upstream extension, cloned for line-by-line porting. Not vendored.
+#
+# Anchored to the repository root on purpose. Unanchored, this rule also swallowed
+# `app/src/test/.../replay/reference/`, which is where the Phase 0/1 parity
+# implementation lives — a parity gate whose implementation and tests are invisible
+# to `git status` and absent from a clean clone proves nothing about the versioned
+# change set. See `<redacted-private-path>` P0.
+/reference/
+
+# Local test screenshots — contain a personal Hive account and browser state.
+debug/
+
+# Kotlin incremental build metadata.
+.kotlin/
+
+# Personal Claude Code instructions and permissions. Shared project guidance is
+# versioned in CLAUDE.md and .claude/rules/.
+CLAUDE.local.md
+.claude/settings.local.json

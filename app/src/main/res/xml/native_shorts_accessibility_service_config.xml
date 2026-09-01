@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android enforces this component's exact native-YouTube-only visibility. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+	android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged|typeViewScrolled"
+	android:accessibilityFeedbackType="feedbackGeneric"
+	android:accessibilityFlags="flagDefault|flagReportViewIds|flagIncludeNotImportantViews"
+	android:canRetrieveWindowContent="true"
+	android:description="@string/native_shorts_accessibility_description"
+	android:notificationTimeout="200"
+	android:packageNames="com.google.android.youtube"
+	android:summary="@string/native_shorts_accessibility_summary" />

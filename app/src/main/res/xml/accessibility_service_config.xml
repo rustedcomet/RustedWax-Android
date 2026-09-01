@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+	Browser evidence watcher. Optional, off unless the user enables it.
+
+	packageNames is the important line: the OS will only ever deliver events
+	from these browsers, so the service is structurally incapable of reading
+	any other app. That is a stronger guarantee than a check in our own code,
+	and it is what the consent screen promises. Inside those browsers it reads
+	the URL bar and, only for a YouTube Shorts URL, visible labels needed to
+	recognise explicit YouTube ad UI.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+	android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged"
+	android:accessibilityFeedbackType="feedbackGeneric"
+	android:accessibilityFlags="flagDefault"
+	android:canRetrieveWindowContent="true"
+	android:description="@string/accessibility_description"
+	android:notificationTimeout="300"
+	android:packageNames="com.brave.browser,com.brave.browser_beta,com.brave.browser_nightly,com.android.chrome,com.chrome.beta,com.chrome.dev"
+	android:summary="@string/accessibility_summary" />
