@@ -7,7 +7,7 @@ needed for the sources you use.
 
 ## Install the public release
 
-1. Open the [latest RustedWax release](https://github.com/rustedcomet/rustedwax/releases/latest).
+1. Open the [latest RustedWax release](https://github.com/rustedcomet/RustedWax-Android/releases/latest).
 2. Download the signed `rustedwax-v0.11.1.apk` asset.
 3. Open the APK on Android 8.0 or newer. Android may ask you to allow installs
    from the browser or file manager that opened it.

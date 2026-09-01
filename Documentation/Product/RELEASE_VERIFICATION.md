@@ -4,7 +4,7 @@ The current public release is **RustedWax v0.11.1** for application ID
 `com.rustedwax.app`.
 
 Download the APK from the
-[v0.11.1 GitHub Release](https://github.com/rustedcomet/rustedwax/releases/tag/v0.11.1).
+[v0.11.1 GitHub Release](https://github.com/rustedcomet/RustedWax-Android/releases/tag/v0.11.1).
 
 ## APK checksum
 
