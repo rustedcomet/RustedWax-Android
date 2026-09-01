@@ -4,19 +4,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-/**
- * The playlist path — exact video ids for playlist listening, which is where
- * the address bar fails hardest.
- *
- * The fixture is trimmed from the **real** page for the playlist in the field
- * logs (`PLmGqppZSJ9nXHUioh-WAy7ne8I3nP4FOR`, 2026-07-27), keeping the
- * `lockupViewModel` shape YouTube now serves — id in `contentId`, title at
- * `metadata.lockupMetadataViewModel.title.content`, channel in the next
- * metadata row, duration in a thumbnail badge.
- *
- * The four ids below are precisely the tracks that reached the chain with no
- * `url` in that session.
- */
 class PlaylistPageParserTest {
 
 	private fun entry(id: String, title: String, channel: String, length: String) =
@@ -57,12 +44,6 @@ class PlaylistPageParserTest {
 		assertEquals(275L, e[0].lengthSeconds)
 	}
 
-	/**
-	 * The whole reason this path exists. Searching "Doomed / Bring Me The
-	 * Horizon" resolves `CZFTfYYql4k` — same song, same artist, same length,
-	 * but a *different upload* from the one in the playlist. Only the playlist
-	 * knows it was `5Oc0ja19_GU`.
-	 */
 	@Test
 	fun `resolves the exact upload the playlist contains`() {
 		val hit = PlaylistPageParser.match(
@@ -74,7 +55,7 @@ class PlaylistPageParserTest {
 		assertEquals("5Oc0ja19_GU", hit?.videoId)
 	}
 
-	/** The four tracks that went on-chain with no url in the field session. */
+	/** Regression fixtures for entries that previously reached payload construction without a URL. */
 	@Test
 	fun `resolves every track that previously lost its url`() {
 		val e = PlaylistPageParser.entries(fixture)

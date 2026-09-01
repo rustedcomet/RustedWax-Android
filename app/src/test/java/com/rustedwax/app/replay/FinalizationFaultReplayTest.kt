@@ -6,30 +6,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * What happens to the one-outcome rule when something throws.
- *
- * ## The gap this closes
- *
- * `<redacted-private-path>` requires **exactly one typed terminal outcome per
- * finalized target presented to an initialized engine**. Every deliberate exit
- * in `FinalizationRuntime.onTrackFinalized` reported one. An *undeliberate* exit
- * reported none: the asynchronous half is a resolver, a page parse, a
- * MusicBrainz lookup and a signing library away from a throw, and an exception
- * escaping the `scope.launch` block simply ended the finalization.
- *
- * Two consequences, and the second is worse than the first:
- *
- * 1. The listen produced no outcome at all. Not a refusal anyone could read —
- *    nothing. The gate would have been satisfied by a suite where every fault
- *    path was untested, which is precisely the situation that existed.
- * 2. On Android an uncaught throw from a `SupervisorJob` scope reaches the
- *    default handler and takes the process with it. A markup change on one
- *    watch page could stop the app.
- *
- * A fault is now a refusal like any other refusal — except after the listen has
- * already been ruled eligible, which is the third case below.
- */
 class FinalizationFaultReplayTest : ReplayScenarioTest() {
 
 	private val videoId = "dQw4w9WgXcQ"
@@ -64,15 +40,6 @@ class FinalizationFaultReplayTest : ReplayScenarioTest() {
 		PlaybackEvent.Finalized("track change"),
 	)
 
-	/**
-	 * The resolver chain already had a boundary of its own, and it still works.
-	 *
-	 * Worth pinning rather than assuming: `resolveVideoId` wraps the whole chain
-	 * in a `runCatching` and turns a throw into a refusal *reason*, so a route
-	 * that blows up is reported as an unverifiable id rather than as a fault.
-	 * That is the right answer — the listen genuinely has no id — and it means
-	 * the outer boundary below is a second line rather than the only one.
-	 */
 	@Test
 	fun `a resolver route that throws is refused by the chain's own boundary`() {
 		val harness = harness()
@@ -121,10 +88,7 @@ class FinalizationFaultReplayTest : ReplayScenarioTest() {
 
 	@Test
 	fun `an Error rather than an Exception is caught too`() {
-		// `Throwable`, deliberately: an `OutOfMemoryError` or a `LinkageError` from
-		// a JSON encoder is exactly as capable of ending a finalization silently as
-		// an `IOException`, and neither is something the listen should disappear
-		// into.
+
 		val harness = harness()
 		harness.env.mutes.throwOnQuery = OutOfMemoryError("simulated allocation failure")
 

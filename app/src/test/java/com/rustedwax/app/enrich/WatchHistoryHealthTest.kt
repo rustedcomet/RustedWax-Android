@@ -48,13 +48,6 @@ class WatchHistoryHealthTest {
 		assertFalse(health.mayRun(3 * minute))
 	}
 
-	/**
-	 * Measured 2026-08-06. "See Every TIME Cover From 2025" was looked up three
-	 * times in three minutes as the owner replayed it, each absence counted, and
-	 * the route stood itself down on "the last 3 native tracks were not written"
-	 * — a claim about one track. Two untitled Shorts at 62% and 77% were then
-	 * refused inside the fifteen-minute pause that followed.
-	 */
 	@Test
 	fun `one track missing repeatedly is one data point, not three`() {
 		val health = WatchHistoryHealth()
@@ -70,15 +63,6 @@ class WatchHistoryHealthTest {
 		assertNotNull(health.refusedBecause)
 	}
 
-	/**
-	 * The set is a set, not a one-deep memory.
-	 *
-	 * `consecutiveMisses` plus `lastMissKey` only rejected a repeat that arrived
-	 * immediately after itself, so `A, B, A` was three tracks and so was
-	 * `<empty feed>, A, <empty feed>`. Two things going missing while one of them
-	 * is retried is two things, and a Shorts feed revisits the same items
-	 * constantly.
-	 */
 	@Test
 	fun `an interleaved repeat is not a third distinct track`() {
 		val abA = WatchHistoryHealth()
@@ -142,12 +126,6 @@ class WatchHistoryHealthTest {
 		}
 	}
 
-	/**
-	 * `<redacted-private-path>` §5. A browser-only user who fixes a recoverable session
-	 * fault must not stay blocked: nothing they can play is native evidence, so
-	 * if only native playback could make the recovery probe there would be no
-	 * way back short of an app restart.
-	 */
 	@Test
 	fun `either source may make the due declared-fault probe, and a healthy feed clears it`() {
 		val health = WatchHistoryHealth()

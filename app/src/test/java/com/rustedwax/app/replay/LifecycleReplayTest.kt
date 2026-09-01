@@ -10,14 +10,6 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The lifecycle transitions that produce duplicates and losses.
- *
- * `<redacted-private-path>` lists "no duplicate transaction after MediaSession
- * recreation" and "resource-pressure and process-restart scenarios pass" as
- * acceptance gates for every phase that touches production behaviour. Those
- * gates need something to run against; this is it.
- */
 class LifecycleReplayTest : ReplayScenarioTest() {
 
 	private fun facts(videoId: String, title: String, author: String, lengthSeconds: Long) =

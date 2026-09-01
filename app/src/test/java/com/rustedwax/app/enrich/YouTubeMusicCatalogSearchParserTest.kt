@@ -150,10 +150,6 @@ class YouTubeMusicCatalogSearchParserTest {
 		)
 	}
 
-	/**
-	 * The 2026-08-21 field case. Two art tracks of one Capleton recording, three
-	 * seconds apart, which `title+artist+duration` cannot separate.
-	 */
 	@Test
 	fun `songs-filtered rows carry the album and running time that separate duplicate art tracks`() {
 		val rows = YouTubeMusicCatalogSearchParser.candidates(
@@ -180,11 +176,6 @@ class YouTubeMusicCatalogSearchParserTest {
 		assertFalse(NativeStructuredMusicMatcher.albumsAgree(rows[1].album, "Reggae Gold 1999"))
 	}
 
-	/**
-	 * Fresh 2026-08-21 field failure. The broad songs search returned the single
-	 * release (3:48), while the finalized player named album `Safe` and 3:39.
-	 * The exact `Safe` album page carried the missing row and id.
-	 */
 	@Test
 	fun `album page rows expose the exact track credit duration and album`() {
 		val albumPage = """
@@ -388,11 +379,6 @@ class YouTubeMusicCatalogSearchParserTest {
 		)
 	}
 
-	/**
-	 * Measured over the 2026-08-23 overnight run. YouTube Music leaves `ALBUM`
-	 * unset on a single, and requiring one on both sides refused twelve fully
-	 * played tracks whose unique catalog row was already exact.
-	 */
 	@Test
 	fun `card authority still applies to a single the player published no album for`() {
 		val row = YouTubeMusicCatalogSearchParser.candidates(
@@ -414,12 +400,6 @@ class YouTubeMusicCatalogSearchParserTest {
 		)
 	}
 
-	/**
-	 * An art track's `- Topic` channel routinely carries a different alias of the
-	 * same act, so the page cannot be asked to restate the credit. Measured
-	 * 2026-08-23: `Munga Honorable - Topic` for a player credit of `Munga`, and
-	 * `Nas - Topic` for `Nas & Damian "Jr. Gong" Marley`.
-	 */
 	@Test
 	fun `a page naming a different alias of the same act still corroborates`() {
 		val row = YouTubeMusicCatalogSearchParser.candidates(
@@ -451,12 +431,6 @@ class YouTubeMusicCatalogSearchParserTest {
 		)
 	}
 
-	/**
-	 * Measured 2026-08-23 against captured live responses. YouTube does not always
-	 * hyperlink a byline's artist, and requiring the link discarded the correct row
-	 * outright — the response contained `h7YAywGQ_n8` and the parser returned 19
-	 * rows without it.
-	 */
 	@Test
 	fun `a row whose artist is not hyperlinked is still read from its byline`() {
 		val row = YouTubeMusicCatalogSearchParser.candidates(
@@ -523,12 +497,6 @@ class YouTubeMusicCatalogSearchParserTest {
 		assertNull(row.durationSeconds)
 	}
 
-	/**
-	 * Measured 2026-08-23. `Question` and `From Rags to Riches` each had two
-	 * identical catalog rows whose `- Topic` pages named one artist of a pair, so
-	 * page verification returned *zero* matches rather than an ambiguity and no
-	 * recovery path fired.
-	 */
 	@Test
 	fun `two identical catalog rows reduce to one deterministic recording`() {
 		val rows = YouTubeMusicCatalogSearchParser.candidates(

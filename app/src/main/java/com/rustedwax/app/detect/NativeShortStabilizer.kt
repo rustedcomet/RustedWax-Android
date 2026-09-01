@@ -56,13 +56,7 @@ class NativeShortStabilizer {
 				result.ownerHandle,
 				totalSeconds = 0,
 			)
-			// Carries no identity, so it may continue only an identity that this
-			// stabilizer has already accepted. A Shorts scroll/navigation event resets
-			// the candidate before the incoming tree is read; accepting an unnamed
-			// seekbar in that gap splices the incoming duration onto the outgoing
-			// owner. Measured 2026-08-15 in the exact Home → Short field sequence:
-			// @lfgbae was finalized as 62s of the incoming @barefoot_surf Short's
-			// 108-second duration. Wait for the incoming footer instead.
+
 			is NativeShortParser.Result.OrganicUnnamed -> {
 				val prior = candidate
 				val organic = prior?.key as? Key.Organic
@@ -77,22 +71,7 @@ class NativeShortStabilizer {
 					}
 					return Decision.Accepted(result)
 				}
-				// The footer is not coming back while the gesture lasts. Holding a
-				// Short to play it at 2x strips the title and owner handle for as
-				// long as the finger is down and leaves the seekbar readable, so a
-				// Short whose identity had not finished stabilizing when the hold
-				// began received only unnamed frames and could never be acquired at
-				// all. Measured 2026-08-16 on the Galaxy A36: of four Shorts played
-				// back to back at 2x, one was never acquired and one finalized at
-				// 1s of 20s, both refused below threshold.
-				//
-				// An unnamed frame carries no identity and still cannot supply one.
-				// What it can do is corroborate that the Short whose footer was just
-				// read is still the one on screen: it must publish exactly the
-				// length that footer came with — deliberately stricter than the
-				// accepted case above, which tolerates an unknown length — and the
-				// navigation/scroll reset that guards the accepted case guards this
-				// one identically, because it clears the candidate outright.
+
 				if (organic.totalSeconds == 0L || organic.totalSeconds != result.totalSeconds ||
 					observedAtMillis < prior.firstSeenAtMillis ||
 					observedAtMillis - prior.firstSeenAtMillis < STABILITY_MS

@@ -129,16 +129,6 @@ class NativeShortStabilizerTest {
 		)
 	}
 
-	/**
-	 * Field 2026-08-16, Galaxy A36: four Shorts played back to back at 2x.
-	 *
-	 * The 2x press-and-hold strips the title and the owner handle for as long as
-	 * the finger is down and leaves the seekbar readable, so every frame after the
-	 * hold begins is `OrganicUnnamed`. A Short whose footer was read once but had
-	 * not yet crossed the 750 ms interval therefore received no further identity
-	 * frame at all: one Short was never acquired and produced no listen, and a
-	 * second finalized at 1s of 20s and was refused below threshold.
-	 */
 	@Test
 	fun `a same-length unnamed frame completes stabilization when the 2x hold hides the footer`() {
 		val stabilizer = NativeShortStabilizer()

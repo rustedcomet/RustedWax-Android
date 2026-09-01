@@ -1,32 +1,5 @@
 package com.rustedwax.core
 
-/**
- * How much of a track was consumed, and how well that is known.
- *
- * ## Content, not seconds
- *
- * [playedMs] is *content consumed* — time in a playing state scaled by the
- * playback rate — because the threshold divides it by [durationMs], and both
- * sides of that division have to be content milliseconds. A 2026-07-29 field
- * session watched a 76 s trailer at 1.25× to 79% of the video and went on-chain
- * as 67%, because wall-clock had been measured instead. At 2× the same
- * arithmetic puts a fully watched video at 50% and it never scrobbles at all.
- *
- * ## Measured and inferred are kept apart
- *
- * [inferredPlayedMs] is the part of [playedMs] that was credited from
- * wall-clock rather than read off a progressing seekbar — either the
- * picture-in-picture case where the tree loses the seekbar, or a proven
- * foreground Short whose published seekbar value remains cached while paired
- * visible-window + active-audio evidence says playback continues. A scrobble
- * built on it is still a claim about a real listen; it is a weaker one, and
- * every layer downstream has to be able to say so rather than discovering the
- * difference too late.
- *
- * [progressSurfaceLost] is the separate statement that *nothing further can be
- * measured*. It is not "0% was played", and reporting it as such is what made a
- * PiP session indistinguishable from a parser bug for most of a day.
- */
 data class PlaybackMeasurement(
 	/** Content milliseconds consumed, speed-scaled. Includes [inferredPlayedMs]. */
 	val playedMs: Long,

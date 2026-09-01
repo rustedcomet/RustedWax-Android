@@ -5,41 +5,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 
-/**
- * Play time rescued from a media session that vanished while its track kept
- * playing.
- *
- * ## The bug this exists for
- *
- * Chrome destroys and recreates its `MediaSession` mid-video — around ad breaks
- * and playlist transitions. Each recreation is a new `sessionToken`, so
- * [SessionProbe] built a fresh `Watch` with `playedMs` back at zero, and every
- * fragment was scored against the 60% threshold on its own. Observed 2026-07-30,
- * `LUNA`, 196 s long:
- *
- * ```
- * 11:45:05  [finalize] LUNA — played 47s of 196s   → 24%, skipped
- * 11:45:50  [finalize] LUNA — played 24s of 196s   → 12%, skipped
- * 11:47:33  [finalize] LUNA — played 85s of 196s   → 43%, skipped
- * ```
- *
- * 47 + 24 + 85 = **156 s of 196 = 80% watched**, and it produced no entry. The
- * playback positions show the video never actually stopped — `pos=47039ms` at
- * the start of the second fragment, `pos=70769ms` at the start of the third
- * (47 + 24 = 71). Only our accumulator restarted.
- *
- * ## Why a separate object
- *
- * `Watch` owns a `MediaController` and can't be unit-tested. The rules worth
- * pinning — how progress is keyed, when it expires, that it is consumed exactly
- * once — are pure, so they live here where a test can reach them.
- */
 object TrackProgressCarry {
 
-	/**
-	 * @param fastestSpeedSeen carried too, so a track watched at 2× before the
-	 * teardown still reports the rate it was actually watched at
-	 */
 	data class Progress(
 		val playedMs: Long,
 		val trackStartedAtEpochSec: Long,
@@ -47,7 +14,7 @@ object TrackProgressCarry {
 		val atMillis: Long,
 		/** Position at teardown, used to recognise an end-to-start replacement. */
 		val lastPositionMs: Long? = null,
-		/** Once observed, the loop signal must survive later session churn. */
+
 		val loopDetected: Boolean = false,
 		/** Identity frozen while this fragment was still the active track. */
 		val identity: YouTubeProbe.Identity? = null,
@@ -73,60 +40,10 @@ object TrackProgressCarry {
 			AutomaticWriteAuthorization.LegacyEnabled,
 	)
 
-	/**
-	 * How long a vanished track's progress stays claimable on metadata alone.
-	 *
-	 * The observed gaps between a session disappearing and its replacement
-	 * appearing were 18 and 21 seconds, so this is generous *for the case it was
-	 * measured on* — Chrome rebuilding its session around an ad break. It is
-	 * bounded at all because progress must not survive long enough to attach
-	 * itself to a genuine, separate viewing of the same video later on.
-	 */
 	const val TTL_MS = 60_000L
 
-	/**
-	 * How long a continuation stays claimable when the replacement can *prove*
-	 * it is the same viewing.
-	 *
-	 * ## Why the 60-second bound was the wrong instrument
-	 *
-	 * Measured 2026-08-09, native YouTube. The user minimized the app mid-song
-	 * and came back four minutes later:
-	 *
-	 * ```
-	 * 21:52:07  session ended, 105s carried, stopped at pos=105s
-	 * 21:53:07  [session continuation expired] played 105s of 234s → 45%, skipped
-	 * 21:56:10  session + com.google.android.youtube   pos=107968ms
-	 * 21:58:25  [track change]                played 129s of 234s → 55%, skipped
-	 * ```
-	 *
-	 * 105 + 129 = 234, the entire video, watched start to finish, and it
-	 * produced nothing. The replacement resumed at 107968 ms — within three
-	 * seconds of where the first fragment stopped, same package, same resolved
-	 * video id — so every fact needed to recognise one continuous listen was in
-	 * hand. The only thing that refused it was a stopwatch. 69 of these in one
-	 * day's log.
-	 *
-	 * ## Why position is the better bound
-	 *
-	 * The 60-second limit is a proxy for the real question — "is this the same
-	 * viewing, or a later separate one?" — and it answers it by guessing that
-	 * separate viewings are far apart in time. They are not necessarily. But a
-	 * separate viewing *does* start at the beginning, and a continuation starts
-	 * where the last fragment stopped. That is the direct evidence, so it is what
-	 * this asks for: an exact source item id on both sides and a resume position
-	 * that continues the carried one. Time then only has to be bounded at all,
-	 * not bounded tightly, and long enough to cover a phone call, another app, or
-	 * YouTube's own "Video paused. Continue watching?" prompt.
-	 */
 	const val RESUMED_TTL_MS = 15 * 60_000L
 
-	/**
-	 * How far the replacement's first position may sit from where the carry
-	 * stopped. YouTube rewinds a few seconds on resume — measured 2026-08-09,
-	 * `pos=108358ms` then `pos=104801ms` on the same resume — and buffering moves
-	 * it either way, so this is two-sided.
-	 */
 	const val RESUME_WINDOW_MS = 15_000L
 
 	/**
@@ -216,12 +133,7 @@ object TrackProgressCarry {
 		progress.promptFinalization -> TTL_MS
 		exactIdOf(trackIdentity, progress) == null -> TTL_MS
 		(progress.lastPositionMs ?: 0L) < RESUME_MIN_POSITION_MS -> TTL_MS
-		// A track that stopped at its own end has nothing left to resume, so
-		// patience buys nothing and costs the listen its promptness. Measured
-		// 2026-08-09: Zara Larsson ran out at `pos=223381ms` of a 223s video with
-		// 210s measured — a finished, well-over-threshold listen — and the ads
-		// that followed it carry no id of their own, so nothing would have
-		// collected it for a quarter of an hour.
+
 		finishedItem(trackIdentity, progress) -> TTL_MS
 		else -> RESUMED_TTL_MS
 	}
@@ -233,16 +145,6 @@ object TrackProgressCarry {
 		return stoppedAt >= duration - RESUME_WINDOW_MS
 	}
 
-	/**
-	 * The exact video this continuation is for, however it was proven.
-	 *
-	 * Native sessions carry it on the identity, put there by the resolver. A
-	 * browser never does — measured 2026-08-09, Chrome playing
-	 * `eC-F_VZ2T1c` had the id latched from the address bar and still fell out of
-	 * the short window and split the listen, because the long one was keyed to
-	 * where native happens to keep it. The address-bar latch is the same fact
-	 * about the same question, so it answers here too.
-	 */
 	private fun exactIdOf(trackIdentity: TrackIdentity?, progress: Progress): String? =
 		trackIdentity?.sourceItemId?.takeIf(String::isNotBlank)
 			?: (progress.identity as? YouTubeProbe.Identity.Confirmed)?.videoId
@@ -285,15 +187,6 @@ object TrackProgressCarry {
 		return stored.progress.takeIf { now - it.atMillis <= TTL_MS }
 	}
 
-	/**
-	 * Claim only when the replacement metadata is the same semantic track. A
-	 * material duration conflict shares the stable key but fails this predicate.
-	 *
-	 * @param resumePositionMs the replacement's first observed position. Past
-	 * [TTL_MS] this is what the claim rests on: without it, or without continuity
-	 * with where the carry stopped, an older continuation is refused and left for
-	 * its own timer to finalize as the separate listen it evidently is.
-	 */
 	fun claim(
 		packageName: String,
 		trackIdentity: TrackIdentity,
@@ -405,7 +298,6 @@ object TrackProgressCarry {
 	fun cancel(packageName: String, trackIdentity: TrackIdentity, token: Long) =
 		cancel(packageName, trackIdentity.semanticKey, token)
 
-	/** Monitoring stopped — nothing observed before it should leak past it. */
 	fun clear() {
 		carried.clear()
 		displaced.clear()

@@ -32,12 +32,6 @@ class ForegroundShortTracker(
 		val playbackRate: Double? = null,
 	)
 
-	/**
-	 * A proven, named Short with no progress reading to advance from.
-	 *
-	 * @param playing the paired audio + visible-window evidence, which is the
-	 * only thing that can move this Short's clock. False credits nothing.
-	 */
 	data class UnmeasuredObservation(
 		val title: String?,
 		val ownerHandle: String,
@@ -47,17 +41,6 @@ class ForegroundShortTracker(
 		val playbackRate: Double? = null,
 	)
 
-	/**
-	 * A measurable Shorts player whose footer is off screen.
-	 *
-	 * Measured 2026-08-08: the 2× hold hides the title and owner handle and
-	 * leaves the seekbar readable. The handle is the identity, and it is already
-	 * latched — re-proving it on every poll threw away the progress that was
-	 * plainly there and killed the Short four seconds into every hold.
-	 *
-	 * Carries no identity on purpose. It continues the active Short and only when
-	 * the length still matches; it can never acquire one.
-	 */
 	data class UnnamedObservation(
 		val currentSeconds: Long,
 		val totalSeconds: Long,
@@ -144,39 +127,9 @@ class ForegroundShortTracker(
 			override val inferredMillis: Long = 0,
 			/** Inferred time already covering movement since [currentSeconds]. */
 			val inferredSincePositionMillis: Long = 0,
-			/**
-			 * This viewing has already been banked as a complete listen.
-			 *
-			 * A Short only used to end when something took it away — a swipe, a
-			 * track change, the player vanishing. Left alone it loops, so it
-			 * accumulated forever and banked nothing: measured 2026-08-06, a 105s
-			 * Short reached `measured total 461s` across four loops and never once
-			 * finalized, so it never scrobbled at all.
-			 *
-			 * Reaching its own length *is* the end of a listen, so that is where
-			 * it finalizes. One-way, so a Short left looping banks exactly one
-			 * listen — which is all `ScrobbleRules.capForKind` would allow anyway.
-			 */
+
 			val bankedFullListen: Boolean = false,
-			/**
-			 * A terminal finalization has already been emitted for *this* logical
-			 * listen — this start token and instance token.
-			 *
-			 * Deliberately not "this scrobbled". Whether the listen reached Hive is
-			 * decided far downstream, after enrichment, identity and broadcast, any
-			 * of which may fail and be retried. This says only that the lifecycle
-			 * has already handed this listen over once, so handing the same one
-			 * over again would be a duplicate rather than a recovery.
-			 *
-			 * Measured 2026-08-28 on `hDvSV9JfUEc`: a Short watched entirely in
-			 * picture-in-picture reached its own length on inferred time, the
-			 * proof grace ran and finalized it, and `remember` then carried it
-			 * back as resumable with nothing recording that it had been finalized.
-			 * The Short returning to the screen a second later restored it complete
-			 * and unbanked, so it was finalized again — one viewing, two terminal
-			 * outcomes, and a "Not logged: already scrobbled" row sitting beside
-			 * its own History entry.
-			 */
+
 			val terminalFinalizationEmitted: Boolean = false,
 		) : Active()
 
@@ -201,15 +154,6 @@ class ForegroundShortTracker(
 	private var active: Active? = null
 	private var missingSinceMillis: Long? = null
 
-	/**
-	 * The last observation that still carried the title before an unmeasured
-	 * footer blink began.
-	 *
-	 * This must not be derived from [Active.observedAtMillis]: unmeasured
-	 * observations update that value every poll so inference can credit elapsed
-	 * time. Using it as the blink anchor renewed an eight-second exception once a
-	 * second and made the exception unbounded.
-	 */
 	private var unmeasuredTitleBlinkStartedAtMillis: Long? = null
 
 	/**
@@ -221,30 +165,8 @@ class ForegroundShortTracker(
 	 */
 	private var displayOffSinceMillis: Long? = null
 
-	/**
-	 * A forward jump that the rate ceiling just refused, waiting to be reported.
-	 *
-	 * Set by [advanceOrganic] and consumed by the next [Update]. It exists
-	 * because the refusal used to be invisible: a Short played at 2× had every
-	 * delta discarded and the log said nothing at all, so the only symptom was a
-	 * listen that quietly never scrobbled. It took the owner isolating the
-	 * variable by hand to find it (FIELD §19.1). A refusal that cannot say it
-	 * happened is a refusal nobody can debug.
-	 */
 	private var refusedJump: String? = null
 
-	/**
-	 * This viewing has already been scored and must not be scored again.
-	 *
-	 * A Short that reaches its own length banks a complete listen while it is
-	 * still on screen looping, and then something eventually takes it away —
-	 * a swipe, a tab switch, the proof expiring — and every one of those paths
-	 * used to finalize it a second time. Measured 2026-08-07 on
-	 * `4x_q2gBomZI`: banked at `20:31:29`, finalized again at `20:31:31` when
-	 * the next Short arrived, both resolved, both enriched, and the second
-	 * broadcast stopped only by the dedup ledger — `skipped: already
-	 * scrobbled`. The ledger is the last line of defence, not the design.
-	 */
 	/** Marks an Organic as having been handed over; an Ad carries no listen to repeat. */
 	private fun Active.markTerminalFinalizationEmitted(): Active = when (this) {
 		is Active.Organic -> copy(terminalFinalizationEmitted = true)
@@ -255,23 +177,6 @@ class ForegroundShortTracker(
 		get() = (this as? Active.Organic)
 			?.let { it.bankedFullListen || it.terminalFinalizationEmitted } == true
 
-	/**
-	 * What the Short that just ended had earned, in case it comes straight back.
-	 *
-	 * Measured 2026-08-07: the owner scrolled Shorts while switching between the
-	 * Home and Shorts tabs, and **nothing scrobbled for 42 minutes**. Each switch
-	 * takes the player away for longer than the 3-second grace, so the Short
-	 * finalized; each switch back re-acquired the *same* Short and started it
-	 * again from zero. One 32-second Short was watched across three switches and
-	 * finalized at `0s`, `3s` and `5s` — never once reaching the threshold it had
-	 * long since earned in total.
-	 *
-	 * The MediaSession path solved this years earlier with a continuation window.
-	 * This is the same idea: a Short that returns with the same identity within
-	 * [RESUME_WINDOW_MS] resumes what it had, rather than starting over. Merging
-	 * two genuinely separate viewings of one Short is harmless — the dedup ledger
-	 * already caps a video to one scrobble.
-	 */
 	private data class Interrupted(
 		val title: String?,
 		val ownerHandle: String,
@@ -307,13 +212,6 @@ class ForegroundShortTracker(
 
 	private var interrupted: Interrupted? = null
 
-	/**
-	 * Progress to resume for a Short that has just come back, or null.
-	 *
-	 * @param currentSeconds where the returning Short's seekbar stands. Past
-	 * [RESUME_WINDOW_MS] this is what the resume rests on — see
-	 * [RESUMED_WINDOW_MS].
-	 */
 	private fun resumeFor(
 		title: String?,
 		ownerHandle: String,
@@ -336,20 +234,6 @@ class ForegroundShortTracker(
 		return prior
 	}
 
-	/**
-	 * Whether the returning seekbar carries on from where this Short stopped.
-	 *
-	 * The 30-second window was measured against tab switches, which are quick.
-	 * A user who minimizes YouTube and comes back minutes later is doing the same
-	 * thing more slowly, and the Short returns exactly where they left it —
-	 * measured 2026-08-09, a 107s Short taken away at `52s` and re-acquired at
-	 * `52s of 107s` after 105 seconds away, which started over at zero and
-	 * finished below threshold despite being watched end to end.
-	 *
-	 * So past the short window the seekbar has to agree: a Short genuinely being
-	 * watched again from the top reports a position near zero and gets a fresh
-	 * count, which is the outcome the time bound was reaching for.
-	 */
 	private fun continuesFrom(prior: Interrupted, currentSeconds: Long): Boolean {
 		if (prior.currentSeconds < RESUME_MIN_POSITION_SECONDS) return false
 		return abs(currentSeconds - prior.currentSeconds) <= RESUME_POSITION_TOLERANCE_SECONDS
@@ -365,19 +249,6 @@ class ForegroundShortTracker(
 	private fun titleTemporarilyMissing(active: String?, observed: String?): Boolean =
 		(active == null) != (observed == null)
 
-	/**
-	 * Measured 2026-08-18 on `9s38_ONe2mE` (FIELD §21): holding a Short for 2×
-	 * takes YouTube's footer off screen, and the footer comes back in two steps —
-	 * owner handle first, title a frame or two later. The tracker saw
-	 * `"This girl was crazy…" → null → "This girl was crazy…"`, all
-	 * `@nyangear / 178s`, and finalized three times: 84s, 3s and 24s. Every piece
-	 * was under the bar; the one continuous viewing that produced them was at 66%.
-	 *
-	 * A blink is admitted only where the Short is otherwise strongly continuous:
-	 * the same owner, the same length, the same source epoch, a position that has
-	 * not gone backwards and has not moved further than playback could carry it,
-	 * and all of it inside a window far shorter than any real navigation.
-	 */
 	private fun isTitleBlink(same: Active.Organic, observation: OrganicObservation): Boolean {
 		if (!titleTemporarilyMissing(same.title, observation.title)) return false
 		if (same.ownerHandle != observation.ownerHandle) return false
@@ -396,23 +267,6 @@ class ForegroundShortTracker(
 		return advanced <= maxTraversableSeconds(elapsed)
 	}
 
-	/**
-	 * The same blink, on the surface that has no seekbar to corroborate it.
-	 *
-	 * Measured 2026-08-25: the owner reported a Short held at 2x producing a Not
-	 * logged row saying it played a few seconds, followed by a second, full entry
-	 * in History for the same viewing. YouTube intermittently renders no Shorts
-	 * progress bar at all (v0.9.10), and a footer whose title has blinked out
-	 * while that is true arrives as an [UnmeasuredObservation] carrying
-	 * `title = null`. The identity key missed, the fragment already earned was
-	 * finalized on its own, and the listen restarted from zero.
-	 *
-	 * `v0.11.0l` §1 left this path alone for want of evidence. This is the same
-	 * rule minus the two clauses that need a position — there is none to read
-	 * here — so it is deliberately the stricter of the two in every other
-	 * respect: exactly one side without a title, the same owner, the same source
-	 * epoch, inside the same short window.
-	 */
 	private fun isUnmeasuredTitleBlink(
 		same: Active.Organic,
 		observation: UnmeasuredObservation,
@@ -429,22 +283,6 @@ class ForegroundShortTracker(
 	private fun maxTraversableSeconds(elapsedMillis: Long): Long =
 		floor(elapsedMillis * MAX_PLAYBACK_RATE / 1000.0).toLong() + POSITION_JITTER_SECONDS
 
-	/**
-	 * Content the seekbar itself proves was played across a picture-in-picture
-	 * stretch the tracker could not watch.
-	 *
-	 * Measured 2026-08-18 on `8Bh_XF6-48E` (FIELD §21): read to `8s of 59s`, sent
-	 * to PiP, and handed back at `41s of 59s` still playing. Only witnessed
-	 * deltas were ever added, so 33 seconds of content that YouTube's own bar
-	 * accounted for became 23 seconds of wall-clock inference and the listen
-	 * finalized at 54%.
-	 *
-	 * This is not general position credit. It runs only where the stretch just
-	 * ended was the measured PiP signature, only forwards, only as far as
-	 * playback could physically have carried the bar in the elapsed wall clock,
-	 * and only for content the inference has not already been paid for. An
-	 * implausible jump is a seek and earns nothing, exactly as before.
-	 */
 	private fun pipHandbackSeconds(
 		fromSeconds: Long,
 		toSeconds: Long,
@@ -817,19 +655,6 @@ class ForegroundShortTracker(
 		)
 	}
 
-	/**
-	 * A Short that is proven and playing but publishes no progress at all.
-	 *
-	 * Measured 2026-08-06 late: YouTube stopped rendering the Shorts seekbar, so
-	 * 47 of 71 Shorts in 85 minutes could never be *started* and therefore could
-	 * never accrue anything. This starts them; the wall-clock inference then
-	 * credits exactly as it does for picture-in-picture, on the same evidence,
-	 * and every second of it is reported as inferred.
-	 *
-	 * The length is unknown here — it came from the seekbar — so nothing caps the
-	 * accrual live. The cap is applied where the length is actually known: at
-	 * finalize, against the duration the resolver read off the video's own page.
-	 */
 	fun observe(observation: UnmeasuredObservation): Update {
 		val prior = active
 		val same = prior as? Active.Organic
@@ -931,13 +756,6 @@ class ForegroundShortTracker(
 		missingSinceMillis = null
 		displayOffSinceMillis = null
 
-		// Nothing more can be earned, so the listen is over — bank it now rather
-		// than waiting for something to take it away. Measured 2026-08-07: an
-		// untitled, seekbar-less Short sat active for **seven minutes**, hit its
-		// ceiling at three, and only finalized when the next Short replaced it.
-		// By then the account had watched enough other Shorts that this one had
-		// fallen out of the recent-history window identity needs, so a full
-		// listen was measured and then could not be named.
 		val organic = active as? Active.Organic
 		val banked = if (organic != null && !organic.alreadyFinalized &&
 			inference?.exhausted == true
@@ -1013,44 +831,14 @@ class ForegroundShortTracker(
 		)
 	}
 
-	/**
-	 * Freeze immediately; a same-key recovery resets the position baseline.
-	 *
-	 * @param progressSurfaceLost this refusal is the measured PiP signature
-	 * ([NativeShortParser.Result.Invalid.progressSurfaceLost]), not merely a
-	 * refusal. Only this distinguishes "playing but unmeasurable" from "no longer
-	 * on screen", and only it may reach [SessionSnapshot.foregroundProgressLost].
-	 */
 	fun proofMissing(
 		nowMillis: Long,
 		reason: String,
 		progressSurfaceLost: Boolean = false,
 		inferredPlaying: Boolean = false,
-		/**
-		 * Rate from YouTube's own visible speed chip, when it is showing one.
-		 *
-		 * The 2× hold is exactly the state that makes a Short unmeasurable — the
-		 * overlay, the footer and the seekbar all go — so the inference is the
-		 * only thing crediting anything, and crediting it at 1× halves every such
-		 * listen (FIELD §20).
-		 */
+
 		playbackRate: Double? = null,
-		/**
-		 * The display is not interactive as of this observation.
-		 *
-		 * Measured 2026-08-19 on the A36: turning the screen off while a Short
-		 * played in picture-in-picture dropped the paired audio + visible-window
-		 * evidence for 3.5 seconds and then restored it. The dropout is longer
-		 * than [MISSING_PROOF_GRACE_MS], so a Short that never stopped playing
-		 * finalized at 90s of 162s — 56%, four points under the threshold — and
-		 * the evidence came back 1.8 seconds *after* it had already been scored.
-		 *
-		 * This does not credit anything. It only stops the grace from running out
-		 * inside a transition that is known to be transient, and only for
-		 * [DISPLAY_OFF_SETTLE_MS]. If the evidence returns the ordinary inference
-		 * takes over and holds the grace open on its own terms; if it does not,
-		 * the grace expires exactly as it did before.
-		 */
+
 		displayOff: Boolean = false,
 	): Update {
 		val current = active ?: return Update(diagnostic = reason)
@@ -1253,13 +1041,7 @@ class ForegroundShortTracker(
 			)
 			return inferWhilePositionStalled(recovered, observation)
 		}
-		// Samsung can expose the same cached integer seekbar value across many
-		// successful polls, then publish several genuinely traversed seconds at
-		// once. The Galaxy A36 field trace held one value for 63–104 seconds while
-		// paired YouTube-window + active-audio evidence continuously said playback
-		// was running. That is no longer treated as a pause: the opt-in inference
-		// earns wall clock while the value is stalled, without moving the position
-		// baseline a later real delta is checked against.
+
 		if (observation.currentSeconds == current.currentSeconds) {
 			return inferWhilePositionStalled(current, observation)
 		}
@@ -1360,12 +1142,6 @@ class ForegroundShortTracker(
 		)
 	}
 
-	/**
-	 * @param refusedSeconds a forward jump that exceeded the rate ceiling and so
-	 * earned nothing. Carried out of here purely so the log can say it happened:
-	 * this refusal was **silent** until v0.9.14, which is why a Short played at
-	 * 2× looked to the viewer like a scrobbler that had simply stopped working.
-	 */
 	private data class Delta(
 		val seconds: Long = 0,
 		val wrap: Boolean = false,
@@ -1379,25 +1155,7 @@ class ForegroundShortTracker(
 		elapsedMillis: Long,
 	): Delta {
 		if (elapsedMillis < 0 || next == previous) return Delta()
-		// Content advances faster than the clock when the viewer speeds it up, and
-		// until v0.9.14 this bound was wall-clock alone — so a Short held at 2×
-		// had almost every delta refused as if it were a seek. Measured
-		// 2026-08-08 on a 121-second Short played at 2× throughout:
-		//
-		//   12:01:23  seekbar advanced to 4s of 121s;  credited 2s (total 4s)
-		//   12:01:53  seekbar advanced to 62s of 121s; credited 2s (total 6s)
-		//   12:02:11  [finalize] played 6s of 121s → 5%, skipped
-		//
-		// 58 seconds of content traversed, 2 credited. The same Short at 1×
-		// scrobbled at 98%. The MediaSession path has scaled by playback rate for
-		// this exact reason since Phase 3 — "played" is content consumed, not
-		// seconds elapsed — and this route simply never did.
-		//
-		// A Short publishes nothing to its MediaSession (FIELD §14.4), so there is
-		// no rate to read here; the bound is the platform's fastest instead. It
-		// stays a bound: nothing beyond twice wall-clock is admitted, so a seek is
-		// still refused and no listen can be credited more content than could have
-		// physically been played.
+
 		val maxDelta = floor(elapsedMillis * MAX_PLAYBACK_RATE / 1000.0).toLong() +
 			POSITION_JITTER_SECONDS
 		if (next > previous) {
@@ -1503,19 +1261,6 @@ class ForegroundShortTracker(
 	companion object {
 		const val MISSING_PROOF_GRACE_MS = 3_000L
 
-		/**
-		 * How long the end-of-track grace is held open across a screen-off.
-		 *
-		 * Measured 2026-08-19 on the A36: the paired audio + visible-window
-		 * evidence went false for 3.5s as the display turned off and then came
-		 * back true while the Short was still playing. Eight seconds covers that
-		 * transition with room for a slow one, and is short enough that a screen
-		 * genuinely left off finalizes only a few seconds later than before.
-		 *
-		 * Deliberately not a change to [MISSING_PROOF_GRACE_MS]: the shared
-		 * lifecycle timeout keeps its meaning everywhere else, and this window
-		 * credits nothing on its own.
-		 */
 		const val DISPLAY_OFF_SETTLE_MS = 8_000L
 
 		/**
@@ -1536,18 +1281,6 @@ class ForegroundShortTracker(
 		 */
 		const val RESUME_WINDOW_MS = 30_000L
 
-		/**
-		 * How long a Short may come back and resume when its **seekbar** says it
-		 * is the same viewing.
-		 *
-		 * Thirty seconds covers a tab switch, which is what it was measured on. It
-		 * does not cover minimizing YouTube and coming back, and that is the same
-		 * interruption at human speed: measured 2026-08-09, a 107s Short left at
-		 * `52s` and re-acquired at `52s of 107s` 105 seconds later started again
-		 * from zero and finished under threshold having been watched right
-		 * through. Matches [TrackProgressCarry.RESUMED_TTL_MS], because it is the
-		 * same question about the same interruption.
-		 */
 		const val RESUMED_WINDOW_MS = 15 * 60_000L
 
 		/**

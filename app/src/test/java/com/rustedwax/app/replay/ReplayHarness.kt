@@ -17,36 +17,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import org.json.JSONObject
 
-/**
- * Replays an ordered event trace through the real finalization pipeline and
- * records what came out.
- *
- * ## What this actually runs
- *
- * `FinalizationRuntime.onTrackFinalized` — the production method, unmodified, with
- * its own resolution ordering, its own identity contract, its own rules, its
- * own dedup and its own broadcast path. The only substitutions are at the
- * [com.rustedwax.app.scrobble.EnginePorts] boundary: the disk, the network and
- * the chain. That is the property `<redacted-private-path>` §8 says is missing —
- * "no test exercising `FinalizationRuntime.executeAutomatic()` from playback through
- * dispatch" — and it is what makes the later phases' shadow comparison
- * meaningful, because there is now a reference output to compare against.
- *
- * ## Determinism
- *
- * The engine's finalization runs on an injected scope over
- * [Dispatchers.Unconfined], so each `launch` executes inline on the calling
- * thread and has finished by the time [feed] returns. No sleeps, no polling, no
- * timeouts — a replay either produced an outcome or it did not.
- *
- * ## Isolation
- *
- * `FinalizationRuntime` is a singleton and several evidence stores are global
- * objects; both survive between tests in the same JVM. [reset] clears every one
- * of them, and every scenario builds a fresh harness. This is the audit's §2
- * complaint — "mutable evidence has no single owner" — met where it can be met
- * today, by owning the teardown in one place instead of in forty tests.
- */
 class ReplayHarness(
 	val source: ReplaySource,
 	val env: ReplayEnvironment = ReplayEnvironment(),
@@ -64,36 +34,16 @@ class ReplayHarness(
 	/**
 	 * Which transport object a frozen listen reaches the engine as.
 	 *
-	 * The seam the audit's Phase 2 parity gate needs. Both settings run the same
+	 * Both settings run the same
 	 * production `FinalizationRuntime`; what differs is whether the snapshot it is
-	 * handed is the one the probe froze or one that has been through the Phase 2
+	 * handed is the one the probe froze or one that has been through the domain
 	 * decomposition and back. See [Presentation].
 	 */
 	val presentation: Presentation = Presentation.REFERENCE,
-	/** Independently executable old/new identity control flow for Phase 6 parity. */
+	/** Independently executable old/new identity control flow for parity. */
 	val identityResolverMode: IdentityResolverMode = IdentityResolverMode.TYPED,
 ) {
 
-	/**
-	 * How a finalized listen is presented to the engine.
-	 *
-	 * `<redacted-private-path>`, as amended on 2026-08-12, requires *"actual old/new
-	 * output parity, once a replacement implementation exists to produce a second
-	 * output"* from Phase 2 onward — and warns that running one implementation
-	 * through two broadcasters tests the comparator rather than parity.
-	 *
-	 * [DOMAIN] is that second output, scoped honestly to what Phase 2 actually
-	 * replaces: the transport object. The snapshot is decomposed into
-	 * `FinalizedTrack` and rebuilt by a genuinely separate body of code, so a
-	 * field the adapter drops, reorders into the wrong slot, or silently
-	 * recomputes shows up as a byte difference in the payload or as a different
-	 * terminal outcome.
-	 *
-	 * It is deliberately **not** described as reducer parity. There is no second
-	 * measurement or lifecycle implementation until Phase 3, and claiming
-	 * otherwise here would be the misreading the audit amendment exists to
-	 * prevent.
-	 */
 	enum class Presentation {
 		/** The snapshot the probe froze, handed over unchanged. The reference path. */
 		REFERENCE,
@@ -153,14 +103,6 @@ class ReplayHarness(
 		val outcome: FinalizationOutcome,
 	)
 
-	/**
-	 * Terminal outcomes, in the order the engine filed them.
-	 *
-	 * Observed from inside the branch that was taken, not reconstructed from the
-	 * skip list and the broadcast list afterwards. That distinction is the whole
-	 * value: a recorder that inferred outcomes would be a second implementation
-	 * of the pipeline, and would agree with the first exactly until it mattered.
-	 */
 	val outcomes = mutableListOf<RecordedOutcome>()
 
 	/**
@@ -322,7 +264,7 @@ class ReplayHarness(
 		val timestamp: String?,
 		val app: String?,
 	) {
-		/** The id in the canonical hyperlink — the audit's "correct video id" gate. */
+		/** The id in the canonical hyperlink used by identity-parity gates. */
 		val videoId: String? get() = url?.substringAfter("watch?v=", "")?.takeIf { it.length == 11 }
 	}
 
@@ -441,7 +383,6 @@ class ReplayHarness(
 		 * than the handful that remember to ask for it.
 		 */
 		internal val live = mutableListOf<ReplayHarness>()
-
 
 		/**
 		 * Prose → [RefusalKind]. Ordered most specific first.

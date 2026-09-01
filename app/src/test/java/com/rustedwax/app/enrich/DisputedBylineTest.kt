@@ -4,15 +4,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The listing byline against the session's own channel name.
- *
- * Measured 2026-08-10 in Brave, playing a BMTH playlist: the media session
- * reported `ARTIST = "BMTHOfficialVEVO"` while both the search card and the
- * playlist row for the very same upload listed the owner as
- * "Bring Me The Horizon". Every one of those listens was refused with "video id
- * could not be verified".
- */
 class DisputedBylineTest {
 
 	private val resolver = VideoIdResolver()
@@ -129,9 +120,7 @@ class DisputedBylineTest {
 
 	@Test
 	fun `the whole live search page yields exactly one page to check, not dozens`() {
-		// The measured 2026-08-10 search for this track: 79 unique candidates,
-		// covers and live versions among them. Only the one upload survives
-		// title + duration, so the bounded budget is never approached.
+
 		val page = listOf(
 			candidate("GBRAnuT48qo"),
 			candidate("58LeVo7j46w", title = "Bring Me The Horizon - Happy Song (Live at the Royal Albert Hall)", length = 286L),

@@ -6,30 +6,6 @@ import com.rustedwax.core.MetadataFields
 import com.rustedwax.core.PlaybackSourceCapabilities
 import com.rustedwax.core.SourceSessionId
 
-/**
- * The native YouTube app.
- *
- * ## What this owns
- *
- * `<redacted-private-path>`: native MediaSession metadata; exact-ID-less
- * native continuation; native playlist evidence; stopped replacement grace;
- * ordinary-video lifecycle and picture-in-picture observations.
- *
- * ## What makes it the opposite of the browser
- *
- * The package *is* the proof — there is no site to establish — so none of the
- * browser's three weak channels apply, and consulting them would be worse than
- * useless: a browser's address bar, tab title and media notification describe a
- * different application entirely, and binding them to this listen is exactly the
- * misattribution the split exists to prevent. What this source has instead is a
- * MediaSession whose fields are real, and which nonetheless publishes **no item
- * id at all** — which is why the exact-ID-less continuation route below exists,
- * and why `requiresExactIdToCarryProgress` is true here and false for a browser.
- *
- * `open` for [YouTubeMusicAdapter], which is the same transport with one
- * different declaration about its metadata. Nothing else in the tree may
- * subclass it, and nothing anywhere asks which of the two it got.
- */
 abstract class NativeYouTubeSource(
 	override val packageName: String,
 	override val appLabel: String,
@@ -127,14 +103,6 @@ abstract class NativeYouTubeSource(
 			notificationHint = null,
 		)
 
-	/**
-	 * The watch screen's playlist bar, which is this source's equivalent of an
-	 * address bar and the only route that makes native identity exact rather than
-	 * plausible (`<redacted-private-path>`).
-	 *
-	 * Deliberately kept out of `playlistId`, which stays proven-URL evidence only,
-	 * so a native observation can never be mistaken for a browser's.
-	 */
 	protected open fun withPlaylistEvidence(context: ResolverContext): ResolverContext =
 		(if (evidenceCoordinator != null) {
 			evidenceCoordinator.nativePlaylist(evidenceSourceSession)

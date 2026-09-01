@@ -24,10 +24,6 @@ in the direction that matters: any RustedWax defect landed attributed to someone
 else's app, and they had no way to tell the two apart or to filter ours out.
 Only the authorship claim changed; the `custom_json` id deliberately did not.
 
-`<redacted-private-path>` §9.3 is still open on whether the scrobble.life maintainer
-would rather have a distinct `custom_json` id as well. That is their call, and
-naming ourselves honestly does not pre-empt it.
-
 ### Private scrobbles
 
 > **Not currently offered in the app.** The four per-kind toggles were taken off
@@ -67,8 +63,9 @@ Scrobble rules, from `hive-scrobbler.ts#finalize`, with one deliberate deviation
 - **Minimum length: 30 s**, or **10 s for a verified short**. Not upstream — added because YouTube
   pre-roll ads publish their own media session carrying the *video's* title and a ~6-second
   duration, which would otherwise scrobble the song on every ad. Pre-roll is a watch-page
-  phenomenon, and field data confirmed the floor was rejecting only shorts and never a watch-path
-  track, so shorts get their own floor. See "Shorts" in [SCROBBLE_RULES.md](SCROBBLE_RULES.md).
+  phenomenon. Regression evidence showed the ordinary floor excluded legitimate Shorts without
+  affecting watch-path content, so verified Shorts get their own floor. See "Shorts" in
+  [SCROBBLE_RULES.md](SCROBBLE_RULES.md).
 - **A continuous looping video still produces at most one scrobble.** An observed playback-position
   reset from the final 20% of an item to its first 20% is logged as a detected loop and caps that
   continuous viewing to one transaction even when its payload kind is `song`. Progress above 125%
@@ -99,8 +96,8 @@ tags counted as a different listen and landed twice.
 
 Other shapes the parser understands, several adapted from the desktop extension: `Artist "Track"`,
 `Track (by Artist)`, a leading `[genre]` tag as noise, and album/vinyl track numbers (`03.`, `A1.`).
-A leading **CJK** bracket is the opposite — `【Bring Me The Horizon】…` names the *artist*, which is
-where the guitar-cover bug that started Phase 4 was fixed.
+A leading **CJK** bracket is the opposite — `【Bring Me The Horizon】…` names the *artist*, so the
+parser preserves it as identity rather than discarding it as a genre tag.
 
 `album` is populated for Art Tracks, read from the fixed shape of an auto-generated description
 (`Provided to YouTube by …` / `Song · Artist` / `Album`). Never guessed from a hand-written
@@ -124,8 +121,8 @@ Evidence, strongest first — a stronger layer always beats a weaker one:
    clip channels (`… Movies`, `… Cinema`),
    game playthroughs without an instrument.
 2. **The YouTube Music catalogue** (needs YouTube scrobbling on) → song. Keyed by video id, so it
-   answers where a string-matched lookup can't — most Spanish-language and small-channel uploads
-   in field testing. Positive-only: indie, live and personal-channel uploads simply aren't in the
+   answers where a string-matched lookup cannot. Positive-only: indie, live and
+   personal-channel uploads may not be in the
    catalogue, so absence is never evidence *against* music.
    `MUSIC_VIDEO_TYPE_PODCAST_EPISODE` is explicitly excluded: being present in YouTube Music does
    not turn a podcast—or a timer mislabelled as one—into a song.

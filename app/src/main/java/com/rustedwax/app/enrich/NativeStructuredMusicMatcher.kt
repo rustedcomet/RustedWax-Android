@@ -35,32 +35,6 @@ object NativeStructuredMusicMatcher {
 	fun worksAgree(candidateTitle: String, nativeTitle: String): Boolean =
 		titleKey(work(candidateTitle)) == titleKey(work(nativeTitle))
 
-	/**
-	 * Whether a candidate's credits describe the same performers as one native
-	 * MediaSession artist string.
-	 *
-	 * Two ways to agree:
-	 *
-	 *  1. **One credit equals the whole string.** This is the original rule,
-	 *     carried over verbatim so nothing that resolved before stops resolving.
-	 *     It is also what keeps an artist whose own name contains a separator
-	 *     working — the field log has `Capleton & Derrick Sound` as a single act,
-	 *     and splitting that would be the mirror-image bug. Note it is deliberately
-	 *     permissive in one direction: a solo `Vybz Kartel` still matches a row
-	 *     credited `["Vybz Kartel", "Ishawna"]`, exactly as before. Duration and
-	 *     — now — album are what rule that out downstream.
-	 *  2. **The split credit sets are equal.** This is the new case, and the one
-	 *     the fix exists for. YouTube Music publishes a collaboration as one
-	 *     joined string (`"Walshy Fire, Lizi & Mr. Vegas"`) while the catalog
-	 *     exposes the same credit as structured parts
-	 *     (`["Mr. Vegas", "Lizi", "Walshy Fire"]`). Rule 1 can never fire for
-	 *     those — `"mrvegas"` is not `"walshyfirelizimrvegas"` — so before this,
-	 *     *every* collaboration was refused at the filter and the listen was lost.
-	 *     Comparing normalized sets is order-independent, because the catalog
-	 *     routinely lists a collaboration in a different order than the player
-	 *     does, and it still requires the complete credit on both sides: a
-	 *     different collaboration on the same work does not match.
-	 */
 	fun creditsAgree(candidateCredits: Collection<String>, nativeArtist: String): Boolean {
 		val whole = SearchResultsParser.channelKey(nativeArtist) ?: return false
 		if (candidateCredits.any { SearchResultsParser.channelKey(it) == whole }) return true
@@ -133,13 +107,7 @@ object NativeStructuredMusicMatcher {
 			return false
 		}
 		val evidence = parse(candidateTitle, candidate.channel)
-		// The credit grammar splits an `Artist - Track` page title, which is right
-		// for a watch page and wrong for a catalog row whose title is already a
-		// bare work. Measured 2026-08-23: `Tan Tuddy - Raw` reduced to `Raw` on
-		// one side and stayed whole on the other, so a card that had already
-		// resolved was then refused at finalization. Raw agreement between the two
-		// titles is strictly stronger evidence than the split, so it is accepted
-		// as an alternative — never as a replacement.
+
 		if (titleKey(evidence.track) != titleKey(work(nativeTitle)) &&
 			!worksAgree(candidateTitle, nativeTitle)
 		) return false
@@ -197,46 +165,6 @@ object NativeStructuredMusicMatcher {
 		}
 	}
 
-	/**
-	 * One recording that YouTube's own catalog publishes more than once.
-	 *
-	 * ## Why this is not an ambiguity
-	 *
-	 * The ambiguity gate exists to stop the app choosing between two *different*
-	 * videos. It assumes that two ids mean two candidate works. On auto-generated
-	 * `- Topic` artist channels that assumption fails: a label or distributor can
-	 * ingest the same master twice, and YouTube keeps both. Measured 2026-08-22,
-	 * from the day's refusals — every one of these pairs is a single recording:
-	 *
-	 * ```
-	 * Happy Pum Pum      -1J5knicUsw / HTc6UDnLy2s  Vybz Kartel - Topic  213 s
-	 * Pretty Position    0lifXEmihs0 / JeTgdzD72Ic  Vybz Kartel - Topic  141 s
-	 * Don't Cry          1LyZvC9nbYQ / WX7c6N9UjDk  Mavado - Topic       142 s
-	 * A Snitch's Eulogy  5xnlV108EzI / M1ZH6zSnnUE  Mavado - Topic        82 s
-	 * Amazing Grace      N0a9SYSaV4M / SjaEZej8gnA  Mavado - Topic       202 s
-	 * ```
-	 *
-	 * They differ only in view count and upload date. No further evidence exists
-	 * that could ever separate them, because there is nothing to separate — so
-	 * refusing is not "fail-closed until we learn more", it is permanent loss of a
-	 * listen whose recording is fully identified.
-	 *
-	 * ## Why the test is stricter than the one it rescues
-	 *
-	 * Duration must be **exactly** equal, not within [VideoIdResolver.DURATION_TOLERANCE_SEC].
-	 * Two masters of one song that genuinely differ — a radio edit, a remaster —
-	 * differ by at least a second, and those must keep refusing. The uploader must
-	 * be the same canonical channel, so two labels' separate uploads are still an
-	 * ambiguity. The work must be the same under the existing credit grammar.
-	 *
-	 * The caller has additionally proven the complete artist credit and the
-	 * published album agree, which is why this is only reached from the YouTube
-	 * Music catalog route and not from ordinary search.
-	 *
-	 * The representative is chosen by lowest id purely for determinism. Every
-	 * candidate is the same recording, so the choice decides which URL is written,
-	 * never which song was scrobbled.
-	 */
 	fun sameRecording(candidates: List<VideoResolution>): VideoResolution? {
 		if (candidates.size < 2) return null
 		val first = candidates.first()
@@ -252,33 +180,6 @@ object NativeStructuredMusicMatcher {
 		return candidates.minByOrNull(VideoResolution::videoId)
 	}
 
-	/**
-	 * A page that describes the same work at the same length, whatever it calls
-	 * the artist.
-	 *
-	 * ## Why the artist name is deliberately not read here
-	 *
-	 * This is only ever asked of a page fetched for an id that a YouTube Music
-	 * catalog row already bound to the finalized work and the **complete** artist
-	 * credit — and bound it through linked artist *entities*, not string matching.
-	 * The page is a second opinion on whether that id is the right video, and the
-	 * one thing it cannot reliably contribute is the artist's name: an art track
-	 * lives on an auto-generated `- Topic` channel whose name is frequently a
-	 * different alias of the same act.
-	 *
-	 * Measured 2026-08-23, from an overnight run — every one of these is a correct
-	 * id that the name test rejected:
-	 *
-	 * ```
-	 * Who Dem        catalog "Lexxus"       page "Mr. Lexx - Topic"
-	 * Some Bwoy      catalog "Tommy Lee Sparta"  player "Tommy Lee"
-	 * ```
-	 *
-	 * So the page is asked the two questions it can answer from its own
-	 * `videoDetails`: is this the same work, and is it the same length. A wrong id
-	 * still fails both. The credit remains proven — by the catalog row, which is
-	 * the stronger source for it.
-	 */
 	fun corroboratesWorkAndLength(
 		candidate: VideoResolution,
 		nativeTitle: String,
@@ -301,42 +202,6 @@ object NativeStructuredMusicMatcher {
 	 */
 	private const val DUPLICATE_FAMILY_SPREAD_SEC = 5L
 
-	/**
-	 * One id from a set of ingests of a single recording, or null.
-	 *
-	 * ## Why exact-equal lengths were not enough
-	 *
-	 * The first version of this rule required every candidate to report the same
-	 * `lengthSeconds`, which was true of the pairs it was built from. Measured
-	 * 2026-08-22, playing the Mavado album straight through, `Weh Dem A Do` shows
-	 * it is not true in general — three ingests on one `- Topic` channel, one
-	 * album, one master, trimmed differently:
-	 *
-	 * ```
-	 * ZV_VhN5g9hk  169 s  2 784 082 views
-	 * RJYPUKFnzs8  167 s     20 554 views
-	 * BIns5PQC7ck  166 s    656 226 views
-	 * ```
-	 *
-	 * A 100 %-played listen was refused because none of the three agreed with the
-	 * others to the second.
-	 *
-	 * ## What replaced it, and why it is not just a looser tolerance
-	 *
-	 * The player publishes its own length for the item it is actually playing —
-	 * `169000 ms` here, which names `ZV_VhN5g9hk` and nothing else. That is a
-	 * *discriminator*, not a relaxation: widening the equality test would have
-	 * collapsed the three into an arbitrary pick, while asking which upload the
-	 * player's own duration names picks the right one and picks it for a reason.
-	 *
-	 * [playerSeconds] must be **rounded** from milliseconds, not truncated.
-	 * `168925 ms` truncates to 168, which matches none of the three and is the
-	 * whole reason this looked unresolvable; it rounds to 169, which is exact.
-	 *
-	 * Only when the player's length still cannot separate them — every ingest the
-	 * same length, as in the `Amazing Grace` pair — does the deterministic
-	 * [sameRecording] representative apply.
-	 */
 	fun oneOfDuplicateFamily(
 		candidates: List<VideoResolution>,
 		playerSeconds: Long?,
@@ -406,25 +271,6 @@ object NativeStructuredMusicMatcher {
 	/** Apply the same explicit feature grammar to native and canonical works. */
 	private fun work(value: String): String = featureSuffix(value).first
 
-	/**
-	 * Preserve the work while exposing every explicit trailing feature credit.
-	 *
-	 * Stripping only **one** marker made the same recording reduce to two
-	 * different works depending on how each surface wrote the credit. Measured
-	 * 2026-08-23:
-	 *
-	 * ```
-	 * player: "Can't Take Wi Life Ft. Di Genius (feat. Di Genius)"
-	 *           strip the parenthetical -> "Can't Take Wi Life Ft. Di Genius"
-	 * page:   "Can't Take Wi Life Ft. Di Genius"
-	 *           strip the bare marker   -> "Can't Take Wi Life"
-	 * ```
-	 *
-	 * One pass each, two different answers, and a fully played listen refused.
-	 * Repeating until neither shape matches makes the reduction independent of how
-	 * many markers a surface happened to write. Bounded so a pathological title
-	 * cannot spin.
-	 */
 	private fun featureSuffix(track: String): Pair<String, List<String>> {
 		var work = track.trim()
 		val featured = mutableListOf<String>()
@@ -439,15 +285,7 @@ object NativeStructuredMusicMatcher {
 				featured += match.groupValues[2].trim()
 				return@repeat
 			}
-			// A parenthesised credit that is not at the end. YouTube Music and the
-			// watch page order the parts differently for the same recording —
-			// measured 2026-08-23, the player wrote
-			// `Dancehall Frequency [Wavz] (feat. Jahnaton & 808 Delavega)` and the
-			// page wrote `Dancehall Frequency (feat. Jahnaton, 808 Delavega) [Wavz]`.
-			// Removing the group wherever it sits makes the reduction independent
-			// of that ordering. Only an explicit feature group is removed; every
-			// other parenthetical — `(Live)`, `(Remastered)` — is part of the work
-			// and is left alone.
+
 			EMBEDDED_FEATURE.find(work)?.let { match ->
 				work = work.removeRange(match.range).replace(WHITESPACE, " ").trim()
 				featured += match.groupValues[1].trim()

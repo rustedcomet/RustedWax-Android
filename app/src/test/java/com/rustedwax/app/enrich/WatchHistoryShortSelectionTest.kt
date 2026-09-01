@@ -3,7 +3,6 @@ package com.rustedwax.app.enrich
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/** Production-shaped selection cases from the 2026-08-14 device log. */
 class WatchHistoryShortSelectionTest {
 
 	private fun short(id: String, title: String) = WatchHistoryParser.ShortEntry(id, title)

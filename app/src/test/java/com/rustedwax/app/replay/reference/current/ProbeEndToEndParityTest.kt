@@ -20,30 +20,6 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The same scripts, all the way to the chain, on both implementations.
- *
- * `ProbeParityTest` compares what the two probes freeze. This compares what
- * happens to it afterwards — the surface `<redacted-private-path>` actually gates
- * on: typed terminal outcomes, payload bytes and order, dedup claims,
- * queue/retry behaviour, dispatch results, the engine's decision log, and both
- * halves of the UI history.
- *
- * ```text
- * OLD: phase01/SessionProbe  -> SessionSnapshot -> FinalizationRuntime -> recorded ports
- * NEW: current/SessionProbe  -> SessionSnapshot -> FinalizationRuntime -> recorded ports
- * ```
- *
- * Two real probes, one engine, one set of port fakes. Everything downstream of
- * the snapshot is production code executed identically by both sides, so a
- * difference anywhere in this comparison is a difference in the thing being
- * migrated — nothing else differs.
- *
- * `Phase01EndToEndParityTest` covers the same ground with the *reducer* on the
- * new side and the replay harness translating events by hand. Both are kept: one
- * proves the reducer agrees given equivalent input, this one proves the shipping
- * host produces that input.
- */
 class ProbeEndToEndParityTest : ReplayScenarioTest() {
 
 	private val native = YouTubeProbe.YOUTUBE_PACKAGE
@@ -110,13 +86,6 @@ class ProbeEndToEndParityTest : ReplayScenarioTest() {
 		is FinalizationOutcome.Eligible -> "Eligible(${outcome.payloads.size})"
 	}
 
-	/**
-	 * Run a list of already-frozen snapshots through a fresh engine.
-	 *
-	 * @param configure the fault or policy this scenario is about, applied to the
-	 * environment before anything is finalized. Identical on both sides by
-	 * construction — it is one lambda, called twice.
-	 */
 	private fun runThroughEngine(
 		snapshots: List<SessionSnapshot>,
 		configure: (ReplayEnvironment) -> Unit = {},
@@ -334,8 +303,7 @@ class ProbeEndToEndParityTest : ReplayScenarioTest() {
 	/**
 	 * Dispatch fails and the payload goes to the retry queue.
 	 *
-	 * A dispatch result is not a finalization outcome — the audit's terminal-rule
-	 * amendment is explicit about that — so the interesting comparison is that
+	 * A dispatch result is not a finalization outcome. The interesting comparison is that
 	 * both sides still report `Eligible` while the queue depth, the entry label
 	 * and the Not-logged history agree.
 	 */

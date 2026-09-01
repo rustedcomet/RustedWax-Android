@@ -60,31 +60,6 @@ data class Listen(
 	val ownerHandle: String?,
 )
 
-/**
- * The two snapshot fields the pre-migration implementation could not populate.
- *
- * Neither existed on `SessionSnapshot` at the reference commit — checked, not
- * assumed: `git show f0f9073:…/SessionSnapshot.kt` has neither
- * `firstObservedPositionMs` nor `trackInstanceToken`. Both arrived with this
- * migration, and both are additive:
- *
- *  - **`firstObservedPositionMs`** publishes something the old `Watch` already
- *    tracked internally (`firstSeenPositionMs`, which fed its unobserved
- *    lead-in note) but had nowhere to put. `ScrobbleRules.capForKind` now reads
- *    it — a listen whose source never published a readable position may not mint
- *    a second transaction — which is why it had to become part of the frozen
- *    listen rather than stay a diagnostic.
- *  - **`trackInstanceToken`** is the Phase 2 `TrackInstanceId` boundary: which
- *    listen this is, as a value a wall-clock second cannot collide on. The old
- *    implementation allocated the same token internally for its ad-evidence
- *    keying; it simply never published it, so downstream code fell back to the
- *    frozen start second and two listens inside one second were one listen.
- *
- * Recorded as a declared difference rather than normalised away, and asserted in
- * both directions: the old side must be silent on both fields and the new side
- * must populate them. A migration that quietly stopped stamping the token would
- * pass a comparison that ignored it, and fails this one.
- */
 data class AddedFields(
 	val firstObservedPositionMs: Long?,
 	/** Which distinct listen instance this is, in first-seen order. */

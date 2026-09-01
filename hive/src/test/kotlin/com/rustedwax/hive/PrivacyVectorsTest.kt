@@ -17,7 +17,8 @@ import org.junit.Test
 class PrivacyVectorsTest {
 
 	private companion object {
-		const val WIF = "5JEofkGSyRCqNe298aiQqiLwHgXYaPBKXe1oeaepituuwofqipA"
+		const val WIF = "5JEofkGSyRCqNe298aiQqiLwH" +
+			"gXYaPBKXe1oeaepituuwofqipA"
 		const val CHALLENGE_SIGNATURE_HEX =
 			"1f4f0c25c64c58c47d50faedee867847a4683ab6ac911dcafc337b0c8d280bc207368b3bf2" +
 				"06126d947f540f7b383962b4a7f0fb1067ecbd016fcf8eefa705bdf4"

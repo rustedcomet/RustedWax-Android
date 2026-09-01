@@ -12,27 +12,6 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 
-/**
- * Resolves an exact video id from the signed-in account's watch history.
- *
- * The route of last resort before search, and the only one that answers for
- * native playback outside a playlist — backgrounded, screen off, or a single
- * video with no queue around it (`<redacted-private-path>` §10.3).
- *
- * Resolution priority, unchanged elsewhere:
- * `browser address bar → playlist entry set → watch history → search`.
- * The playlist stays ahead because it is one fetch serving a hundred tracks and
- * needs no credentials; history covers what the playlist cannot.
- *
- * ## Handling of the session
- *
- * The cookie is read from [YouTubeSessionVault] at the moment of the request
- * and attached to exactly one hardcoded origin. It is never logged, never
- * placed in an event, never returned to a caller, and never attached to a
- * redirect — redirects are not followed at all, precisely so a 302 cannot walk
- * the credential to another host. Cookie rotations that YouTube sends back are
- * folded into the vault so a live session is not allowed to expire on disk.
- */
 class WatchHistoryResolver private constructor(
 	private val vault: YouTubeSessionVault,
 	private val health: WatchHistoryHealth,
@@ -101,20 +80,6 @@ class WatchHistoryResolver private constructor(
 		countsAsAccountEvidence = countsAsAccountEvidence,
 	)
 
-	/**
-	 * A Short this account's own Shorts feed named, and whose own watch page then
-	 * corroborated title/owner/duration exactly.
-	 *
-	 * That is the same fact a [WatchHistoryMatcher.Verdict.Candidate] establishes —
-	 * *this phone's playback is being written to the history RustedWax reads* —
-	 * arriving by the other of the feed's two lists. It was not counted, and the
-	 * consequence was measured on a Galaxy A36 on 2026-08-16: four Shorts resolved
-	 * exactly, from this feed, inside the very window in which three unrelated
-	 * misses stood the route down, and none of them could clear it.
-	 *
-	 * Only the corroborated outcome may call this. An offered candidate list is
-	 * not evidence; the identity gate is unchanged and still decides.
-	 */
 	fun recordShortCorroborated() = health.recordHit()
 
 	/**
@@ -141,23 +106,7 @@ class WatchHistoryResolver private constructor(
 		durationSec: Long?,
 		carriedVideoId: String?,
 		ownerHandle: String? = null,
-		/**
-		 * Whether this track's absence says anything about *the account*.
-		 *
-		 * It only does when the track could have appeared in [entries] at all. Two
-		 * things routed here never could, and both were counted:
-		 *
-		 * - a YouTube ad, which is not a watch-history row in any account. Measured
-		 *   2026-08-16 on a Galaxy A36: three ordinary Shorts ads, 23s/24s/15s, in
-		 *   57 seconds of plain swiping, produced three absences with three distinct
-		 *   keys and stood the route down.
-		 * - a Short, which [WatchHistoryParser] deliberately keeps in its own list
-		 *   and out of [entries], so an absence from the ordinary window is a
-		 *   property of the parser, not of the account.
-		 *
-		 * The lookup itself still runs and can still resolve; only the diagnosis
-		 * declines to treat the outcome as evidence.
-		 */
+
 		countsAsAccountEvidence: Boolean = true,
 	): VideoResolutionAttempt {
 		if (!vault.hasSession) {
@@ -193,13 +142,6 @@ class WatchHistoryResolver private constructor(
 		}
 		var verdict = match(feed.entries)
 
-		// A cached feed cannot contain a track that started after it was read,
-		// and the commonest lookup is exactly that: the id is asked for seconds
-		// into a new track, while the copy fetched to finalize the *previous*
-		// one is still warm. Measured 2026-08-04 — "Por El Momento" missed
-		// against a 0.5-second-old cache and fell through to the search route,
-		// which is the route that picks the wrong upload. So absence against a
-		// cached feed is not an answer; it is a reason to look again.
 		if (feed.fromCache && WatchHistoryMatcher.isAbsence(verdict)) {
 			val fresh = recentEntries(
 				now,
@@ -253,12 +195,7 @@ class WatchHistoryResolver private constructor(
 					health.recordMiss(now, missKey(title, channel, durationSec))
 				}
 				EventLog.append("history", "refused \"$title\": ${verdict.reason}")
-				// Measured 2026-08-04: regular videos resolve from history at
-				// position 0 within ~3 s, while every Short refused — including
-				// one that had finished three seconds earlier. Something about a
-				// Shorts row cannot satisfy the gate, and guessing which field
-				// would mean guessing at the rule that keeps wrong links off an
-				// immutable chain. So the row is described structurally instead.
+
 				if (ownerHandle != null && WatchHistoryMatcher.isAbsence(verdict)) {
 					EventLog.append("history", rowReport(feed.entries, title, ownerHandle))
 				}
@@ -368,21 +305,6 @@ class WatchHistoryResolver private constructor(
 		data class Unavailable(val reason: String) : Feed
 	}
 
-	/**
-	 * The ids of Shorts this account watched most recently, newest first.
-	 *
-	 * Candidates only, and weaker ones than an ordinary entry: a Shorts row
-	 * carries no channel and no duration, so nothing here is resolved. The
-	 * caller re-fetches each id's own watch page and requires exact title,
-	 * duration and `@handle` agreement — the identical gate the foreground-Short
-	 * search route already applies, handed the right ids instead of having to
-	 * find them.
-	 *
-	 * This exists because search cannot find these videos at all: measured
-	 * 2026-08-04, six of eleven Shorts failed at "no candidate matched exact
-	 * title+duration+owner handle", their titles being mostly hashtags and
-	 * emoji. The account's own history knows exactly which video it was.
-	 */
 	suspend fun recentShortIds(
 		title: String?,
 		limit: Int = MAX_SHORT_CANDIDATES,
@@ -400,11 +322,7 @@ class WatchHistoryResolver private constructor(
 	): List<String> {
 		if (!vault.hasSession) return emptyList()
 		val now = System.currentTimeMillis()
-		// A stood-down route used to return nothing here without saying so, and
-		// the Short's refusal then blamed sign-in — measured 2026-08-06, two
-		// untitled Shorts at 62% and 77% were lost inside a fifteen-minute pause
-		// that appears nowhere in a 58,000-line log. Whatever this route is not
-		// doing, it says.
+
 		if (!health.mayRun(now, accountEvidence = countsAsAccountEvidence)) {
 			EventLog.append(
 				"history",
@@ -420,27 +338,8 @@ class WatchHistoryResolver private constructor(
 		val shorts = (feed as? Feed.Entries)?.shorts ?: return emptyList()
 		if (shorts.isEmpty()) return emptyList()
 
-		// Select by the title the row already carries, across the *whole* Shorts
-		// list, rather than taking the newest few and hoping. Measured
-		// 2026-08-05: the feed held 19 Shorts and two repeatedly-watched ones
-		// never resolved, because position in that list is not recency the way
-		// it is for ordinary entries — a Short watched minutes ago can sit well
-		// past the fifth slot.
-		//
-		// This selects; it decides nothing. Every id still has its own watch
-		// page re-fetched and must agree on title, duration and @handle.
-		// With no on-screen title there is nothing to select *by*, so offer the
-		// most recent Shorts and let owner handle + duration decide. That is the
-		// same gate as always, minus the selector — and the selector was never
-		// authority. This is the path a Short takes when YouTube's footer restyle
-		// costs the title but leaves the handle and the seekbar intact.
 		if (title == null) {
-			// Wider than the titled case, because there is nothing to select by.
-			// Measured 2026-08-07: a Short watched eight minutes before it
-			// finalized had fallen well outside the newest five, so a complete
-			// 180-second listen was measured and then could not be named. The
-			// owner-handle check still decides; this only widens what it is
-			// allowed to look at, and every candidate still costs one page.
+
 			val recent = shorts.map(WatchHistoryParser.ShortEntry::videoId)
 				.distinct()
 				.take(MAX_UNTITLED_SHORT_CANDIDATES)
@@ -462,16 +361,6 @@ class WatchHistoryResolver private constructor(
 			return byTitle.take(limit)
 		}
 
-		// No feed title matched. That is itself worth knowing: it means the
-		// on-screen overlay title and the feed's own title disagree, which is a
-		// different problem from the Short being absent. Fall back to the most
-		// recent few so a formatting difference does not cost the listen.
-		// Measured 2026-08-05: `QnRnooyKeZk` was in the feed at position 0 and
-		// still did not match, while its canonical title is byte-identical to
-		// the one read off the screen. So the divergence is inside the
-		// normalization, not in the feed — and the only way to see it is to
-		// print both keys. Titles are already logged on every resolve, so this
-		// adds no new class of content to the log.
 		EventLog.append(
 			"history",
 			"no Short in the feed matched the title \"$title\"; offering the " +
@@ -627,20 +516,6 @@ class WatchHistoryResolver private constructor(
 			"The session tuple carried duration and handle $ownerHandle."
 	}
 
-	/**
-	 * The Shorts the unfiltered feed no longer carries, or an empty list.
-	 *
-	 * One extra authenticated GET of the *same* page with the chip's own `bp`
-	 * filter — see [WatchHistoryParser.shortsFilterToken] for why the default
-	 * feed stopped containing Shorts on 2026-08-17. Reached only when the
-	 * unfiltered parse produced no Shorts at all, so an ordinary history read
-	 * costs exactly what it did before, and ordinary entries are never taken
-	 * from this response.
-	 *
-	 * Fails closed at every step: no chip, no fetch, no `ytInitialData`, an
-	 * unreadable parse or a signed-out redirect all yield an empty list, which
-	 * leaves the caller exactly where it was without this route.
-	 */
 	private suspend fun shortsFromFilteredFeed(
 		blob: String,
 	): List<WatchHistoryParser.ShortEntry> {

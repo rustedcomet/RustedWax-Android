@@ -24,17 +24,6 @@ import com.rustedwax.app.R
 /** One turn of the record, in milliseconds. 33⅓ rpm is 1800; this is brisker. */
 private const val TURN_MILLIS = 2600
 
-/**
- * A floor on how long the loading screen stays up, for looking at it.
- *
- * **This is a deliberate delay to startup and nothing else.** Set to `0` to
- * restore the intended behaviour, where the screen lasts exactly as long as the
- * work behind it — around 640 ms on the field device, which is not long enough
- * to judge an animation by.
- *
- * It does not affect the `ready in <n>ms` line: that still measures the work,
- * so the number stays honest about what startup costs while this is set.
- */
 const val LOADING_MINIMUM_MILLIS = 3_000L
 
 /**

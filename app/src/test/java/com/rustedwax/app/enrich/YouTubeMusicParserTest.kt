@@ -6,13 +6,6 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The YouTube Music catalogue lookup, adapted from the desktop extension.
- *
- * Every fixture below is trimmed from a real response captured on 2026-07-29
- * against ids from the field logs, so drift in the endpoint fails a test rather
- * than silently degrading classification.
- */
 class YouTubeMusicParserTest {
 
 	private fun response(
@@ -41,7 +34,6 @@ class YouTubeMusicParserTest {
 
 	// region what the catalogue says
 
-	/** `GQwj_FRntp8` — MusicBrainz returned `no match` for this one in the field. */
 	@Test
 	fun `an art track carries canonical credits`() {
 		val r = YouTubeMusicParser.parse(
@@ -65,11 +57,6 @@ class YouTubeMusicParserTest {
 		assertEquals(false, r.unlisted)
 	}
 
-	/**
-	 * `l69Cq38GgZ4` — recognised as music, but its author is the *channel* and
-	 * its title is the uploader's. The extension trusts these for OMV; we don't,
-	 * which is what [YouTubeMusicParser.Result.isArtTrack] exists to express.
-	 */
 	@Test
 	fun `an official music video is music but its credits are not canonical`() {
 		val r = YouTubeMusicParser.parse(
@@ -86,7 +73,6 @@ class YouTubeMusicParserTest {
 		assertFalse(r.isArtTrack)
 	}
 
-	/** `cq2xXbWGHu8` — a football short. Absent type is a clean negative. */
 	@Test
 	fun `a video the catalogue has never heard of is not recognised`() {
 		val r = YouTubeMusicParser.parse(
@@ -127,11 +113,6 @@ class YouTubeMusicParserTest {
 		)
 	}
 
-	/**
-	 * `CYgQQqvwwsY` — the shorts-feed ad. The music client reports `unlisted`
-	 * where the watch page reports `isUnlisted`, so the 10 KB request can gate
-	 * the short-clip floor on its own when the page is unavailable.
-	 */
 	@Test
 	fun `the shorts-feed ad reports itself unlisted here too`() {
 		val r = YouTubeMusicParser.parse(

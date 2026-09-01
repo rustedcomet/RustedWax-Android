@@ -8,20 +8,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * One terminal outcome per finalized track, at every exit the engine has.
- *
- * `<redacted-private-path>` originally asked for "exactly one payload or one typed
- * refusal per finalized track". That sentence cannot be satisfied by this engine
- * and should not be: it has no name for the boundaries that are deliberately
- * silent, and it forbids the second payload the repeat-listen rule legitimately
- * produces. The restated gate — every finalized target produces exactly one
- * [FinalizationOutcome] — is what this file proves, exit by exit.
- *
- * The count part of the rule is enforced for *every* scenario in this package by
- * `ReplayScenarioTest`. What this file adds is the classification: that each exit
- * files the right kind of outcome, and that the silent ones stay silent.
- */
 class TerminalOutcomeReplayTest : ReplayScenarioTest() {
 
 	private fun facts(videoId: String, title: String, author: String, lengthSeconds: Long) =

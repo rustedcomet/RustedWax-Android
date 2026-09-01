@@ -1,14 +1,12 @@
 package com.rustedwax.app.replay.reference.phase01
 
-// GENERATED — do not edit. See <redacted-private-path>.
-// Body below is byte-identical to the recorded pre-migration original.
+// Legacy replay reference; edit only with the corresponding parity tests.
 
 import com.rustedwax.app.detect.*
 import com.rustedwax.core.TrackIdentity
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-
 
 /**
  * Watches every active media session and tracks playback progress.
@@ -216,17 +214,6 @@ class SessionProbe(context: Context) {
 		}
 	}
 
-	/**
-	 * Tear the probe down.
-	 *
-	 * @param finalizeTracks whether tracks still in flight get one last chance
-	 * to score. True when the *system* ends things (session gone, listener
-	 * disconnected) — the track really did end, and dropping it would lose a
-	 * legitimate scrobble. **False when the user presses Stop**: a Stop button
-	 * that writes to an immutable chain on its way out is a bad Stop button, and
-	 * without this flag `dispose()` would do exactly that for any track already
-	 * past the threshold.
-	 */
 	fun stop(finalizeTracks: Boolean = true) {
 		if (!started) return
 		NotificationHints.onHint = null
@@ -256,8 +243,7 @@ class SessionProbe(context: Context) {
 		// A vanished native controller may still have a pending continuation even
 		// though no Watch remains in the map. Reconnect/Stop clears it too.
 		YouTubeProbe.YOUTUBE_APP_PACKAGES.forEach(::clearPackageState)
-		// Nothing observed before a Stop may survive it — including play time
-		// waiting to be handed to a session that no longer exists.
+
 		if (!finalizeTracks) {
 			TrackProgressCarry.clear()
 			AdEvidence.clearAll()
@@ -608,24 +594,6 @@ class SessionProbe(context: Context) {
 		var suppressedByForegroundShort: Boolean = false
 			private set
 
-		/**
-		 * The browser is publishing its tab's own title instead of a track's.
-		 *
-		 * Nothing is measured in this state. Elapsed time between one video's
-		 * metadata being torn down and the next one's arriving cannot be credited
-		 * to either of them — the outgoing track has already been finalized with
-		 * what it earned, and the incoming one has not started. See
-		 * [BrowserTabMetadata].
-		 *
-		 * Initialised from the metadata this Watch was *built* on, not only
-		 * entered through [onMetadataChanged]. Chromium recreates its
-		 * MediaSession constantly, so a replacement can be constructed while the
-		 * tab bundle is already installed and would otherwise start measuring
-		 * against a track nobody has named. Measured 2026-08-11: the page was
-		 * muted, Brave published `TITLE = "YouTube"` and then said nothing for
-		 * seven minutes while a real video played, and all seven minutes landed
-		 * on it.
-		 */
 		private var describingTabOnly: Boolean =
 			BrowserTabMetadata.isTabTitle(controller.packageName, rawTitleOf(controller.metadata))
 
@@ -647,20 +615,6 @@ class SessionProbe(context: Context) {
 		 */
 		private var taintedReason: String? = null
 
-		/**
-		 * The Confirmed identity captured while this track was actually
-		 * playing, kept for the track's lifetime.
-		 *
-		 * PHASE0's "resolve identity at finalize" rule is right for
-		 * notification hints (they arrive late) and exactly wrong for
-		 * address-bar evidence, which is right at track *start* and stale at
-		 * track *end*. Resolving from live evidence at finalize produced two
-		 * on-chain failures on 2026-07-24: a track that lost its video id
-		 * because the user had already scrolled to the next short (payload got
-		 * no url, no category, wrong kind), and two different songs broadcast
-		 * with the *same* url because one finalized while the bar showed the
-		 * other. So: latch on first confirmation, spend at finalize.
-		 */
 		private var latchedVideo: YouTubeProbe.Identity.Confirmed? = null
 
 		/**
@@ -711,18 +665,8 @@ class SessionProbe(context: Context) {
 		/** Highest rate scored for this track, for the finalize line only. */
 		private var fastestSpeedSeen: Double = 1.0
 
-		/**
-		 * Where the player already was when this track was first seen.
-		 *
-		 * Measured 2026-08-06: `_zR6ROjoOX0` (Iggy Azalea, "Work") published no
-		 * MediaSession at all for the eleven minutes before RustedWax saw it,
-		 * then appeared 94 seconds into a 227-second video and was destroyed
-		 * seven seconds later. The finalize line read "played 12s of 227s" and
-		 * looked like a measurement fault; it was an accurate account of the only
-		 * playback that was ever published. Recorded so the line can say so.
-		 */
 		private var firstSeenPositionMs: Long? = null
-		/** End-to-start playback reset observed during this continuous viewing. */
+
 		private var loopDetected: Boolean = false
 		private var playingSince: Long = if (isPlaying(state)) SystemClock.elapsedRealtime() else 0
 		private var trackIdentity: TrackIdentity = trackIdentityOf(metadata, packageName)
@@ -794,24 +738,7 @@ class SessionProbe(context: Context) {
 					publish()
 					return
 				}
-				// YouTube re-creates its MediaSession on every tab switch, and the
-				// first metadata it publishes is empty — no title, no duration —
-				// with the real values arriving a fraction of a second later.
-				// Measured 2026-08-07: a viewer moved between the Home and Shorts
-				// tabs while a 155-second trailer played, and each return produced
-				//
-				//   [track] track change after 0s played
-				//   [finalize] <untitled> — played 0s of 0s
-				//   [metadata] TITLE = "Algo terrible está a punto de suceder…"
-				//
-				// so the trailer was finalized against a placeholder, over and
-				// over, and finished the session having accumulated 18 of the
-				// 155 seconds actually watched. Nothing scrobbled.
-				//
-				// An empty announcement is the session clearing its throat, not a
-				// different track. Hold the current one and wait for the real
-				// metadata; a genuinely ended track still ends by STOPPED, by
-				// session destruction, or by the replacement that follows.
+
 				if (!newIdentity.isUsable && newIdentity.durationMs == null &&
 					trackIdentity.isUsable
 				) {
@@ -838,21 +765,7 @@ class SessionProbe(context: Context) {
 				if (discardNativeDurationFragment) {
 					cancelNativeStoppedFinalization()
 					cancelContinuation()
-					// A downward replacement that lands on a fragment which has
-					// already earned a listen is not an ad fragment — it is the
-					// real track, with an interstitial's length published over it
-					// at the very end. Measured 2026-08-06: "Nicki Minaj - Barbie
-					// Dreams" (301s) and "Red Ruby Da Sleeze" (207s) both had a
-					// ~13s duration swapped in near the end, and discarding threw
-					// the whole listen away — the log then read
-					// "played 18s of 13s" and every route refused, because they
-					// all require the duration to agree.
-					//
-					// Finalizing instead freezes the duration that was in force
-					// while it was playing, which is the only one it was ever
-					// measured against. The discard still happens for everything
-					// that had not earned a listen, which is the ad case the
-					// branch was written for.
+
 					val priorDuration = maxOf(
 						trackIdentity.durationMs ?: 0,
 						longestDurationMs ?: 0,
@@ -1110,9 +1023,7 @@ class SessionProbe(context: Context) {
 			// same predicate the claim will apply — asked here against the carry's
 			// own stopping point so the log states the wait it will actually keep.
 			val resumable = TrackProgressCarry.holdsResumeWindow(identityKey, progress)
-			// §4.1: a session that was never named must not name itself on the way
-			// out either. Measured 2026-08-10 — this was the last line an
-			// unrelated Chrome video still produced after the other routes closed.
+
 			logDeparture(
 				"$packageName [$reason] waiting " +
 					if (resumable) {
@@ -1192,18 +1103,7 @@ class SessionProbe(context: Context) {
 					mediaSessionAdInstance(), trackInstanceEstablishedAtMillis,
 				)
 			}
-			// Added to, not assigned over. The claim can land seconds after the
-			// replacement started measuring — the native resolver and the browser's
-			// address bar both take a moment to name the video — and those seconds
-			// are the same listen, so overwriting them threw away real play time.
-			//
-			// Banked time only: the running clock is deliberately left alone.
-			// Folding it in here with `accumulate()` also *stops* it, and nothing
-			// on this path starts it again — measured 2026-08-09, a Chrome session
-			// that was already PLAYING when it claimed reached `pos=220412ms` of a
-			// 220421 ms video having measured 58s, because the claim silenced the
-			// clock at the moment it handed the time back and no further state
-			// change ever arrived to restart it.
+
 			playedMs += carried.playedMs
 			trackStartedAtEpochSec = carried.trackStartedAtEpochSec
 			fastestSpeedSeen = carried.fastestSpeedSeen
@@ -1304,12 +1204,7 @@ class SessionProbe(context: Context) {
 			finalized = true
 			accumulate()
 			val snapshot = snapshot(finalizedTrack = true)
-			// §4.1. The finalize still happens — the engine needs the snapshot to
-			// decide, and it will refuse this one for not being YouTube — but the
-			// *line* names the track, and for an unproven session that track is a
-			// page the user watched somewhere else. Measured 2026-08-10, after the
-			// metadata, identity, playback and arrival routes were closed, this one
-			// still wrote `w3schools.com/html/mov_bbb.mp4` into the exportable log.
+
 			if (mayRecordIdentifyingDetail()) {
 				EventLog.append(
 					"finalize",
@@ -1364,10 +1259,7 @@ class SessionProbe(context: Context) {
 			}
 			resetForNewTrack()
 			describingTabOnly = true
-			// [resetForNewTrack] restarts the clock for a track that is about to
-			// begin. None is. Leaving it running would hand every second of the
-			// gap to whichever track claims the session next, the moment the flag
-			// clears — which is the seven-minute credit measured on 2026-08-11.
+
 			playingSince = 0
 			trackIdentity = TrackIdentity(null, null, null, null)
 			trackInstanceToken = MediaSessionAdEvidence.nextTrackToken()
@@ -1502,22 +1394,6 @@ class SessionProbe(context: Context) {
 			)
 		}
 
-		/**
-		 * Score what this MediaSession was playing before the foreground Shorts
-		 * route took the player.
-		 *
-		 * Suppression exists so the same seconds are not counted on both
-		 * surfaces, and it starts the MediaSession over at zero for exactly that
-		 * reason. What it must not do is delete a listen on the way past.
-		 * Measured 2026-08-07: "THE RUN — Official Trailer" reached 85s of its
-		 * 104s, the viewer opened the Shorts tab, and the trailer was erased
-		 * without a finalize line — 82% watched, nothing scrobbled, no record it
-		 * had ever played. That log holds ten of these, up to 168 seconds each.
-		 *
-		 * The one case where discarding is right is the Short taking over being
-		 * the very item this session was describing, which
-		 * [ForegroundShortHandover] decides on published evidence alone.
-		 */
 		private fun bankProgressBeforeHandover(incomingShort: SessionSnapshot?) {
 			// A pending continuation cannot survive the hand-off: its expiry
 			// callback would land on a suppressed Watch, where finalization is a
@@ -1585,17 +1461,7 @@ class SessionProbe(context: Context) {
 				UrlEvidence.get(packageName)
 					?.takeUnless { it.videoId != null && it.videoId in rejectedVideoIds }
 			}
-			// A playlist is context, not a position. [UrlEvidence.playlistByPackage]
-			// exists to say so — it keeps the last `list=` for three hours rather
-			// than the five minutes a video id gets, because the bar stops naming
-			// individual videos within seconds while the playlist keeps advancing.
-			//
-			// It had no reader. The only path that set `resolverContext.playlistId`
-			// was the branch below, off the five-minute reading, so the playlist
-			// route — the *exact* one, which beats search — went unavailable five
-			// minutes after the browser was last visible. Measured 2026-08-11: a
-			// 180-entry 2Pac playlist named in the bar at 23:44 was gone by 00:00,
-			// and a track that is entry 41 of it went to search instead.
+
 			if (!isNative && resolverContext.playlistId == null) {
 				UrlEvidence.playlistId(packageName)?.let { remembered ->
 					resolverContext = resolverContext.copy(playlistId = remembered)
@@ -1616,8 +1482,7 @@ class SessionProbe(context: Context) {
 			}
 			// Native YouTube has no address bar. The watch screen's playlist bar
 			// is the equivalent evidence and the only route that makes native
-			// identity exact rather than plausible
-			// (<redacted-private-path>). Deliberately kept out of
+			// identity exact rather than plausible. Deliberately kept out of
 			// `playlistId`, which stays proven-URL evidence only.
 			if (isNative && packageName == YouTubeProbe.YOUTUBE_PACKAGE) {
 				NativePlaylistObserver.current()?.let { playlist ->
@@ -1656,15 +1521,6 @@ class SessionProbe(context: Context) {
 				onVideoConfirmed?.invoke(live.videoId)
 			}
 
-			// Corroborate the latch once a page is known: what it says must match
-			// what the session is playing. A clear mismatch means the bar was
-			// already showing some other video when we latched — drop the id
-			// rather than broadcast a wrong url.
-			//
-			// Two independent checks, because either can be unavailable. The
-			// title is the stronger signal but absent whenever the fetch failed;
-			// the duration survives that, and it is what the 2026-07-29
-			// wrong-url case turned on. See [durationsDisagree].
 			latchedVideo?.let { l ->
 				val known = knownVideoFor?.invoke(l.videoId)
 				val titleEvidence = if (known?.title != null && sessionTitle != null) {
@@ -1759,7 +1615,7 @@ class SessionProbe(context: Context) {
 		}
 
 		/**
-		 * The ad flag Android itself publishes — `<redacted-private-path>` §3.4.
+		 * The ad flag Android itself publishes.
 		 *
 		 * `METADATA_KEY_ADVERTISEMENT` is set by the player on a session that is
 		 * playing an ad. RustedWax read every other ad signal and not this one,
@@ -1877,46 +1733,6 @@ class SessionProbe(context: Context) {
 				soleSession = soleBrowserSession,
 			)
 
-		/**
-		 * Folds the elapsed window into [playedMs] and restarts the clock.
-		 *
-		 * Scaled by the playback rate, which is the whole point: the threshold
-		 * compares against `duration`, so what has to be measured is *content
-		 * consumed*, not seconds elapsed. A 2026-07-29 field session watched a
-		 * 76 s trailer at 1.25× to position 59.9 s — 79% of the video — and it
-		 * went on-chain as 67%, because 50 s of wall-clock had passed. At 2× the
-		 * same arithmetic puts a fully-watched video at 50% and it never
-		 * scrobbles at all.
-		 *
-		 * Read from `state` deliberately *before* the caller assigns the new one:
-		 * the window that just ended was played at the rate that was in effect
-		 * during it, not at the rate being switched to.
-		 */
-		/**
-		 * Wall-clock credited while this session was unmeasurable in PiP.
-		 *
-		 * The foreground-Short route cannot help here: opening a Short and going
-		 * straight to picture-in-picture never gives the accessibility tree a
-		 * stably readable seekbar, so nothing is ever acquired. Measured
-		 * 2026-08-05 on "BECKY G, MAYORES" — the MediaSession carried
-		 * `TITLE` and `DURATION = 50000` and then reported `state=NONE`,
-		 * `pos=0`, `isActive=false` for the whole session. Title and duration are
-		 * there; only progress is missing, which is exactly what this supplies.
-		 */
-		/**
-		 * The longest length this unchanged title has ever claimed.
-		 *
-		 * YouTube republishes a *shorter* length for the same material — measured
-		 * 2026-08-06, a 415s live set reported 415s, then 11s, then 6s while it
-		 * was still playing the same thing. Taking each new number at face value
-		 * chopped one seven-minute watch into scraps of 6 and 11 seconds, none of
-		 * which could clear any threshold.
-		 *
-		 * Keeping the longest is strictly safer than taking the newest: the case
-		 * the shorter number would create is a song looking complete because an
-		 * interstitial's length was written over it, which is the exact failure
-		 * the old pre-roll guard existed to prevent.
-		 */
 		private var longestDurationMs: Long? = null
 
 		private var pipInference: PipPlaybackInference? = null
@@ -2134,35 +1950,6 @@ class SessionProbe(context: Context) {
 		private fun durationOf(md: MediaMetadata?): Long? =
 			MetadataDump.longOrNull(md, MediaMetadata.METADATA_KEY_DURATION)
 
-		/**
-		 * The length this track has established, which a bundle that omits
-		 * DURATION does not erase.
-		 *
-		 * A bundle without DURATION is silence about the length, not a statement
-		 * that the track has none. YouTube's web player publishes exactly that as
-		 * a video ends, and republishes it intermittently while one plays —
-		 * measured 2026-08-10, "Happy Song" reported 236981 ms for its whole
-		 * 247-second watch and then dropped it half a second before the track
-		 * changed:
-		 *
-		 *   21:13:51  DURATION = 236981   pos=236974
-		 *   21:13:52  unset: … DURATION …
-		 *   21:14:02  [finalize] Happy Song — played 247s of 0s
-		 *
-		 * With no length there is no percentage to clear a threshold with and no
-		 * duration to resolve an id by, so a complete listen produced nothing:
-		 * "title, owner/channel and duration were not all available for lookup".
-		 * The same silence also makes the latch's own corroboration unavailable,
-		 * so a page whose title is a short form of the session's kept failing to
-		 * corroborate and the track's identity was wiped pass after pass, ending
-		 * in "source not proven YouTube".
-		 *
-		 * [TrackIdentity.refinedWith] has kept the established length all along —
-		 * it is what decides these updates describe the same track — so this
-		 * reads a value the session already holds rather than inventing one. A
-		 * published length always wins; this is consulted only when the current
-		 * bundle says nothing.
-		 */
 		private fun establishedDurationMs(md: MediaMetadata?): Long? =
 			durationOf(md)?.let { published -> maxOf(published, longestDurationMs ?: 0) }
 				?: longestDurationMs
@@ -2325,30 +2112,9 @@ class SessionProbe(context: Context) {
 		 * enrichment. A later active callback may still latch a different,
 		 * corroborated id; only this contradictory pass fails closed.
 		 */
-		/**
-		 * Why a latched id was dropped, and whether that is evidence *against* it.
-		 *
-		 * @param contradicts the page named a different video, so the id follows
-		 * the track as rejected. False when the page simply could not establish
-		 * the id — the latch is still dropped, but nothing is held against it.
-		 */
+
 		data class LatchDisagreement(val reason: String, val contradicts: Boolean)
 
-		/**
-		 * Not confirming an id is not the same as disproving it.
-		 *
-		 * Measured 2026-08-10: tapping "Happy Song" in a playlist read the address
-		 * bar before the session had published a duration, so the page's short
-		 * title was only weak evidence and `GBRAnuT48qo` was filed as rejected.
-		 * Four minutes later the resolver proved that same id by title + duration
-		 * + the watch page's own channel — a strictly stronger join than this one
-		 * — and a 225-of-236-second listen was thrown away for "video id
-		 * GBRAnuT48qo was rejected while the track was active".
-		 *
-		 * The latch is still dropped in both cases: a weak title may never confirm
-		 * an id. What changes is that insufficiency no longer outranks the
-		 * stronger evidence that arrives afterwards.
-		 */
 		fun latchDisagreement(
 			titleEvidence: VideoTitleMatcher.Evidence?,
 			weakEvidenceAllowed: Boolean,
@@ -2447,22 +2213,6 @@ class SessionProbe(context: Context) {
 			VideoTitleMatcher.Evidence.CONTRADICTION -> false
 		}
 
-		/**
-		 * Second, independent corroboration of a latched id: does the page's length
-		 * match what the session says it's playing?
-		 *
-		 * Added because the title check **fails open**. On 2026-07-29 the address
-		 * bar was 7 seconds late advancing a playlist, so a Danger Man track latched
-		 * the *previous* entry's id — and the page fetch for that id had already
-		 * timed out, so there was no title to compare and the stale id survived onto
-		 * the chain with a `url` pointing at Daddy Yankee's "Con Calma". The
-		 * durations were 226 s against 193 s: the mismatch was sitting right there.
-		 *
-		 * Tolerance is both absolute *and* proportional, and it has to be both.
-		 * `lengthSeconds` and the session's `DURATION` routinely differ by a second
-		 * of rounding, so a flat threshold alone is too noisy; a percentage alone
-		 * would let a 30-second disagreement pass on a two-hour video.
-		 */
 		fun durationsDisagree(sessionMs: Long?, pageSeconds: Long?): Boolean {
 			if (sessionMs == null || sessionMs <= 0 || pageSeconds == null || pageSeconds <= 0) {
 				return false

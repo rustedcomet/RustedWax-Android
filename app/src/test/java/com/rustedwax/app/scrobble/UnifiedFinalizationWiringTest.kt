@@ -4,7 +4,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Production-wiring gates for Architecture Audit Phase 7. */
+/** Production-wiring gates for unified finalization. */
 class UnifiedFinalizationWiringTest {
 
 	private fun source(path: String): String {

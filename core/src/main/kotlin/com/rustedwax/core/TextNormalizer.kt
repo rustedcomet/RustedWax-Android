@@ -2,47 +2,6 @@ package com.rustedwax.core
 import java.text.Normalizer
 import java.util.Locale
 
-/**
- * One answer to "are these the same string", in the two forms that question
- * actually has.
- *
- * ## The bug this exists for
- *
- * Three components had three answers. `DedupLedger.keyFor` lowercased and
- * normalized nothing; `TrackIdentity` used NFKC; `OwnerHandle` used NFC as of
- * v0.9.13. A dedup key then read `…|@eduardaarebouçass|496153`, so the cedilla
- * that `OwnerHandle` composed and `DedupLedger` did not could produce two keys
- * for one listen — and a duplicate on a ledger that cannot be edited. That is
- * `<redacted-private-path>` §3.6, and it stopped being hypothetical the moment a
- * handle entered the key.
- *
- * ## Why this is two functions and not one
- *
- * "Just use NFKC everywhere" is the obvious merge and it is wrong. NFKC folds
- * *compatibility* variants together: `ﬁ` becomes `fi`, `Ⅳ` becomes `IV`,
- * full-width `Ａ` becomes `A`. For a title that is exactly right — those are the
- * same text typed differently, and a listen should not dedup twice because an
- * uploader used a ligature.
- *
- * For an **identity** it is dangerous in the other direction. Two genuinely
- * different handles that differ only by a compatibility variant would collide
- * and one creator's listens would be credited to the other. Identity may only
- * use canonical equivalence — NFC merges sequences that *are* the same
- * character and never merges two that are not.
- *
- * So: [presentation] for anything a human reads, [identity] for anything that
- * names a thing. The split is deliberate and load-bearing.
- *
- * ## Invisible characters
- *
- * §3.5. `Artist[U+200B] - Song` fails to split on a title that looks perfectly
- * correct on screen, because a zero-width space sits where the parser expects a
- * word boundary. The same class of assumption already cost every non-ASCII
- * creator their listens once, when the owner-handle pattern was ASCII-only.
- *
- * The primitives are ported from `metadata-filter` (MIT), which solves this for
- * the upstream extension.
- */
 object TextNormalizer {
 
 	/**

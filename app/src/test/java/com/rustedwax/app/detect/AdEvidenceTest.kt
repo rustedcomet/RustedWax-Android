@@ -18,7 +18,7 @@ class AdEvidenceTest {
 		AdEvidence.Evidence(pkg, id, "Sponsored", generation, at)
 
 	@Test
-	fun `log 14 stadium label cannot veto IW524Zl2Pus successor`() {
+	fun `a stadium label cannot veto an exact-id successor`() {
 		val stadium = "stadiumAd01"
 		AdEvidence.onUrlObserved(pkg, stadium, generation = 1)
 		AdEvidence.markSessionEstablished(pkg, stadium, generation = 1)

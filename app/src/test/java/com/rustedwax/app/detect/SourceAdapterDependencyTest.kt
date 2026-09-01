@@ -5,26 +5,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * What a source adapter is not allowed to reach.
- *
- * `<redacted-private-path>` §1.2 requires that an adapter cannot broadcast,
- * queue, claim dedup, mutate settings or finalize. The contract's return types
- * already make that unsayable — no member yields a payload, a queue entry, a
- * dedup claim or a `SessionSnapshot` — and `SourceAdapterContractTest` asserts it
- * on the values.
- *
- * This is the other half, and the one the audit asked for by name: a *dependency*
- * rule, so the boundary survives someone adding a member that could say it. An
- * adapter that cannot name `FinalizationRuntime`, the broadcast queue, the dedup
- * ledger or the settings writer cannot call them however its signatures change.
- *
- * Source inspection is the right tool here and the only one available: the claim
- * is about what the code *may reference*, not about what one execution did, and
- * `<redacted-private-path>` Phase 8 eventually enforces exactly this with module
- * boundaries. `ForeignSourceReducerTest` already establishes the pattern for the
- * shared reducer; this applies it to the four adapters.
- */
 class SourceAdapterDependencyTest {
 
 	private val adapterSources = listOf(
@@ -82,12 +62,6 @@ class SourceAdapterDependencyTest {
 		)
 	}
 
-	/**
-	 * The rule is only worth having if it can fail.
-	 *
-	 * A scan that matched nothing — a wrong path, an empty file list, a pattern
-	 * that never fires — would pass the test above against any code at all.
-	 */
 	@Test
 	fun `the dependency scan reads real adapter code and would catch a violation`() {
 		adapterSources.forEach { name -> assertTrue("$name is empty", read(name).isNotEmpty()) }

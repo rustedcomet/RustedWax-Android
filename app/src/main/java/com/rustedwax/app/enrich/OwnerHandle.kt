@@ -8,15 +8,6 @@ import java.util.Locale
 /** Exact YouTube owner-handle evidence; punctuation and underscores are identity. */
 object OwnerHandle {
 
-	/**
-	 * Letters, marks, digits and the three punctuation characters YouTube allows.
-	 *
-	 * Deliberately **not** ASCII-only. Measured 2026-08-07: the footer of a
-	 * Short read `Go to channel @eduardaarebouçass`, the `ç` fell outside the
-	 * old `[A-Za-z0-9._-]`, and the handle was refused — which since v0.9.10
-	 * means the whole listen is refused, because the handle is the one mandatory
-	 * field. Every creator whose handle is not spelled in ASCII was invisible.
-	 */
 	private val HANDLE = Regex("""^[\p{L}\p{M}\p{N}._-]{3,30}$""")
 
 	/**

@@ -90,7 +90,7 @@ class ShadowSafetyReplayTest : ReplayScenarioTest() {
 			shadowed.eligibleJson(),
 		)
 		// One payload for this representative finalized track on both sides. This
-		// validates the comparator, not the audit's global one-outcome gate: the
+		// validates the comparator, not the global one-outcome invariant: the
 		// existing engine has intentional silent early returns and repeat-listen
 		// cases that can emit two payloads.
 		assertEquals(1, live.finalized.size)

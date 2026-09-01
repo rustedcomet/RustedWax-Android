@@ -15,10 +15,6 @@ import java.util.TimeZone
  */
 class HiveBroadcaster(private val rpc: HiveRpc = HiveRpc()) {
 
-	/**
-	 * @param username the account whose posting authority signs the op
-	 * @param key parsed posting key — never persisted by this class
-	 */
 	fun broadcastScrobble(
 		username: String,
 		key: HiveKey,

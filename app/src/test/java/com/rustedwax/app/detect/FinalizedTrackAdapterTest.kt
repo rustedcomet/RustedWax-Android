@@ -9,22 +9,6 @@ import org.junit.Test
 import java.lang.reflect.Field
 import java.lang.reflect.Modifier
 
-/**
- * The Phase 2 compatibility adapter, held to the only standard that matters:
- * nothing is lost on the way through.
- *
- * `<redacted-private-path>` Phase 2 asks for "a compatibility adapter from the
- * existing `SessionSnapshot` so the old pipeline continues working while
- * migration proceeds". An adapter that quietly dropped a field would still
- * compile, would still pass every scenario that did not happen to depend on
- * that field, and would fail on a device — which is the failure mode the whole
- * replay corpus exists to remove.
- *
- * So the coverage assertion is made **by reflection over `SessionSnapshot`
- * itself** rather than by a hand-written field list. A `copy(` that adds a
- * 28th field to the snapshot and forgets the adapter breaks this test on the
- * next run instead of on the next release.
- */
 class FinalizedTrackAdapterTest {
 
 	/**
@@ -238,13 +222,7 @@ class FinalizedTrackAdapterTest {
 
 	@Test
 	fun `YouTube Music is the source that trusts its own artist field`() {
-		// The one capability with a decided behavioural effect today
-		// (`<redacted-private-path>` §3.2), read off the descriptor rather than by
-		// asking which package this is.
-		// `browserEvidenceEnabled` goes with the package: production writes
-		// `!isNative && …`, so a native snapshot claiming browser evidence is not a
-		// snapshot the probe can produce, and `SourceDescriptor` now refuses it.
-		// The maximal fixture stays maximal for a *valid* snapshot.
+
 		val music = FinalizedTrack.from(
 			fullyPopulated().copy(
 				packageName = YouTubeProbe.YOUTUBE_MUSIC_PACKAGE,

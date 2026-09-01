@@ -160,24 +160,6 @@ class AppNavigationTest {
 		}
 	}
 
-	/**
-	 * The hazard a page index poses, and why moving `Log` to the end removed it.
-	 *
-	 * Caught on the device on 2026-08-25, while `Log` sat fourth: the model was
-	 * already right, and the screen reintroduced the drift anyway by letting
-	 * Compose remember a pager *index* across the list changing under it. Index
-	 * 3 meant `Settings` with the log off and `Log` with it on, so carrying it
-	 * turned the log back on and jumped the screen to `Log`.
-	 *
-	 * `Log` is now last, so every ordinary destination keeps its index either
-	 * side of the toggle and a carried page number can no longer land on a
-	 * different screen. That is asserted here as the property it now is.
-	 *
-	 * The pager repair in `MainScreen` stays regardless. This guarantee comes
-	 * from *where the conditional destination sits*, not from the wiring, and
-	 * the next conditional destination added anywhere but the end would bring
-	 * the drift straight back.
-	 */
 	@Test
 	fun `a page index means the same destination either side of the toggle`() {
 		val off = AppNavigation.destinations(eventLogEnabled = false)

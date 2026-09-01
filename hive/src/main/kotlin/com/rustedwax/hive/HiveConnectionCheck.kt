@@ -48,11 +48,6 @@ class HiveConnectionCheck(
 			}
 	}
 
-	/**
-	 * @param username the saved Hive account, or null when none is saved.
-	 * @param derivedPublicKey the `STM…` public posting key derived from the
-	 * stored key, or null when no key is stored or it could not be parsed.
-	 */
 	fun run(username: String?, derivedPublicKey: String?): Report {
 		val node = runCatching { headBlock() }
 

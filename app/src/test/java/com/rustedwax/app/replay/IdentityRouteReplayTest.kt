@@ -12,16 +12,6 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The order the identity routes are asked in, and what each refusal means.
- *
- * `<redacted-private-path>` §3 names this the least well specified part of the
- * system: routes return a nullable resolution plus a prose refusal, and control
- * flow occasionally reads that prose to decide whether to stop or fall through.
- * Phase 6 replaces it with a sealed outcome. These scenarios pin the *observable
- * consequences* of the current ordering first, so that replacement can be shown
- * to preserve them rather than merely to compile.
- */
 class IdentityRouteReplayTest : ReplayScenarioTest() {
 
 	private fun facts(videoId: String, title: String, author: String, lengthSeconds: Long) =

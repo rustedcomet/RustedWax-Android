@@ -3,26 +3,6 @@ package com.rustedwax.app.replay
 import com.rustedwax.core.*
 import com.rustedwax.app.detect.NativePreResolvedRoute
 
-/**
- * One thing that happened, in the order it happened.
- *
- * This is the source-neutral vocabulary `<redacted-private-path>` §"Target
- * architecture" names as `PlaybackEvent` — the language the future adapters
- * will emit and the future reducer will consume. Writing it now, before any
- * production code moves, is deliberate: it forces the scenario corpus to
- * describe *observations* rather than internal state, so a trace stays valid
- * across the migration that rewrites everything underneath it.
- *
- * Two rules hold every event here to that standard:
- *
- *  - **No verdicts.** There is a [SessionMetadata] event and a [UrlObserved]
- *    event; there is no "identity became Confirmed" event. Identity is derived
- *    by production code from these observations, so a scenario cannot
- *    accidentally assert its own premise.
- *  - **No package names in the shared shapes.** Which source a trace is for is
- *    stated once, in [PlaybackTrace]. An event that had to say "if Brave" would
- *    be re-importing the coupling the migration exists to remove.
- */
 sealed interface PlaybackEvent {
 
 	enum class Surface {
@@ -120,13 +100,6 @@ sealed interface PlaybackEvent {
 		val positionMs: Long = 0,
 	) : PlaybackEvent
 
-	/**
-	 * The Short is still playing but its progress surface is gone —
-	 * picture-in-picture, or a player YouTube drew no seekbar for.
-	 *
-	 * @param inferredMs how much of the elapsed time was credited from
-	 * wall-clock rather than measured, once inference has run.
-	 */
 	data class ProgressSurfaceLost(
 		/** Elapsed wall time covered by repeated production-style observer polls. */
 		val inferredMs: Long = 0,
@@ -144,7 +117,7 @@ sealed interface PlaybackEvent {
 	 * Android destroyed and rebuilt the media session mid-listen.
 	 *
 	 * Measurement and the frozen listen start survive; the transport does not.
-	 * This is the event behind the audit's "no duplicate transaction after
+	 * This is the event behind the "no duplicate transaction after
 	 * MediaSession recreation" gate.
 	 */
 	data object SessionRecreated : PlaybackEvent

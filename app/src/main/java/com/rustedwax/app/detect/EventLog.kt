@@ -85,17 +85,6 @@ object EventLog {
 		if (asynchronousDisk) diskExecutor.execute(block) else block()
 	}
 
-	/**
-	 * Whether anything at all may be written — `<redacted-private-path>` §4.2.
-	 *
-	 * Off means *off*: no file, no ring buffer, no `Log.d`. Not "hidden from the
-	 * UI while still accumulating", because a log that exists can be exported,
-	 * read by anyone holding the phone, or handed over intact. A switch that
-	 * quietly keeps writing is worse than one that was never offered.
-	 *
-	 * Starts **off**. A fresh install does not log until asked, and a process
-	 * rebuilt before [init] has run must not write anything in the gap.
-	 */
 	@Volatile
 	private var loggingEnabled: Boolean = false
 
@@ -266,9 +255,6 @@ object EventLog {
 		retention = LogRetention(clock = now)
 		file = target
 
-		// Not `applyPolicy`: that erases only on a *transition* to off, and an
-		// install whose switch was already off must not inherit a file written
-		// by the run before it. Off means the file is empty, unconditionally.
 		loggingEnabled = enabled
 		if (!enabled) {
 			_lines.value = emptyList()

@@ -20,11 +20,14 @@ Composited at 0 degrees the two layers reproduce the source exactly, which is
 the check at the bottom of this file.
 """
 
+from pathlib import Path
+
 import numpy as np
 from PIL import Image
 
-SRC = "<redacted-local-path>/Desktop/git/rustedwax/app/src/main/res/drawable-nodpi/rustedwax_mark.png"
-OUT = "<redacted-local-path>/Desktop/git/rustedwax/app/src/main/res/drawable-nodpi"
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "app/src/main/res/drawable-nodpi"
+SRC = OUT / "rustedwax_mark.png"
 
 src = np.asarray(Image.open(SRC).convert("RGBA")).astype(np.float32)
 h, w, _ = src.shape
@@ -160,9 +163,9 @@ safe = np.maximum(S, 1e-3)
 c = np.where(S > 0.02, (src[..., :3] - (1 - S) * disc_rgb) / safe, src[..., :3])
 overlay = np.concatenate([np.clip(c, 0, 255), (S[..., 0] * src[..., 3])[..., None]], axis=2)
 
-Image.fromarray(disc.round().clip(0, 255).astype(np.uint8)).save(f"{OUT}/rustedwax_disc.png")
+Image.fromarray(disc.round().clip(0, 255).astype(np.uint8)).save(OUT / "rustedwax_disc.png")
 Image.fromarray(overlay.round().clip(0, 255).astype(np.uint8)).save(
-    f"{OUT}/rustedwax_lettering.png"
+    OUT / "rustedwax_lettering.png"
 )
 
 # ── the check ────────────────────────────────────────────────────────────

@@ -4,46 +4,10 @@ import com.rustedwax.core.*
 import com.rustedwax.core.PlaybackSourceCapabilities
 import com.rustedwax.hive.HiveScrobblePayload
 
-/**
- * What one source can be relied on to publish.
- *
- * ## Why this exists
- *
- * `ScrobbleRules` is dense with YouTube-specific reasoning — the 10-second
- * Shorts floor, the unlisted-video ad heuristic, watch-page proof. None of it
- * describes a source like Spotify, which publishes a real track id, clean
- * metadata and no ads inside the session. Without a descriptor, every new
- * platform adds a branch to `decide()`, and the rules stop being readable as
- * rules. Web-scrobbler's `Connector` object is the same pattern: each source
- * declares what it provides, and the shared logic reads the declaration.
- *
- * This is deliberately a *description*, not a strategy object. It answers
- * questions about a source; it never decides anything itself. That keeps the
- * decisions in one place where they can be read end to end.
- *
- * ## The one rule that already has teeth
- *
- * [trustsMetadataArtist] is `<redacted-private-path>` §3.2 in one field. The YouTube
- * **app** publishes the *channel* in the MediaSession artist slot; YouTube
- * **Music** publishes a real artist. One rule covering both packages was
- * correct for one of them and wrote the channel on-chain as the artist for the
- * other:
- *
- * ```
- * TITLE:  Snoop Doggy Dogg - Intro
- * ARTIST: King Of Rap          ← the channel
- *   → broadcast as artist "King Of Rap", title "Snoop Doggy Dogg - Intro"
- * ```
- *
- * Pano reaches the same split by package list: every YouTube fork is in
- * `DEFAULT_IGNORE_ARTIST_META_WITHOUT_FALLBACK`, and YouTube Music deliberately
- * is not.
- */
 data class SourceProfile(
 	/** The installed source package itself proves which service is playing. */
 	val packageProvesSource: Boolean = false,
 
-	/** This source owns a separately observed foreground short-form surface. */
 	val presentsForegroundShorts: Boolean = false,
 
 	/** The source publishes separated music work and credit metadata. */
@@ -129,7 +93,7 @@ data class SourceProfile(
 		/**
 		 * The profile describing the package a session belongs to.
 		 *
-		 * Answered by that source's own adapter since Phase 4. The YouTube Music
+		 * Answered by that source's own adapter. The YouTube Music
 		 * split used to be stated here and repeated as a package-specific check at
 		 * call site; it is now declared once, by [YouTubeMusicAdapter], and read
 		 * everywhere else. Two declarations of one capability is how the §3.2 artist
@@ -152,7 +116,7 @@ data class SourceProfile(
 		 * lets a future source disagree on one of them without inheriting the other
 		 * three.
 		 *
-		 * Since Phase 4 the answers are the adapters' own declarations rather than a
+		 * The answers are the adapters' own declarations rather than a
 		 * second copy of them here. The replay harness and the device suite still
 		 * call this, and calling it now reaches exactly the capabilities production
 		 * gives that package — which is the property a second table cannot have.

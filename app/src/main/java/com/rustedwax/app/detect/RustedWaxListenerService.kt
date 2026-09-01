@@ -13,33 +13,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
-/**
- * Notification listener — and, since Phase 3, the host for detection itself.
- *
- * Three jobs:
- *
- *  1. Hold the Notification Access grant. [android.media.session.MediaSessionManager.getActiveSessions]
- *     requires the caller to name an *enabled* listener component; that grant is
- *     Android's gate on reading other apps' media sessions.
- *
- *  2. Harvest the page origin from browser media notifications. Phase 0 found
- *     Chromium publishes no URI metadata on the media session (<redacted-private-path>, Q3),
- *     so the notification's sub-text — which Chromium sets to the origin, e.g.
- *     "youtube.com" — is our remaining way to know which site is playing.
- *
-	 *  3. **Run the probe and the finalization runtime.** The plan called for a
- *     foreground service, but that turned out to be the wrong tool: a
- *     NotificationListenerService is already bound and kept alive by the system
- *     for as long as the grant is held. Hosting detection here means no
- *     persistent notification, no `foregroundServiceType` wrangling, and none
- *     of Android 15's data-sync runtime caps — and it's how established
- *     scrobblers do it. The trade is that lifetime is the system's call, so
- *     [onListenerConnected] must be able to (re)build everything from scratch.
- *
- * Scope discipline: notification contents remain limited to target browsers.
- * Native opt-ins read MediaSession metadata/state through Notification Access,
- * but never inspect the native apps' notification contents.
- */
 class RustedWaxListenerService : NotificationListenerService() {
 
 	private var probe: SessionProbe? = null
@@ -221,12 +194,7 @@ class RustedWaxListenerService : NotificationListenerService() {
 			text = text,
 		)
 		evidenceCoordinator?.putNotification(SourceSessionId(pkg, null), hint)
-		// §4.1. The hint is still *kept* — it is how a browser session is proven
-		// to be YouTube at all — but it is only ever *written down* once it says
-		// YouTube. Measured 2026-08-10: playing an unrelated video in Chrome put
-		// `host=w3schools.com … title="w3schools.com/html/mov_bbb.mp4"` in the
-		// exportable log, which is the page title leak this section removes,
-		// arriving by a second route after the first was closed.
+
 		if (YouTubeAdDetector.shouldScanHost(hint.host)) {
 			EventLog.append("notification", "$pkg → ${hint.describe()}")
 		}

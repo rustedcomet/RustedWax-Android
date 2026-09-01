@@ -20,11 +20,7 @@ class ScrobbleRulesTest {
 
 	@Test
 	fun `a lost progress surface refuses without claiming a percentage`() {
-		// Measured 2026-08-05 in picture-in-picture: the accessibility tree keeps
-		// the Shorts root, player and time bar but loses the SeekBar, and
-		// YouTube's MediaSession reports STATE_NONE with position 0. Nothing can
-		// be measured, which is not the same fact as "0% was played" — and
-		// reporting it as the latter hid the cause for most of a day.
+
 		val lost = ScrobbleRules.decide(
 			playedMs = 0,
 			durationMs = fourMinutes,
@@ -84,7 +80,7 @@ class ScrobbleRulesTest {
 
 	@Test
 	fun `ads and other short items are ignored`() {
-		// The 6-second "track" observed in PHASE0 run 1.
+
 		val d = ScrobbleRules.decide(playedMs = 6_000, durationMs = 6_061)
 		assertFalse(d.shouldScrobble)
 		assertTrue(d.skippedBecause!!.contains("under the 30s minimum"))
@@ -197,13 +193,6 @@ class ScrobbleRulesTest {
 		assertEquals(decide(), decide())
 	}
 
-	// region short-clip floor
-	//
-	// Every 30s-floor rejection in the 2026-07-29 session was a `/shorts/` URL
-	// and none were `/watch`, so the exception is scoped by path. It is granted
-	// on proof the video exists rather than on its length — see
-	// ScrobbleRules.SHORT_MIN_DURATION_SECONDS.
-
 	private fun short(
 		playedMs: Long,
 		durationMs: Long,
@@ -219,7 +208,7 @@ class ScrobbleRulesTest {
 
 	@Test
 	fun `a verified short scrobbles below thirty seconds`() {
-		// The single most common blocked length in the field session.
+		// A representative length near the ordinary-content floor.
 		val d = short(playedMs = 10_000, durationMs = 10_000)
 		assertEquals(listOf(100), d.percentages)
 	}
@@ -232,7 +221,7 @@ class ScrobbleRulesTest {
 	}
 
 	/**
-	 * The one clip in the field session that a 10-second floor still rejects.
+	 * A verified Short below the 10-second floor is still rejected.
 	 * Deliberate: below this the media session's own timings are noise.
 	 */
 	@Test
@@ -265,13 +254,6 @@ class ScrobbleRulesTest {
 		assertFalse("length is not proof", d.shouldScrobble)
 	}
 
-	/**
-	 * The regression, pinned exactly. On 2026-07-29 an 18-second shorts-feed ad
-	 * reached the chain: it was served at `m.youtube.com/shorts/CYgQQqvwwsY`, a
-	 * genuine `/shorts/` URL, and its watch page resolved with
-	 * `category=People & Blogs`. Resolving proved too little; being *listed* is
-	 * what separates it from a real short.
-	 */
 	@Test
 	fun `the shorts-feed ad that reached the chain is now rejected`() {
 		val d = short(playedMs = 19_000, durationMs = 18_000, unlisted = true)
@@ -401,7 +383,7 @@ class ScrobbleRulesTest {
 
 	@Test
 	fun `ordinary end timing overrun is not labelled a loop`() {
-		// `played 12s of 10s` — the highest real overrun in the field session.
+		// `played 12s of 10s` exercises bounded end-of-track overrun.
 		val d = short(playedMs = 12_000, durationMs = 10_000)
 		assertEquals(listOf(100), d.percentages)
 		assertFalse(d.probableLoop)
@@ -464,7 +446,7 @@ class ScrobbleRulesTest {
 
 	/**
 	 * A null duration is worth a lookup — 10 shorts were lost to it in the
-	 * field session — but only when enough was played that some admissible
+	 * regression fixture — but only when enough was played that some admissible
 	 * length could clear the threshold. 165 of 198 "no duration" finalizations
 	 * had under three seconds of play time and were page-load transitions.
 	 */
@@ -481,11 +463,7 @@ class ScrobbleRulesTest {
 
 	@Test
 	fun `prefilter refuses a lost progress surface without quoting a percentage`() {
-		// The shipped defect (FIELD §3.2): the honest wording was added to
-		// decide(), but a sub-threshold Short is rejected here and never reaches
-		// decide() at all — so the log went on printing "played 0%, below 60%
-		// threshold" for a session that was never measured. This is the common
-		// path, and it is the one the field log actually showed.
+
 		val why = ScrobbleRules.prefilter(
 			playedMs = 0,
 			durationMs = fourMinutes,
@@ -540,11 +518,6 @@ class ScrobbleRulesTest {
 		assertEquals(listOf(50), d.percentages)
 	}
 
-	/**
-	 * The 160% double-listen is for songs. A looping short broadcast the same
-	 * clip twice in one block (observed on-chain 2026-07-24, percents 100+76);
-	 * videos are watched, not re-listened, so they cap at one transaction.
-	 */
 	@Test
 	fun `double listen applies to songs only`() {
 		val double = listOf(100, 76)

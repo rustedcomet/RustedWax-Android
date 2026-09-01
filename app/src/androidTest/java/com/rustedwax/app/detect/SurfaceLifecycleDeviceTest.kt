@@ -16,42 +16,6 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/**
- * Real foreground, background and minimised transitions, on the device.
- *
- * ## The gate
- *
- * `<redacted-private-path>` "Surface transitions" moves real foreground/background
- * transitions through the production reducer to the **Phase 3** acceptance gate,
- * and says the modelled half must be retired rather than kept alongside it.
- * `SurfaceTransitionReplayTest` states in its own header that
- * foreground/background/minimised are modelled because "no production input
- * exists" — a `SurfaceChanged` marker is recorded by the replay harness and never
- * dispatched to anything.
- *
- * That is an honest description of a JVM fixture and it is not evidence about
- * Android. This file performs the transitions for real:
- *
- * ```text
- * am-level task/window change  ->  real Activity lifecycle
- *   while a real MediaSession keeps playing
- *   ->  production SessionProbe callbacks -> reducer -> SessionSnapshot -> UI
- * ```
- *
- * ## What it proves, and the one thing it cannot
- *
- * It proves the invariant the modelled half asserted structurally: an ordinary
- * MediaSession's measurement is **unaffected** by the app moving between
- * foreground, background and minimised — the clock keeps running, nothing
- * finalizes falsely, and the listen that eventually ends carries the whole span.
- *
- * It cannot prove native picture-in-picture. PiP inference is reached only for
- * `YouTubeProbe.YOUTUBE_PACKAGE` through `NativeShortsObserver`, which is fed by
- * an accessibility service over the installed YouTube app. Sessions created here
- * belong to this app and resolve to browser capabilities, where
- * `supportsPictureInPictureInference` is false by design. Nothing in this file
- * claims otherwise; that gate is reported separately as NOT ESTABLISHED.
- */
 @RunWith(AndroidJUnit4::class)
 class SurfaceLifecycleDeviceTest {
 
@@ -320,14 +284,6 @@ class SurfaceLifecycleDeviceTest {
 		)
 	}
 
-	/**
-	 * The UI state the Now card renders survives the transitions too.
-	 *
-	 * `SessionProbe.sessions` is what `MainActivity` collects through
-	 * `ProbeHolder`. A listen that measured correctly but stopped being published
-	 * would look, to the person holding the phone, exactly like a listen that had
-	 * ended.
-	 */
 	@Test
 	fun the_published_ui_state_survives_real_surface_changes() {
 		val session = newSession("surface-ui")

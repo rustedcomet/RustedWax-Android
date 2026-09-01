@@ -7,7 +7,6 @@ import org.junit.Test
 
 class ExclusivePlaybackArbitrationTest {
 
-	/** Exact device shape at 20:09:48 on 2026-08-14. */
 	@Test
 	fun `native YouTube progress ends a proven positionless Brave listen`() {
 		val brave = browser(

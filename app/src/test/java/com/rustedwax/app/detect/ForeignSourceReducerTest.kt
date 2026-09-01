@@ -6,34 +6,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * A source that is not YouTube, through the shared reducer, unmodified.
- *
- * `<redacted-private-path>` makes the product requirement explicit: Spotify,
- * Netflix and SoundCloud are planned, and the Phase 2/3 boundary has to be
- * source-neutral enough that a new application supplies an adapter and
- * capabilities without reconstructing shared measurement or finalization.
- * `<redacted-private-path>` states the same thing as an acceptance gate — "a fake
- * non-YouTube source traverses the shared pipeline without platform branches or
- * YouTube-only identity requirements in core code".
- *
- * This is the reducer half of that fixture, and it is deliberately hostile to
- * the assumption it is testing:
- *
- *  - the item id is a Spotify-shaped URI, not eleven base64 characters;
- *  - no `videoId`, no watch URL, no YouTube host appears anywhere;
- *  - the capabilities are a combination **no YouTube package produces** — a
- *    source that republishes shorter durations but has no PiP inference — so the
- *    reducer cannot be passing by accidentally matching a known profile.
- *
- * ## What this does not establish
- *
- * The reducer only. `IdentityEvidence` and `FinalizedTrack` still carry
- * `YouTubeProbe.Identity` and `ResolverContext`, so a foreign source cannot yet
- * traverse *finalization*. That is reported as an open gate rather than implied
- * to be closed by this file: the measurement and lifecycle core is source-
- * neutral, and the identity boundary above it is not yet.
- */
 class ForeignSourceReducerTest {
 
 	/**
@@ -155,15 +127,6 @@ class ForeignSourceReducerTest {
 		assertTrue("the listen was not marked finalized", transition.state.finalized)
 	}
 
-	/**
-	 * The reducer's own source file names no platform.
-	 *
-	 * An assertion rather than a convention, because the failure mode is a single
-	 * `if (packageName == ...)` added under deadline. The reducer is the shared
-	 * core every future adapter runs through; a platform name in it is the
-	 * boundary violation `<redacted-private-path>` Phase 8 eventually enforces with
-	 * module structure, checked here where it can be checked today.
-	 */
 	@Test
 	fun `the reducer source contains no Android package name or platform brand`() {
 		val source = java.io.File("../core/src/main/kotlin/com/rustedwax/core/PlaybackReducer.kt")

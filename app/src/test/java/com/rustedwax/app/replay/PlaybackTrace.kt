@@ -28,13 +28,6 @@ import com.rustedwax.app.detect.UrlEvidence
 import com.rustedwax.app.detect.YouTubeProbe
 import com.rustedwax.app.detect.resolverContextWithObservedUrl
 
-/**
- * Which source a trace is for. The only place a package name appears.
- *
- * `<redacted-private-path>` §1 identifies scattered `isNative` checks as a root
- * cause; naming the source once, here, is the harness holding itself to the
- * boundary rule the migration is heading toward.
- */
 enum class ReplaySource(val packageName: String, val label: String) {
 	BRAVE("com.brave.browser", "Brave"),
 	CHROME("com.android.chrome", "Chrome"),
@@ -45,50 +38,6 @@ enum class ReplaySource(val packageName: String, val label: String) {
 	val isNative: Boolean get() = SourceRegistry.packageProvesSource(packageName)
 }
 
-/**
- * Turns an ordered event trace into the `SessionSnapshot`s finalization sees.
- *
- * ## What is real here and what stands in for a device — read this first
- *
- * Since Phase 3 this class no longer models the playback state machine. Every
- * event that changes measurement or lifecycle is handed to the **production
- * [PlaybackReducer]**, and the transitions it returns are applied here exactly
- * as `MediaSessionDriver` applies them:
- *
- * | Concern | Runs |
- * |---|---|
- * | played time, speed scaling, the paused clock | `PlaybackReducer` |
- * | track transitions, refinement, tab-title handling | `PlaybackReducer` |
- * | session destruction, continuation, progress carry | `PlaybackReducer` + `TrackProgressCarry` |
- * | finalization decisions and the freeze | `PlaybackReducer` |
- * | picture-in-picture credit and its gate | `PlaybackReducer` + `PipPlaybackInference` |
- * | identity, latch, corroboration, resolver context | `YouTubeProbe`, `SessionProbe` |
- *
- * `<redacted-private-path>` recorded the previous position plainly: "until Phase 3
- * extracts the deterministic reducer, a divergence between the model and `Watch`
- * would show up as a passing replay and a failing device." That model is gone
- * rather than kept alongside the reducer, which is what the audit asks for.
- *
- * ## What still stands in for a device, and why
- *
- * Three things, none of them a second copy of a decision:
- *
- *  - **The metadata bundle.** `MediaMetadata` does not exist on the JVM, so a
- *    published bundle is assembled here from the fields an event carries. What
- *    the reducer is handed is the same [TrackIdentity] the probe builds from a
- *    real bundle. Null fields mean "not published in this bundle", and the
- *    running bundle is merged the way a session republishing partial metadata
- *    behaves.
- *  - **Timers.** There is no `Handler`, so the two delayed effects —
- *    the stopped-replacement grace and the continuation deadline — are recorded
- *    rather than scheduled. A scenario that wants the deadline to fire says so
- *    with an explicit event. This is stated rather than hidden: a trace cannot
- *    prove anything about *when* those timers fire.
- *  - **The foreground Shorts surface.** `ForegroundShortTracker` is separate
- *    production code with its own direct tests; the Shorts overlay here supplies
- *    the snapshot fields that route produces rather than re-deriving them. It is
- *    not part of the reducer and is not claimed to be.
- */
 class PlaybackTrace(
 	val source: ReplaySource,
 	private val clock: ReplayClock,
@@ -195,14 +144,6 @@ class PlaybackTrace(
 	 */
 	private var shortHasNoSeekbar = false
 
-	/**
-	 * The Short's player stopped being readable — the picture-in-picture case.
-	 *
-	 * Distinct from [shortHasNoSeekbar] because the *evidence* is distinct: this
-	 * is a poll that could not read the player at all, which on a device is
-	 * `NativeShortsObserver.Event.Missing`. Nothing further is observed unless a
-	 * trace says one was, so wall clock passing in this state credits nothing.
-	 */
 	private var shortProofMissing = false
 
 	/** The ad label the Shorts feed showed for this item, when it showed one. */
@@ -413,9 +354,7 @@ class PlaybackTrace(
 			}
 
 			is PlaybackEvent.UrlObserved -> {
-				// Through the real store, so generation numbering — the thing that
-				// decides whether a candidate is "the same observed generation" —
-				// is computed by the code that computes it in the field.
+
 				val stored = UrlEvidence.put(
 					source.packageName,
 					UrlEvidence.Evidence(
@@ -660,10 +599,7 @@ class PlaybackTrace(
 	 *    what the device does and the only way the caps mean anything.
 	 */
 	private fun advanceForegroundShort(millis: Long) {
-		// A poll that could not read the player is not a poll that keeps arriving.
-		// Wall clock passing after one credits nothing, because nothing observed
-		// it — a trace says how much was inferred, on the event that says the
-		// surface went away.
+
 		if (shortProofMissing) {
 			clock.advance(millis)
 			return
@@ -1084,17 +1020,6 @@ class PlaybackTrace(
 
 	// ---- the freeze ------------------------------------------------------------
 
-	/**
-	 * Build the snapshot the engine sees.
-	 *
-	 * Called from the reducer's own `FreezeAndReport` effect, so *when* a listen
-	 * freezes is a production decision. What is assembled here is the transport
-	 * object, from the reducer's measurement and this trace's evidence.
-	 *
-	 * The freeze is the architectural strength `<redacted-private-path>` says to
-	 * keep: after this returns, no later URL, notification or metadata can reach
-	 * back and change what this listen was.
-	 */
 	private fun freeze() {
 		val durationMs = listen.establishedDurationMs(bundle.durationMs)
 		val identity = continuationVerdict ?: lastStableIdentity ?: selectedIdentity()

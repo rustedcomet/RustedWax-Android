@@ -14,33 +14,6 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The shadow boundary, and what it is allowed to leave behind.
- *
- * ## What was wrong with the previous arrangement
- *
- * Shadow mode used to be a `PayloadBroadcaster` that recorded the payload and
- * returned `Rejected`. That is not a boundary — it is the **live** pipeline run
- * to completion, with one seam declining at the very end. Everything upstream of
- * the broadcaster happened for real: the dedup claim was taken, the retry queue
- * was consulted, the Now and Not-logged lists were written, and the event log
- * recorded a run that never occurred. The arrangement tested how the engine
- * handles a rejection, and it needed a *second* fake (`ShadowDedupClaims`) to
- * undo one of the effects it had already allowed — which is the shape of a
- * design that is holding something back rather than not doing it.
- *
- * `FinalizationRuntime.finalizeInShadow` is the replacement, and it is defined by
- * what it cannot reach: dispatch is never entered, so there is nothing for a
- * broadcaster to decline. Every case below is one of the effects the audit's
- * gate names.
- *
- * ## What is compared
- *
- * `<redacted-private-path>`'s parity list, in full: finalized identity,
- * measurement, track and source instance, the ordered terminal outcomes, the
- * serialized payload bytes, dedup decisions, queue/retry/dispatch effects,
- * shared evidence, the event log, and the recent/skipped UI history.
- */
 class ShadowBoundaryReplayTest : ReplayScenarioTest() {
 
 	private val videoId = "dQw4w9WgXcQ"
@@ -169,9 +142,7 @@ class ShadowBoundaryReplayTest : ReplayScenarioTest() {
 
 	@Test
 	fun `a shadow run leaves the shared evidence stores exactly as it found them`() {
-		// Finalization does not write these at all, which is the point: the claim
-		// is checked rather than assumed, because `<redacted-private-path>` §2 is
-		// precisely about evidence with no single owner.
+
 		val harness = harness(shadow = true)
 		harness.feed(watched().dropLast(1))
 		val before = evidenceFingerprint()
@@ -200,7 +171,7 @@ class ShadowBoundaryReplayTest : ReplayScenarioTest() {
 	// ---- and that it decides the same things ----------------------------------
 
 	/**
-	 * The parity comparison the audit's gate asks for, over every dimension it
+	 * The parity comparison covers every observable dimension the boundary
 	 * names.
 	 *
 	 * Two runs of the same trace over the same reducer: one shadow, one live.

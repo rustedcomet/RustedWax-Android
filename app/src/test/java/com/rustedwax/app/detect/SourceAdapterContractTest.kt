@@ -14,26 +14,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
-/**
- * The Phase 4 adapter contract, proved before anything is routed through it.
- *
- * `<redacted-private-path>` §1 lists five properties the contract has to
- * establish, and each is a test below:
- *
- *  1. an observation yields the expected neutral reducer input and/or declared
- *     capability;
- *  2. an adapter cannot broadcast, queue, claim dedup, mutate settings or
- *     finalize;
- *  3. two adapters coexist without shared mutable selection state;
- *  4. a fake non-YouTube adapter reaches the real reducer without a core edit;
- *  5. swapping source observations changes or refuses the result, so no test
- *     here can pass while bypassing the adapter.
- *
- * Everything asserted is a production value — a [TrackIdentity] the reducer
- * actually consumes, a [ListenState] the real [PlaybackReducer] actually
- * produced, a store the real evidence singletons actually hold. No source
- * strings, no counts alone, no hand-built model.
- */
 class SourceAdapterContractTest {
 
 	/** A metadata bundle without Android, exactly as the production readers see it. */
@@ -106,17 +86,6 @@ class SourceAdapterContractTest {
 		)
 	}
 
-	/**
-	 * Measured on the Galaxy A36 with YouTube Music's Song/Video toggle. The
-	 * player republishes one selected work as two MediaSession presentations:
-	 *
-	 *  - video: `Mr. Vegas - Buss It Open (Official Video)`, 208979 ms, no album;
-	 *  - song: `Buss It Open`, 196533 ms, with the album arriving one callback later.
-	 *
-	 * Those callbacks are a rendering-mode change, not three listens. This drives
-	 * the production adapter output through the production reducer so a helper-only
-	 * normalization cannot satisfy the regression.
-	 */
 	@Test
 	fun `YouTube Music Song Video toggle remains one measured listen`() {
 		val video = music.trackIdentity(
@@ -521,15 +490,6 @@ class SourceAdapterContractTest {
 		)
 	}
 
-	/**
-	 * The Shorts surface adapter is a pure translation and cannot finalize.
-	 *
-	 * It used to return a reading carrying the active `SessionSnapshot` and a list
-	 * of finalized ones, which meant a source could hand the host a finished listen
-	 * — the finalization extraction `<redacted-private-path>` puts in Phase 7. The
-	 * translation vocabulary now cannot express one, and this asserts it on the
-	 * returned values rather than on the class.
-	 */
 	@Test
 	fun `the Shorts adapter translates observations and can express no finalized listen`() {
 		val shorts = NativeShortsAdapter()
@@ -670,12 +630,12 @@ class SourceAdapterContractTest {
 	/**
 	 * The ignored-package diagnostic must say what the frozen implementation said.
 	 *
-	 * Before Phase 4 the text was chosen by `YouTubeProbe.isNativePackage`: only a
+	 * The legacy text was chosen by `YouTubeProbe.isNativePackage`: only a
 	 * native package could be ignored for "the toggle is off", because only a
 	 * native package has a toggle of its own. A browser rejected by the YouTube
 	 * master switch read "not a supported source package".
 	 *
-	 * The Phase 4 registry answered this by asking whether `forPackage` returned
+	 * The adapter registry answered this by asking whether `forPackage` returned
 	 * anything — which is true for Brave and Chrome — so every rejected browser
 	 * session started claiming a native toggle it does not have. Playback
 	 * measurement is unaffected, which is exactly why it needs a test: it is a
@@ -728,13 +688,6 @@ class SourceAdapterContractTest {
 		assertNull(SourceRegistry.forPackage("com.spotify.music", "Spotify"))
 	}
 
-	/**
-	 * YouTube Music declares the artist trust, and nothing else does.
-	 *
-	 * `<redacted-private-path>` §3.2: the YouTube app publishes the *channel* in the
-	 * artist slot, and one rule covering both packages wrote "King Of Rap"
-	 * on-chain as the performer of a Snoop Dogg track.
-	 */
 	@Test
 	fun `only the YouTube Music adapter declares trusted artist metadata`() {
 		assertTrue(music.profile.trustsMetadataArtist)
@@ -858,15 +811,6 @@ class SourceAdapterContractTest {
 		override fun onPackageStateReset() = Unit
 	}
 
-	/**
-	 * The fake source's observations drive the **shipping** reducer to a real
-	 * finalization, with no edit to the reducer or to any core type.
-	 *
-	 * This is `<redacted-private-path>`'s Phase 4 requirement — the adapter contract
-	 * "must also accept a fake non-YouTube music/video source without changes to
-	 * the reducer" — asserted on reducer state and effects rather than on the fact
-	 * that the class compiles.
-	 */
 	@Test
 	fun `a fake non-YouTube adapter drives the shipping reducer to one finalization`() {
 		val adapter = FakePodcastAdapter()

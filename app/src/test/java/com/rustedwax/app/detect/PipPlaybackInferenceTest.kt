@@ -118,12 +118,6 @@ class PipPlaybackInferenceTest {
 		assertEquals(0, pip.observe(4_000, playing = true).creditedMs)
 	}
 
-	/**
-	 * Measured 2026-08-08: holding a Short to play it at 2× strips the overlay,
-	 * so nothing is measurable and this inference is the only thing crediting —
-	 * at 1×, which halves a listen that was watched in full. YouTube publishes
-	 * the rate on screen as `2x`; crediting it is reading evidence, not guessing.
-	 */
 	@Test
 	fun `the observed speed chip scales what wall clock is worth`() {
 		// The first observation only drops the anchor; the second is the first
@@ -174,7 +168,7 @@ class PipPlaybackInferenceTest {
 	}
 	/**
 	 * Why picture-in-picture looks like it works "half the time" — measured on the
-	 * Galaxy A36, 2026-08-19, and it is not a defect.
+	 * a reduced test-device observation, and it is not a defect.
 	 *
 	 * Shorts auto-loop and [ForegroundShortTracker] keeps crediting each loop, so
 	 * `playedSeconds` grows without bound. `proofMissing` builds this inference
@@ -186,7 +180,7 @@ class PipPlaybackInferenceTest {
 	 * moment measured reaches the Short's length, so anything with
 	 * `measuredMs >= durationMs` has already been scored and scrobbled. Device
 	 * evidence for both arms is in
-	 * `<redacted-private-path>` §3.
+	 * a reduced field-derived continuity sequence.
 	 */
 	@Test
 	fun `a Short that already looped past its length arrives with nothing left to credit`() {

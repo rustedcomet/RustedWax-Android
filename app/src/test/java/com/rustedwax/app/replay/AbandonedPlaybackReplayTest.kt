@@ -6,9 +6,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * Synthetic regression for a finished video left active after playback ends.
- */
 class AbandonedPlaybackReplayTest : ReplayScenarioTest() {
 
 	private val videoId = "synthetic01"
@@ -49,7 +46,7 @@ class AbandonedPlaybackReplayTest : ReplayScenarioTest() {
 			album = "Example Track",
 			durationMs = 186_000,
 		),
-		// Position is never published: the field session reported `pos=-1ms` for
+		// Position is never published: the regression fixture keeps `pos=-1ms` for
 		// its entire life, which is what makes loop detection unavailable.
 		PlaybackEvent.PlaybackStateChanged(playing = true),
 	)
@@ -60,7 +57,7 @@ class AbandonedPlaybackReplayTest : ReplayScenarioTest() {
 
 		harness.feed(
 			watching() +
-				// 1h47m on a 3:06 song, which is the synthetic regression shape.
+				// 1h47m on a 3:06 song, reproducing the unbounded-credit failure.
 				PlaybackEvent.Advance(6_421_000) +
 				PlaybackEvent.Finalized("the browser named its tab instead of a track"),
 		)
@@ -145,8 +142,7 @@ class AbandonedPlaybackReplayTest : ReplayScenarioTest() {
 		)
 
 		val snapshot = harness.finalized.single()
-		// With the wrap observed, the loop cap applies and one transaction is sent
-		// for the continuous viewing — which is the existing, correct behaviour.
+
 		assertEquals(true, snapshot.loopDetected)
 		assertEquals(1, harness.broadcasts.size)
 	}

@@ -23,7 +23,6 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** FIELD log 26's stale native bundle, through current production callbacks. */
 class MediaSessionMetadataFreshnessCurrentMirrorTest : ReplayScenarioTest() {
 
 	private val native = YouTubeProbe.YOUTUBE_PACKAGE

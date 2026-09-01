@@ -4,40 +4,51 @@
 # No instrumentation, install, force-stop of RustedWax, settings write, or app
 # data write occurs. Android proves the pinned task; the debug build's structured
 # Phase3Telemetry proves the exact immutable SessionSnapshot before and after.
-# Usage: tools/device/native-pip.sh [serial]
+# Usage: tools/device/native-pip.sh [serial] [videoId]
+# ANDROID_SERIAL may supply the serial. ADB or ANDROID_HOME may locate adb.
 set -eu
 
 serial="${1:-${ANDROID_SERIAL:-}}"
-adb="<redacted-local-path>/Library/Android/sdk/platform-tools/adb"
+video="${2:-}"
+adb="${ADB:-}"
 pkg="com.rustedwax.app"
 youtube="com.google.android.youtube"
-video="tSi6Dn1H36Y"
 prefs="rustedwax_keys.xml rustedwax_settings.xml rustedwax_youtube_session.xml"
 
 say() { printf '%s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 field() { printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | tail -1; }
 telemetry() {
-	$adb -s "$serial" logcat -d -s RustedWaxPhase3:I '*:S' 2>/dev/null |
+	"$adb" -s "$serial" logcat -d -s RustedWaxPhase3:I '*:S' 2>/dev/null |
 		sed -n 's/^.*kind=/kind=/p'
 }
 snapshots() { telemetry | grep '^kind=snapshot ' || true; }
+
+[ -n "$serial" ] || fail "provide a device serial or set ANDROID_SERIAL"
+[ -n "$video" ] || fail "provide a deliberately selected public test video ID"
+if [ -z "$adb" ] && [ -n "${ANDROID_HOME:-}" ]; then
+	adb="$ANDROID_HOME/platform-tools/adb"
+fi
+if [ -z "$adb" ]; then
+	adb=$(command -v adb || true)
+fi
+[ -x "$adb" ] || fail "adb is unavailable; set ADB or ANDROID_HOME"
 state() {
 	for f in $prefs; do
 		printf '%s ' "$f"
-		$adb -s "$serial" shell "run-as $pkg sha256sum shared_prefs/$f 2>/dev/null" |
+		"$adb" -s "$serial" shell "run-as $pkg sha256sum shared_prefs/$f 2>/dev/null" |
 			tr -d '\r' | awk '{print $1}'
 	done
 	printf 'listener '
-	$adb -s "$serial" shell settings get secure enabled_notification_listeners |
+	"$adb" -s "$serial" shell settings get secure enabled_notification_listeners |
 		tr ':' '\n' | grep -c "$pkg" | tr -d '\r' || true
 	printf 'a11y-listed '
-	$adb -s "$serial" shell settings get secure enabled_accessibility_services |
+	"$adb" -s "$serial" shell settings get secure enabled_accessibility_services |
 		tr ':' '\n' | grep -c "$pkg" | tr -d '\r' || true
 	printf 'a11y-master '
-	$adb -s "$serial" shell settings get secure accessibility_enabled | tr -d '\r'
+	"$adb" -s "$serial" shell settings get secure accessibility_enabled | tr -d '\r'
 	printf 'a11y-bound '
-	$adb -s "$serial" shell dumpsys accessibility |
+	"$adb" -s "$serial" shell dumpsys accessibility |
 		sed -n '/[Bb]ound services:{/,/[Cc]rashed services:/p' |
 		grep -c "id=$pkg/" | tr -d '\r' || true
 }
@@ -61,27 +72,27 @@ printf '%s\n' "$before"
 printf '%s' "$before" | grep -qE 'listener [1-9]' || fail "notification access is absent"
 printf '%s' "$before" | grep -q 'a11y-master 1' || fail "accessibility master is not enabled"
 printf '%s' "$before" | grep -q 'a11y-bound 2' || fail "both RustedWax accessibility services are not bound"
-if $adb -s "$serial" shell run-as "$pkg" cat shared_prefs/rustedwax_settings.xml 2>/dev/null |
+if "$adb" -s "$serial" shell run-as "$pkg" cat shared_prefs/rustedwax_settings.xml 2>/dev/null |
 	grep -q 'name="autoScrobble" value="true"'; then
 	fail "auto-scrobble is on; refusing to drive playback that could publish"
 fi
 
-$adb -s "$serial" logcat -c
-$adb -s "$serial" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
-$adb -s "$serial" shell am start -W -a android.intent.action.VIEW \
+"$adb" -s "$serial" logcat -c
+"$adb" -s "$serial" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+"$adb" -s "$serial" shell am start -W -a android.intent.action.VIEW \
 	-d "https://www.youtube.com/watch?v=$video" "$youtube" >/dev/null
 baseline=$(wait_snapshot "") || fail "production telemetry never published a native snapshot"
 token=$(field "$baseline" token)
 [ "$token" != "-1" ] || fail "native snapshot has no track token: $baseline"
 [ "$(field "$baseline" playing)" = "true" ] || fail "native snapshot is not playing: $baseline"
-foreground_activity=$($adb -s "$serial" shell dumpsys activity activities | tr -d '\r')
+foreground_activity=$("$adb" -s "$serial" shell dumpsys activity activities | tr -d '\r')
 printf '%s\n' "$foreground_activity" | grep -q "$video" ||
 	fail "the foreground YouTube task is not $video"
 say "baseline: $baseline"
 
-$adb -s "$serial" shell input keyevent KEYCODE_HOME
+"$adb" -s "$serial" shell input keyevent KEYCODE_HOME
 sleep 3
-activity=$($adb -s "$serial" shell dumpsys activity activities | tr -d '\r')
+activity=$("$adb" -s "$serial" shell dumpsys activity activities | tr -d '\r')
 printf '%s\n' "$activity" | grep -q 'mode=pinned' || fail "Android has no mode=pinned task"
 printf '%s\n' "$activity" | grep -q 'rootPinnedTask=Task=' || fail "Android has no rootPinnedTask"
 printf '%s\n' "$activity" | grep -q "$video" || fail "the pinned task is not $video"
@@ -108,7 +119,7 @@ awk -v d="$played_delta" -v e="$elapsed" -v r="$rate" \
 
 # A pause and a wait beyond the native stopped-replacement grace must not turn
 # ordinary PiP into a false finalization or a delayed duplicate.
-$adb -s "$serial" shell input keyevent KEYCODE_MEDIA_PAUSE >/dev/null 2>&1 || true
+"$adb" -s "$serial" shell input keyevent KEYCODE_MEDIA_PAUSE >/dev/null 2>&1 || true
 sleep 12
 final_count=$(snapshots | grep "token=$token " | grep -c 'finalized=true' || true)
 [ "$final_count" -eq 0 ] || fail "ordinary PiP falsely finalized $final_count time(s)"

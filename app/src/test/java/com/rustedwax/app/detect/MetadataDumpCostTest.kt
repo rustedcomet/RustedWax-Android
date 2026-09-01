@@ -5,30 +5,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * What one metadata dump costs, and why it may not be paid once a second.
- *
- * `MetadataDump.dump` is a diagnostic renderer: it reports what a source
- * published, including the keys it did *not*, so it necessarily probes every
- * standard key and every non-standard extra. That is correct for a dump and
- * ruinous on a hot path.
- *
- * Two of those probes are far more expensive than they look on this side of the
- * `MetadataFields` port:
- *
- *  - asking a **non-text** key for text. `android.os.BaseBundle.getCharSequence`
- *    answers a type mismatch by building a `ClassCastException` and writing its
- *    **whole stack trace** to logcat. Measured on the field device on 2026-08-26
- *    with YouTube Music playing: 1,532 `W/Bundle` stack-trace lines in twelve
- *    seconds, 99% of everything the process logged, all on the main thread.
- *  - asking for a **bitmap**. `MediaMetadata.getBitmap` marshals album artwork
- *    across Binder; YouTube Music publishes artwork and the YouTube app does not,
- *    which is most of why one of them lagged and the other did not.
- *
- * These tests pin the cost rather than trying to remove it. The repair is that a
- * live snapshot stops asking — see
- * [com.rustedwax.app.architecture.SnapshotDiagnosticCostWiringTest].
- */
 class MetadataDumpCostTest {
 
 	/** Records every probe, so a caller's real cost is countable. */
@@ -112,18 +88,6 @@ class MetadataDumpCostTest {
 		)
 	}
 
-	/**
-	 * The number that matters, characterized exactly rather than bounded.
-	 *
-	 * 17 standard text keys, 5 numeric keys, 3 artwork keys, then both a text and
-	 * a numeric probe for each of the two non-standard extras: 29 probes for one
-	 * ordinary music bundle. Every one is paid on whichever thread built the
-	 * snapshot, and before 2026-08-26 that was the main thread, once per second,
-	 * per session.
-	 *
-	 * If this count changes the cost changed, which is exactly what a reader of
-	 * this file needs to be told.
-	 */
 	@Test
 	fun `one dump of an ordinary music bundle costs twenty-nine probes`() {
 		val fields = youTubeMusicShaped()

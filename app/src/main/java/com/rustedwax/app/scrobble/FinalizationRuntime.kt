@@ -166,26 +166,8 @@ object FinalizationRuntime {
 		val videoId: String,
 	)
 
-	/**
-	 * Below this, a finalize is a metadata transition rather than a listen
-	 * anyone will go looking for.
-	 *
-	 * Not a guess: the 2026-07-29 session produced 198 "no duration" skips, and
-	 * 165 of them had played for under three seconds — the browser swapping a
-	 * placeholder title for the real one as a page loads. Recording those would
-	 * bury the 33 that a person might actually wonder about.
-	 */
 	private const val MIN_NOTABLE_PLAYED_MS = 3_000L
 
-	/**
-	 * Fresh-history checks after an immediate cache bypass, expressed as gaps.
-	 * The resulting observations are at roughly 5, 20, 60 and 150 seconds.
-	 *
-	 * The field failure on 2026-08-15 took 137 seconds for YouTube's history
-	 * feed to expose the first of three completed Shorts. Stopping at one minute
-	 * would preserve that exact loss; 150 seconds covers it while keeping both
-	 * time and requests strictly bounded.
-	 */
 	private val SHORT_HISTORY_RETRY_DELAYS_MS = longArrayOf(
 		5_000L,
 		15_000L,
@@ -199,27 +181,6 @@ object FinalizationRuntime {
 	private val _skipped = MutableStateFlow<List<SkipRecord>>(emptyList())
 	val skipped: StateFlow<List<SkipRecord>> = _skipped.asStateFlow()
 
-	/**
-	 * Consecutive finalized tracks that ended with no video id at all.
-	 *
-	 * This is the counter behind the "the address bar has gone quiet" warning, and
-	 * it exists because of a 13-minute hole in the 2026-07-29 session. The watcher
-	 * reported `connected`, then read the collapsed omnibox once —
-	 * `host=m.youtube.com video=—` — and said nothing again for 13 minutes.
-	 *
-	 * The visible cost was five shorts scrobbled with no `url`. The invisible cost
-	 * was larger: four more were **lost entirely**, because with no id there is no
-	 * `/shorts/` proof, so the short-clip floor couldn't apply and 15 s, 21 s and
-	 * 25 s clips were held to the 30-second minimum.
-	 *
-	 * Nothing told the user. The app knew the watcher was on and knew it hadn't
-	 * identified a single track in nine finalizes — the same "silence reads as
-	 * broken" failure the Not-logged tab was built for, one layer down.
-	 *
-	 * Counted per *finalize* rather than on a timer, because that measures the
-	 * actual harm. A long watch-page video legitimately produces one id and then
-	 * silence for an hour; that must not warn.
-	 */
 	private val _tracksWithoutVideoId = MutableStateFlow(0)
 	val tracksWithoutVideoId: StateFlow<Int> = _tracksWithoutVideoId.asStateFlow()
 
@@ -257,7 +218,7 @@ object FinalizationRuntime {
 		_queueSize.value = queue.size()
 	}
 
-	/** Phase 7 production composition root. Rebuilt with every device/replay port set. */
+	/** Production finalization composition root, rebuilt with every device or replay port set. */
 	private fun wireFinalization() {
 		dispatcher = object : ScrobbleDispatcher {
 			override val hasPostingAccount: Boolean get() = vault.account != null
@@ -492,14 +453,6 @@ object FinalizationRuntime {
 		))
 	}
 
-	/**
-	 * Run the concrete finalization runtime against scripted ports, for replay only.
-	 *
-	 * Deliberately not guarded by `initialised`: a replay installs a fresh set
-	 * of ports per scenario, and a singleton that could only be configured once
-	 * would make every scenario after the first one read the previous
-	 * scenario's ledger. See `replay/ReplayHarness.kt`.
-	 */
 	internal fun installPortsForReplay(replayPorts: EnginePorts, replayScope: CoroutineScope) {
 		synchronized(this) { initialised = false }
 		prefetches.reset()
@@ -624,14 +577,6 @@ object FinalizationRuntime {
 		}
 	}
 
-	/**
-	 * The artist/track pairs worth asking MusicBrainz about, most likely
-	 * first: the parsed pair, then the *swapped* pair. The swap exists because
-	 * `Title | Channel`-shaped uploads split backwards (observed on-chain:
-	 * artist "Michael Jackson MTV Awards 1995…" title "Remastered HD") — when
-	 * the reversed pair is the real recording, MusicBrainz says so, and its
-	 * canonical fields land in the payload the right way round.
-	 */
 	private fun mbCandidates(credits: ScrobbleBuilder.Parsed): List<Pair<String, String>> {
 		val artist = credits.artist?.takeIf { it.isNotBlank() } ?: return emptyList()
 		val out = mutableListOf(artist to credits.track)
@@ -680,17 +625,6 @@ object FinalizationRuntime {
 		return last
 	}
 
-	/**
-	 * Start resolving a video's facts the moment it's identified, instead of
-	 * at finalize minutes later.
-	 *
-	 * Two reasons this matters beyond latency. The broadcast path stops
-	 * depending on a live network at the exact moment a track ends. And the
-	 * Now-tab preview reads the same cache via [cachedFacts], so the kind it
-	 * shows is the kind that will be broadcast — during the field test the
-	 * preview classified from the title alone while enrichment later said
-	 * otherwise, and the mismatch made the filter look arbitrary.
-	 */
 	fun prefetch(videoId: String, onComplete: ((available: Boolean) -> Unit)? = null) {
 		if (!initialised || !settings.enrichment) {
 			onComplete?.invoke(false)
@@ -830,33 +764,6 @@ object FinalizationRuntime {
 		)
 	}
 
-	/**
-	 * The exact id from the signed-in account's watch history, or null when the
-	 * route does not apply at all.
-	 *
-	 * Null and a refusal are different answers: null means "this session is not
-	 * eligible for the route", which must fall through to search silently, while
-	 * a [VideoResolutionAttempt] with a reason means the route ran and declined,
-	 * which is worth reading in the log.
-	 *
-	 * Native `com.google.android.youtube`, and a browser playing YouTube once
-	 * every other route has come up empty. YouTube Music keeps a separate history
-	 * and is out of scope (§7.1).
-	 *
-	 * The browser half was withheld under §11.1 on the reasoning that browsers
-	 * have the address bar. Measured 2026-08-09: they have it only while the
-	 * address-bar watcher is alive, and Android disables an accessibility service
-	 * when it crashes — which is the exact failure `AccessibilityGrantHealth`
-	 * exists to report. With it dropped, a Brave Shorts session produced
-	 * `YouTube (site only, no video id)` on every poll, and two Shorts measured at
-	 * 89% and 100% were refused because search could not name a video titled
-	 * `#hoyoverse`.
-	 *
-	 * This cannot change browser behaviour when the address bar is working:
-	 * `resolveVideoId` only runs when no id has been proven at all, so a
-	 * confirmed URL always wins and never reaches here. It is a floor under the
-	 * browser path, not a change to it.
-	 */
 	private suspend fun watchHistoryResolution(
 		session: SessionSnapshot,
 		title: String?,
@@ -870,36 +777,14 @@ object FinalizationRuntime {
 		// history is consulted about it; anything else is a different site.
 		val browserYouTube = !session.profile.packageProvesSource && session.isYouTube
 		if (!nativeYouTube && !browserYouTube) return null
-		// `<redacted-private-path>` §2. An absence is evidence about the account only when
-		// the listen was established enough that the account really should have
-		// recorded it. Identity resolution still runs for anything briefer — a
-		// Not logged row has to keep its exact hyperlink — but that lookup is
-		// explicitly not evidence.
-		//
-		// This is the dominant false-miss path, not an edge: the native carry
-		// pre-resolution asks for an id a few seconds into *every* ordinary
-		// video, long before the account's feed could contain it, and each of
-		// those absences was being counted. Three ordinary previews stood the
-		// route down for fifteen minutes.
+
 		val establishedNativeVideo = durationSec != null && durationSec > 0 &&
 			session.playedMs >= (durationSec * 1_000.0 * settings.scrobbleThreshold)
 		val nativeAccountEvidence = nativeYouTube &&
 			session.explicitAdSignal == null &&
 			!session.hasShortSourceProof &&
 			establishedNativeVideo
-		// A foreground Short is a different question. Its history row is a
-		// `shortsLockupViewModel`, which carries an id and a title and
-		// deliberately no channel and no duration, so it can never satisfy the
-		// ordinary three-field gate and is kept out of it entirely. What the
-		// feed does supply is the exact id — which is precisely what the search
-		// route cannot find for these: measured 2026-08-04, six of eleven Shorts
-		// failed at "no candidate matched exact title+duration+owner handle",
-		// their titles being mostly hashtags and emoji.
-		//
-		// So history names the candidates and the *existing* owner-handle
-		// verification decides: each id's own watch page is re-fetched and must
-		// agree on title, duration and @handle, uniquely. No rule is relaxed;
-		// the proven gate is simply handed the right ids.
+
 		val handle = session.ownerHandle
 		if (handle != null) {
 			var previousCandidates: List<String>? = null
@@ -990,22 +875,6 @@ object FinalizationRuntime {
 		// can stand without one.
 		if (title == null) return null
 
-		// A Short watched in a browser has no owner handle — that field is the
-		// native footer's — but it does have the channel, and history's Shorts
-		// rows carry the exact ids. Measured 2026-08-09: `#hoyoverse` /
-		// `Mr Time Edits` was watched to 89% and then 98% in Brave and refused
-		// both times, because search cannot name a video whose title is one
-		// hashtag: "no verified id … among 73 unique search candidates".
-		//
-		// Same route the native Short takes, with the channel standing where the
-		// handle would: history names the candidates, and each candidate's own
-		// watch page must still agree on title, channel and duration, uniquely.
-		// No rule is relaxed — `resolveVerifiedCandidates` still refuses without
-		// a length when there is no handle to carry the check.
-		// Not gated on "this is a Short": without the address bar there is nothing
-		// that could prove it. It costs nothing to ask — history returns Shorts
-		// whose title matches exactly, so a regular video simply gets an empty
-		// list and falls through to the ordinary evidence gate below.
 		if (!session.profile.packageProvesSource) {
 			// Browser-scoped: this read may not spend the probe a stood-down route
 			// allows native playback, and its outcome is not evidence either way.
@@ -1429,12 +1298,6 @@ object FinalizationRuntime {
 		return result.outcome.asVideoAttempt()
 	}
 
-	/**
-	 * @param sequence the adjacency this resolution may read and record against —
-	 * the live one for a live finalization, the run's detached copy in shadow.
-	 * Passed rather than read from the field so a shadow resolution cannot reach
-	 * the shared sequence by taking a different route into this function.
-	 */
 	private suspend fun resolveVideoIdLegacy(
 		session: SessionSnapshot,
 		sequence: VerifiedPlaybackSequence,
@@ -1477,10 +1340,7 @@ object FinalizationRuntime {
 				?: VideoResolutionAttempt(
 					refusalReason = "this Short's $missing could not be read and watch history " +
 						"could not identify it from what was left; " +
-						// Naming the actual state, when there is one, rather than
-						// always pointing at sign-in: measured 2026-08-06, two of
-						// these were refused with this wording while the route was
-						// standing itself down for fifteen minutes.
+
 						(
 							history.refusedBecause?.let { "the route is not running: $it" }
 								?: "sign-in and the watch-history switch are what make these resolvable"
@@ -1527,9 +1387,7 @@ object FinalizationRuntime {
 								title,
 								artist,
 								duration,
-								// Same rule as the ordinary gate: a carried id the feed
-								// no longer names is only evidence about the account
-								// once the listen was established. See `<redacted-private-path>` §2.
+
 								countsAsAccountEvidence = session.profile.packageProvesSource &&
 									session.packageName == YouTubeProbe.YOUTUBE_PACKAGE &&
 									session.explicitAdSignal == null &&
@@ -1575,16 +1433,6 @@ object FinalizationRuntime {
 			}
 			if (carryAttempt.resolution != null) return carryAttempt
 
-			// A carry that no longer revalidates is not proof that the track is
-			// unidentifiable — only that *this* route can no longer vouch for it.
-			// Measured 2026-08-06: "Nicki Minaj - Barbie Tingz" had its id named
-			// by watch history during playback, and at finalize the carry route
-			// refused and returned, so the history route was never asked again
-			// and a listen that history could still identify was thrown away.
-			//
-			// Falling through costs nothing in rigour: every remaining route has
-			// its own uniqueness proof, and VideoIdentityCorroborator still runs
-			// on whatever any of them returns.
 			EventLog.append(
 				"resolve",
 				"carried $preResolvedNativeId ($preResolvedRoute) no longer revalidates " +
@@ -1677,8 +1525,7 @@ object FinalizationRuntime {
 				// slot and nothing in the album slot, so nothing here changes for
 				// it or for the browser.
 				album = session.album,
-				// Unrounded, because `durationSec` above is truncated and the
-				// duplicate-family selection needs the player's real length.
+
 				durationMs = session.resolverContext.presentationDurationMs
 					?: session.durationMs,
 			)
@@ -1851,9 +1698,6 @@ object FinalizationRuntime {
 								)
 							}
 
-						// Still owed. Left in the queue with its failure recorded so
-						// the backoff applies — dropping it here is the bug that lost
-							// two listens to a stalled node on 2026-07-30.
 							is HiveRpc.BroadcastResult.Deferred -> {
 								handleQueuedFailure(entry, result.message)
 							}
@@ -2103,27 +1947,6 @@ object FinalizationRuntime {
 		}
 	}
 
-	/**
-	 * Log a refusal and surface it in the UI only with a verified hyperlink.
-	 *
-	 * Deliberately not called for the two *global* refusals above — monitoring
-	 * stopped and auto-scrobble off. Those fire for every track while the switch
-	 * is off, and a list of a hundred "auto-scrobble off" rows explains nothing
-	 * that the switch itself isn't already saying.
-	 *
-	 * @param log false when the caller already wrote a better line (the dedup
-	 * path logs the key, which is what makes a duplicate diagnosable)
-	 * @param videoId the id this track was **proven** to be, when the caller is
-	 * past the resolution stage and holds one. The snapshot's own `confirmed` is
-	 * only populated where the exact id came from the MediaSession or the address
-	 * bar; a native track identified through watch history or the resolver has
-	 * every bit as much proof, and it lives in a local rather than on the
-	 * snapshot. Without it the refusal remains in the terminal outcome and event
-	 * log, but cannot become a **Not logged** row — see the v0.11.0 behavior
-	 * contract §7.
-	 * @param resolvedTitle canonical title recovered while proving [videoId]. It is
-	 * used only when the frozen surface had no title of its own.
-	 */
 	private fun skip(
 		report: FinalizationReport,
 		session: SessionSnapshot,
@@ -2180,26 +2003,6 @@ object FinalizationRuntime {
 				(session.hasShortSourceProof && !session.ownerHandle.isNullOrBlank())
 		)
 
-	/**
-	 * Track whether identity produced a video id, and say so once when a run of
-	 * misses starts. Logged at the threshold only — the individual finalizes are
-	 * already visible in Not logged.
-	 *
-	 * Only a bar that actually said nothing counts. The warning names one cause
-	 * and prescribes one fix — check Accessibility, tap the toolbar — so it has
-	 * to be raised by the evidence it names and nothing else. Measured
-	 * 2026-08-11: three corroboration refusals in a row raised it at 13:04:58
-	 * while the address bar had just named `fctnSdDjxiY` correctly, and the user
-	 * spent the next while restarting Brave, restarting RustedWax and
-	 * re-granting Accessibility against a card that could not clear. A track
-	 * whose id the bar supplied and the corroborator then declined is a
-	 * different failure, and it is already reported as itself in Not logged.
-	 */
-	/**
-	 * @param shadow when true, the counter is not touched. It drives a card the
-	 * user sees, so a run that is deliberately not happening must not advance it
-	 * — nor reset it, which would hide a warning the live path had earned.
-	 */
 	private fun noteVideoIdOutcome(session: SessionSnapshot, videoId: String?, shadow: Boolean) {
 		if (shadow) return
 		if (session.origin != YouTubeProbe.Origin.BROWSER) return

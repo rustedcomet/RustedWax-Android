@@ -4,39 +4,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/**
- * What an enabled event log is allowed to keep.
- *
- * ## Why a bound exists at all
- *
- * The log had none. Measured on the field device on 2026-08-25, before this
- * existed: **22,606,065 bytes across 240,631 lines**, reaching back days. Two
- * separate problems, and the second is the serious one:
- *
- *  - a 22 MB file is not diagnosable — the fault someone is looking for is in
- *    the last few minutes, and it is buried under a week of `foreground root was
- *    hidden` at one line every thirty seconds; and
- *  - the log is a **recording of what somebody watched**. An unbounded one is a
- *    permanent, exportable, plain-text viewing history sitting in the app's
- *    private storage, growing forever, for as long as the switch stays on.
- *
- * Twelve hours is the window a fault is actually diagnosed in — a session is
- * exported the same day it went wrong — and 512 KiB is what a busy twelve hours
- * of that log costs. Whichever binds first wins.
- *
- * ## Why an unreadable age is dropped rather than kept
- *
- * Lines written before this existed are stamped `HH:mm:ss.SSS` with no date, so
- * their age cannot be established at all. "At most twelve hours" is a promise
- * about the file, and a line whose age is unknown cannot be shown to keep it —
- * so it fails closed, the same direction every other unproven thing in this app
- * fails. The cost is that the first launch after upgrading discards a legacy
- * log. That is stated in the release notes rather than hidden: the alternative
- * is a retention bound that quietly does not apply to the 22 MB already there.
- *
- * Pure and clock-injected, so the whole policy is decidable without waiting
- * twelve hours or owning an Android `Context`.
- */
 class LogRetention(
 	private val retentionMillis: Long = RETENTION_MILLIS,
 	private val maxBytes: Long = MAX_BYTES,
@@ -124,27 +91,6 @@ class LogRetention(
 		/** What a busy twelve hours of this log costs, rounded to a page count. */
 		const val MAX_BYTES = 512L * 1024L
 
-		/**
-		 * What a prune trims down to, below [MAX_BYTES].
-		 *
-		 * A prune has to reclaim **headroom**, not merely return to the ceiling.
-		 * Trimming to exactly [MAX_BYTES] leaves the very next line over it, so the
-		 * hard cap re-arms on every single append and a whole-file read, reparse
-		 * and rewrite lands in the path of a line written several times a second —
-		 * on whichever thread wrote it, which in this single-process app is
-		 * usually the main one. The 200-line, 64 KiB and five-minute cadences in
-		 * [com.rustedwax.app.detect.EventLog] never get to govern anything,
-		 * because the ceiling fires first, always.
-		 *
-		 * Measured on the field device on 2026-08-26 with the log sitting at
-		 * 524,263 bytes across 4,497 lines: 302 skipped frames at playback start —
-		 * five seconds of frozen UI — and none at all once the window was emptied.
-		 *
-		 * 128 KiB of reclaimed room is roughly a thousand typical lines, which
-		 * outlasts both the line and the byte cadence, so the cadence governs
-		 * pruning and the ceiling goes back to being the promise it was written to
-		 * be rather than the thing doing the work.
-		 */
 		const val PRUNE_TO_BYTES = 384L * 1024L
 
 		/**

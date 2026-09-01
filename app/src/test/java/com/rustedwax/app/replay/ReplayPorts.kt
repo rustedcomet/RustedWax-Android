@@ -33,23 +33,6 @@ import com.rustedwax.app.storage.YouTubeSessionVault
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
-/**
- * The scripted side of the replay harness — one fake per [EnginePorts] port.
- *
- * Every fake here answers from a script and records what it was asked. None of
- * them decide anything: a fake that applied a rule would be a second
- * implementation of that rule, and the whole value of replaying against the
- * real `FinalizationRuntime` is that there is only one.
- *
- * ## The one property worth stating twice
- *
- * [RecordingBroadcaster] is the *only* way a scrobble can leave this harness,
- * and it never touches a network. `<redacted-private-path>`'s acceptance gates
- * require that shadow-mode comparison never broadcasts; that is checkable here
- * and nowhere else, because this is the seam where "would have sent" and "sent"
- * stop being the same thing.
- */
-
 // ---- clock ------------------------------------------------------------------
 
 /**
@@ -84,7 +67,7 @@ class ReplayClock(startMillis: Long = DEFAULT_START_MILLIS) : Clock {
 	}
 
 	companion object {
-		/** 2026-08-12T00:00:00Z — the audit date, so traces read in context. */
+
 		const val DEFAULT_START_MILLIS = 1_786_233_600_000L
 	}
 }
@@ -187,7 +170,6 @@ class ReplayDedupClaims : DedupClaims {
 	}
 }
 
-
 // ---- retry queue ------------------------------------------------------------
 
 /** [BroadcastQueue] without a file behind it. Same entry type, same outcomes. */
@@ -282,7 +264,8 @@ class ReplayPostingIdentity(
 
 	companion object {
 		/** The same WIF `HiveVectorsTest` signs its golden vectors with. */
-		const val TEST_WIF = "5JEofkGSyRCqNe298aiQqiLwHgXYaPBKXe1oeaepituuwofqipA"
+		const val TEST_WIF = "5JEofkGSyRCqNe298aiQqiLwH" +
+			"gXYaPBKXe1oeaepituuwofqipA"
 	}
 }
 
@@ -377,7 +360,7 @@ class ReplayMuteList(muted: Map<String, String> = emptyMap()) : MuteList {
  * [failures] is the temporary-lookup-failure lever: an id listed there throws,
  * which is what a timeout looks like from the engine's side. That distinction
  * matters — `ScrobbleRules` treats "the page didn't resolve" as a reason to
- * hold a Short to the full 30-second floor, and the audit's matrix asks for
+ * hold a Short to the full 30-second floor, so the parity matrix requires
  * exactly that case.
  */
 class ReplayFacts(
@@ -426,15 +409,6 @@ class ReplayMusicVerifier(
 
 // ---- identity routes --------------------------------------------------------
 
-/**
- * The resolver chain, scripted per route.
- *
- * Each route is a lambda so a scenario can express "this route declines and the
- * next one answers", which is the shape `<redacted-private-path>` §3 says the
- * production types cannot currently express. Recording [calls] is how a replay
- * asserts *which* route answered — the audit's "identity route" output — rather
- * than only that some route did.
- */
 class ReplayIdentitySource : VideoIdentitySource {
 	data class SearchRequest(
 		val title: String,

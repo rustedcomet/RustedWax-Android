@@ -1,56 +1,5 @@
 package com.rustedwax.core
 
-/**
- * The deterministic playback state machine owned by `MediaSessionDriver`.
- *
- * ## What this is
- *
- * `<redacted-private-path>` Phase 3 asks for exactly this, in exactly this shape:
- *
- * ```text
- * transition = reduce(previousState, playbackEvent)
- * transition.state
- * transition.effects
- * ```
- *
- * and lists what has to move, in order: playback progress and speed accounting;
- * metadata refinement and track transitions; session destruction/recreation and
- * continuation; finalization decisions; picture-in-picture measurement effects.
- * All five live here.
- *
- * ## Why it had to leave `Watch`
- *
- * `Watch` is a private inner class over `transport controller`, `transport state` and
- * `platform clock`. None of those exist on the JVM, so none of this
- * logic could be tested without a device — which is why `PlaybackTrace` in the
- * replay corpus had to *model* played-time accumulation, track freezing, session
- * recreation and process restart rather than call them. A model and the code it
- * models can disagree, and that disagreement shows up as a passing replay and a
- * failing device. This class is what removes the model: the corpus now drives
- * the production reducer.
- *
- * ## The rules it holds to
- *
- * - **No platform.** Every clock reading arrives on an input; there is no
- *   `SystemClock`, no `transport state`, no `metadata bundle`.
- * - **No package names.** Source differences are expressed through
- *   [PlaybackSourceCapabilities] instead, and each capability names the observed
- *   behaviour it stands for.
- * - **No side effects.** Nothing is logged, nothing is published, nothing is
- *   finalized. Those are [PlaybackEffect]s the caller performs, in order.
- * - **No identity.** Latching, corroboration, ad evidence and resolver context
- *   stay in `Watch`; typing that stack is the audit's Phase 6. What crosses the
- *   boundary is [TrackIdentity], which is presentation metadata and already pure.
- * - **No mutation of the state it is handed.** [ListenState] is a value all the
- *   way down, so `reduce(s, e)` called twice on the same `s` returns the same
- *   transition and leaves `s` untouched. `ReducerPurityTest` proves it over every
- *   input shape rather than trusting the field declarations.
- *
- * The one exception used to be [PipPlaybackInference], a mutable accumulator
- * carried in the state; the picture-in-picture branch advanced it by side effect
- * on the caller's own state. It is now a value that returns its successor, which
- * is what makes the purity claim above checkable rather than aspirational.
- */
 class PlaybackReducer(
 	private val source: PlaybackSourceCapabilities,
 	/** The run owner shared with this source's adapter; reducer state remains pure. */
@@ -137,26 +86,6 @@ class PlaybackReducer(
 		is PlaybackInput.IdleDeadlineReached -> onIdleDeadline(state, input)
 	}
 
-	/**
-	 * The listen ran past its own length and the source never said so.
-	 *
-	 * Measured 2026-08-12: a browser video reached its end, the transport stayed
-	 * in `PLAYING` with an unchanged `lastPositionUpdateTime`, and the played
-	 * clock accrued for a further one hour forty-seven minutes because nothing
-	 * ends a browser listen except a track change, a navigation or a closed tab.
-	 * page-backed source publishes `STATE_STOPPED` zero times in the entire retained field log.
-	 *
-	 * The consequences compound: the listen finalizes at an absurd percentage, the
-	 * Now card claims it is still playing, and — because several evidence gates
-	 * require exactly one live browser session — every *later* listen in that
-	 * browser loses its accessibility coverage and ad evidence to a tab that
-	 * finished hours ago.
-	 *
-	 * So a listen that has consumed its whole length with nothing further
-	 * published has ended, and is scored for what it genuinely reached. The
-	 * caller owns the timer; what is decided here is whether its expiry means
-	 * anything.
-	 */
 	private fun onIdleDeadline(
 		state: ListenState,
 		input: PlaybackInput.IdleDeadlineReached,
@@ -215,20 +144,6 @@ class PlaybackReducer(
 
 	// ── 1. progress and speed accounting ───────────────────────────────────
 
-	/**
-	 * Fold the elapsed window into played time and stop the clock.
-	 *
-	 * Scaled by the playback rate, which is the whole point: the threshold
-	 * compares against `duration`, so what has to be measured is *content
-	 * consumed*, not seconds elapsed. A 2026-07-29 field session watched a 76 s
-	 * trailer at 1.25× to position 59.9 s — 79% of the video — and it went
-	 * on-chain as 67%, because 50 s of wall-clock had passed. At 2× the same
-	 * arithmetic puts a fully-watched video at 50% and it never scrobbles at all.
-	 *
-	 * The rate read is the one that was in force *during* the window that just
-	 * ended, not the one being switched to, which is why the caller hands over
-	 * the new rate separately.
-	 */
 	private fun ListenState.accumulate(elapsedRealtimeMs: Long): ListenState {
 		if (suppressedByForegroundShort || describingTabOnly) {
 			return copy(playingSinceElapsedMs = null)
@@ -379,17 +294,6 @@ class PlaybackReducer(
 			)
 		}
 
-		// A session that re-creates itself publishes empty metadata first — no
-		// title, no duration — with the real values a fraction of a second later.
-		// Measured 2026-08-07: a viewer moved between the Home and Shorts tabs
-		// while a 155-second trailer played, and each return finalized the trailer
-		// against a placeholder; it finished the session having accumulated 18 of
-		// the 155 seconds actually watched, and nothing scrobbled.
-		//
-		// An empty announcement is the session clearing its throat, not a
-		// different track. Hold the current one; a genuinely ended track still
-		// ends by STOPPED, by session destruction, or by the replacement that
-		// follows.
 		if (!new.isUsable && new.durationMs == null && state.trackIdentity.isUsable) {
 			// The bundle is deliberately *not* installed: it says nothing, and
 			// installing it would erase the fields this track established.
@@ -634,31 +538,7 @@ class PlaybackReducer(
 				)
 			}
 		}
-		// A source that publishes the organic title and artist over an
-		// interstitial's own length anchors this listen to material the viewer
-		// never chose. Measured 2026-08-27 on the native route: 10 s, 13 s, 27 s,
-		// 29 s, 54 s and 58 s surfaces each opened a session under the organic
-		// title and artist, and the 1,192 s work that followed was then treated as
-		// the replacement for the rest of the listen. The whole video went
-		// unmeasured while the interstitial's few seconds were the only ones ever
-		// credited, so a video watched well past the threshold finalized at 1%.
-		//
-		// So arrival order does not decide which presentation owns the listen;
-		// scale does. A presentation dwarfed by [ORGANIC_ANCHOR_SUPERSEDE_FACTOR]
-		// or more by the one replacing it never held the work, and is superseded:
-		// its interval is discarded rather than credited, and organic measurement
-		// starts from the new presentation.
-		//
-		// How long the viewer sat through the old surface is deliberately not part
-		// of this. Interstitials arrive in pods and are often watched to their own
-		// end — a 58 s one was, on the device, immediately before the work — so
-		// time served says nothing about whether a surface is the work. What says
-		// so is that a 58 s surface cannot be the 1,192 s item replacing it.
-		//
-		// Nothing is labelled or inferred as an ad, and the far commoner shape is
-		// left to the both-direction quarantine below: a sponsored surface
-		// published over an established video, 1,192 s becoming 2,163 s, is 1.8x
-		// and keeps the established listen.
+
 		val provisionalAnchorSuperseded = priorDuration != null &&
 			newDuration > priorDuration &&
 			// A pod replaces one interstitial with the next, so the anchor is
@@ -668,13 +548,7 @@ class PlaybackReducer(
 			// before this ever runs. Only a return still awaiting its position is
 			// left alone, because that decision is already in flight.
 			!state.durationReplacementReturnPending &&
-			// A rebase does not protect the anchor either. Measured 2026-08-27: a
-			// 27 s interstitial followed by a 12 s one satisfies the bounded
-			// remaining-time arithmetic by coincidence — twelve seconds of surface
-			// after twenty-five seconds played — so a pod can enter this state
-			// without anything long-form ever being established. A rebase a real
-			// long-form presentation performed keeps its *total* as the
-			// established length, which is far too large to be dwarfed below.
+
 			priorDuration * ORGANIC_ANCHOR_SUPERSEDE_FACTOR <= newDuration
 		if (provisionalAnchorSuperseded) {
 			val provisionalPlayedMs = state.playedMsAt(input.elapsedRealtimeMs)
@@ -779,20 +653,6 @@ class PlaybackReducer(
 		)
 	}
 
-	/**
-	 * End the track the page has stopped describing, and start nothing.
-	 *
-	 * The finalize happens first and reads the *outgoing* metadata, so the entry
-	 * keeps the title, channel and length the page published while it was
-	 * playing. Only after that does the session become nameless.
-	 *
-	 * Nothing accumulates in this state. Elapsed time between one video's
-	 * metadata being torn down and the next one's arriving cannot be credited to
-	 * either of them — the outgoing track has already been finalized with what it
-	 * earned, and the incoming one has not started. Measured 2026-08-11: the page
-	 * was muted, page-backed source published `TITLE = "source"` and then said nothing for
-	 * seven minutes while a real video played, and all seven minutes landed on it.
-	 */
 	private fun enterTabTitleOnly(
 		state: ListenState,
 		input: PlaybackInput.MetadataPublished,
@@ -823,10 +683,7 @@ class PlaybackReducer(
 		return Transition(
 			state.startNewTrack(input).copy(
 				describingTabOnly = true,
-				// [startNewTrack] restarts the clock for a track that is about to
-				// begin. None is. Leaving it running would hand every second of the
-				// gap to whichever track claims the session next, the moment the flag
-				// clears — which is the seven-minute credit measured on 2026-08-11.
+
 				playingSinceElapsedMs = null,
 				trackIdentity = TrackIdentity(null, null, null, null),
 			),
@@ -947,26 +804,6 @@ class PlaybackReducer(
 		)
 	}
 
-	/**
-	 * Take back play time from a session that vanished mid-track.
-	 *
-	 * The frozen start is restored along with the clock, so the on-chain
-	 * timestamp names when the listen actually began rather than when the browser
-	 * happened to rebuild its session — and so the dedup key stays stable across
-	 * the restart. The instance token is restored for the same reason: one
-	 * continuous listen must keep one identity.
-	 *
-	 * Play time is **added to, not assigned over**. The claim can land seconds
-	 * after the replacement started measuring — the native resolver and the
-	 * browser's address bar both take a moment to name the video — and those
-	 * seconds are the same listen.
-	 *
-	 * Banked time only: the running clock is deliberately left alone. Folding it
-	 * in here also *stops* it, and nothing on this path starts it again —
-	 * measured 2026-08-09, a Chrome session that was already PLAYING when it
-	 * claimed reached `pos=220412ms` of a 220421 ms video having measured 58 s,
-	 * because the claim silenced the clock at the moment it handed the time back.
-	 */
 	private fun onProgressCarried(
 		state: ListenState,
 		input: PlaybackInput.ProgressCarried,
@@ -1357,20 +1194,6 @@ class PlaybackReducer(
 
 	// ── foreground Shorts handover ─────────────────────────────────────────
 
-	/**
-	 * Hand ownership to the structural foreground-Short lifecycle.
-	 *
-	 * Suppression exists so the same seconds are not counted on both surfaces,
-	 * and it starts the transport session over at zero for exactly that reason. What
-	 * it must not do is delete a listen on the way past. Measured 2026-08-07:
-	 * "THE RUN — Official Trailer" reached 85 s of its 104 s, the viewer opened
-	 * the Shorts tab, and the trailer was erased without a finalize line — 82%
-	 * watched, nothing scrobbled, no record it had ever played.
-	 *
-	 * The one case where discarding is right is the Short taking over being the
-	 * very item this session was describing, which the caller decides on
-	 * published evidence alone and passes in as [input.shortDescribesSameItem].
-	 */
 	private fun onForegroundShortTookOver(
 		state: ListenState,
 		input: PlaybackInput.ForegroundShortTookOver,
@@ -1578,43 +1401,6 @@ class PlaybackReducer(
 		const val DURATION_REBASE_MIN_TOLERANCE_MS = 15_000L
 		const val DURATION_REBASE_MAX_TOLERANCE_MS = 180_000L
 
-		/**
-		 * How far a provisional anchor may be dwarfed before a longer same-title
-		 * presentation is allowed to supersede it.
-		 *
-		 * This is a bounded heuristic and is documented as one. Duration magnitude
-		 * is **not** evidence of a track change — that remains owned by title,
-		 * artist, exact id, replay and generation evidence — and this value decides
-		 * one thing only: whether an anchor was too small ever to have been the
-		 * work now replacing it. Its failure mode is a missed listen, never a
-		 * wrong one.
-		 *
-		 * Chosen from the separation in the 2026-08-27/28 field logs rather than
-		 * from taste. Interstitial surfaces replaced by the actual work:
-		 *
-		 * ```
-		 *  7s → 1192s  170x     27s → 1192s   44x     54s → 1192s   22x
-		 * 10s → 1761s  176x     27s → 2163s   80x     54s → 1761s   33x
-		 * 12s → 1192s   99x     29s → 1192s   41x     58s → 1192s   21x   ← lowest
-		 * 14s →  934s   67x     20s → 1294s   65x
-		 * ```
-		 *
-		 * Against the opposite shape, a real work followed by a bogus longer
-		 * surface, which must **not** supersede:
-		 *
-		 * ```
-		 * 1192s → 1817s  1.5x    934s → 2163s  2.3x    400s → 2163s  5.4x  ← highest
-		 * 1192s → 2163s  1.8x    600s → 1817s  3.0x
-		 * ```
-		 *
-		 * Ten sits in the gap between 5.4x and 21x with roughly a factor of two of
-		 * margin either side. It was 4x, which is inside the hazard band: a real
-		 * 400-second work followed by a 2,163-second ad-inclusive surface would
-		 * have been superseded and its measured progress discarded. One
-		 * interstitial replacing another inside a pod (13s → 58s, 4.5x) no longer
-		 * supersedes and is quarantined instead; the work that follows still
-		 * supersedes the pod's first anchor, so the outcome is unchanged.
-		 */
 		const val ORGANIC_ANCHOR_SUPERSEDE_FACTOR = 10L
 
 		/** Fractions of the item that make a position reset a wrap and not a seek. */
@@ -1695,15 +1481,7 @@ data class ListenState(
 	val speed: Double = 1.0,
 	/** Highest rate scored for this track, for the finalize line only. */
 	val fastestSpeedSeen: Double = 1.0,
-	/**
-	 * Where the player already was when this track was first seen.
-	 *
-	 * Measured 2026-08-06: `_zR6ROjoOX0` published no transport session at all for the
-	 * eleven minutes before RustedWax saw it, then appeared 94 seconds into a
-	 * 227-second video and was destroyed seven seconds later. "played 12s of
-	 * 227s" looked like a measurement fault; it was an accurate account of the
-	 * only playback ever published.
-	 */
+
 	val firstSeenPositionMs: Long? = null,
 	/**
 	 * The longest length this unchanged title has ever claimed.
@@ -1731,19 +1509,9 @@ data class ListenState(
 	val organicPresentationRebased: Boolean = false,
 	/** Last position published by this transport, retained across metadata callbacks. */
 	val lastObservedPositionMs: Long? = null,
-	/**
-	 * The next position belongs to a presentation that was discarded, not to this
-	 * listen, so it may not establish [firstSeenPositionMs].
-	 *
-	 * Measured 2026-08-28 across four supersedes on the native route: the source
-	 * republishes the outgoing surface's own position once before the incoming
-	 * presentation's. `17252 → 0`, `22549 → 0`, `6058 → 1068016`, `7104 → 97`.
-	 * Letting the first of those establish the lead-in is how a video resumed
-	 * 17:48 in recorded "first seen 6s" and then said nothing about having been
-	 * resumed, leaving "played 10%" reading as a lost measurement.
-	 */
+
 	val leadInSkipsNextPosition: Boolean = false,
-	/** End-to-start playback reset observed during this continuous viewing. */
+
 	val loopDetected: Boolean = false,
 	/** The browser is publishing its tab's own title instead of a track's. */
 	val describingTabOnly: Boolean = false,
@@ -1807,42 +1575,13 @@ data class ListenState(
 		if (finalized || suppressedByForegroundShort || describingTabOnly) return null
 		if (transport != TransportState.PLAYING) return null
 		val total = durationMs?.takeIf { it > 0 }
-			// A browser that publishes no `DURATION` at all is ordinary — measured
-			// 2026-08-12, page-backed source listed `DURATION` among the *unset* keys for a whole
-			// listen — so "no length" cannot mean "no deadline", or the one source
-			// that most needs bounding is the one that never gets it.
+
 			?: return PlaybackReducer.IDLE_FINALIZE_MAX_SILENCE_MS
 		val remainingContent = (total - playedMsAt(elapsedRealtimeMs)).coerceAtLeast(0)
 		val remainingWallClock = if (speed > 0) (remainingContent / speed).toLong() else remainingContent
 		return remainingWallClock + PlaybackReducer.IDLE_FINALIZE_GRACE_MS
 	}
 
-	/**
-	 * The length this track has established, which a bundle that omits DURATION
-	 * does not erase.
-	 *
-	 * A bundle without DURATION is silence about the length, not a statement that
-	 * the track has none. Measured 2026-08-10: "Happy Song" reported 236981 ms
-	 * for its whole 247-second watch and then dropped it half a second before the
-	 * track changed, and the finalize read "played 247s of 0s" — no length meant
-	 * no percentage, and every route refused for want of a duration.
-	 */
-	/**
-	 * How long the item this listen measured is.
-	 *
-	 * **Length authority follows measurement.** While a replacement presentation
-	 * is quarantined, the installed bundle describes material this listen has
-	 * explicitly refused to measure, so its length is not this listen's length.
-	 * Taking it anyway is how a video measured to 90% of its real 1,192 s
-	 * finalized as "1072s of 1817s" on 2026-08-27 — 59%, below the threshold, and
-	 * a duration the resolver then read as an identity contradiction.
-	 *
-	 * The rule is symmetric, and that is the point. [longestDurationMs] already
-	 * stopped a *shorter* interstitial from shrinking the denominator; nothing
-	 * stopped a longer one from inflating it, because "keep the largest number
-	 * anyone published" admits sponsored and ad-inclusive surfaces as candidates.
-	 * Direction was never the question — whether the presentation was measured is.
-	 */
 	fun establishedDurationMs(publishedMs: Long?): Long? {
 		val installedIsQuarantined = durationReplacementMs != null
 		val accepted = if (installedIsQuarantined) null else publishedMs
@@ -1945,15 +1684,6 @@ sealed interface PlaybackInput {
 		val continuationOpen: Boolean,
 	) : PlaybackInput
 
-	/**
-	 * The watcher is being torn down.
-	 *
-	 * @param finalize whether a track still in flight gets one last chance to
-	 * score. True when the *system* ends things — the track really did end, and
-	 * dropping it would lose a legitimate scrobble. **False when the user presses
-	 * Stop**: a Stop button that writes to an immutable chain on its way out is a
-	 * bad Stop button.
-	 */
 	data class Disposed(
 		val finalize: Boolean,
 		val allowContinuation: Boolean,

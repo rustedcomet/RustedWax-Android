@@ -13,7 +13,7 @@ class MutedVideosTest {
 
 	@Test
 	fun `accepts real video ids`() {
-		// From the field logs, including the promoted video this store exists for.
+
 		assertTrue(MutedVideos.isValidVideoId("jpYDdNj9tTw"))
 		assertTrue(MutedVideos.isValidVideoId("cq2xXbWGHu8"))
 		assertTrue(MutedVideos.isValidVideoId("_PMOc_NQmEc"))

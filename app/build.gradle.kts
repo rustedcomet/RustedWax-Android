@@ -15,23 +15,12 @@ android {
 		versionCode = 58
 		versionName = rootProject.version.toString()
 
-		// The instrumented suite is the only coverage of the real Android
-		// callback boundary — `<redacted-private-path>` §8 records its absence as a
-		// reason regressions survive a green JVM run.
+		// The instrumented suite covers the real Android callback boundary;
+		// JVM tests cannot replace it.
 		testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 	}
 
 	buildTypes {
-		/**
-		 * A second, throwaway installation for testing fresh-install behaviour.
-		 *
-		 * Fresh-install defaults can only be observed by an install that has
-		 * never stored anything, and clearing the field device's data would
-		 * take the posting key in `EncryptedSharedPreferences` with it. Its own
-		 * `applicationId` gets its own preferences file instead, so the defaults
-		 * are observable on the real device and the real install is untouched.
-		 * Uninstall it afterwards; it holds no key and grants nothing.
-		 */
 		create("freshtest") {
 			initWith(getByName("debug"))
 			applicationIdSuffix = ".freshtest"

@@ -2,37 +2,6 @@ package com.rustedwax.app.detect
 
 import java.util.concurrent.ConcurrentHashMap
 
-/**
- * Site hints harvested from browser media notifications.
- *
- * Phase 0 measured that Chromium browsers publish artwork as an embedded
- * *bitmap* and populate no URI keys at all — so the media session alone cannot
- * tell us which site is playing (see <redacted-private-path>, Q3).
- *
- * The media *notification* is the second source. Chromium renders a
- * media-style notification whose sub-text is the page origin ("youtube.com"),
- * which is exactly the missing piece. This holder is written by
- * [RustedWaxListenerService] and read by [SessionProbe].
- *
- * ## Why hints are a list, not a single value
- *
- * Phase 4 found the original design — one hint per package, last write wins —
- * misattributes as soon as two browser tabs have audio. Brave gets one slot, so
- * a YouTube session could inherit another site's origin (skipping a legitimate
- * scrobble) or, worse, a non-YouTube session could inherit `youtube.com` and be
- * broadcast as YouTube. Removing one tab's notification also wiped the
- * surviving tab's evidence.
- *
- * So hints are kept as a short per-package history and **bound to a session**
- * by [bestFor], which matches on the media title. Chromium builds the
- * notification title and the media session's `METADATA_KEY_TITLE` from the same
- * page metadata, so equality there is strong evidence the two describe the same
- * playback.
- *
- * Scope discipline: only notifications from the browser packages we target are
- * ever inspected, and only the fields describing the playing media. Nothing
- * else is read, stored, or logged.
- */
 object NotificationHints {
 
 	data class Hint(
@@ -42,7 +11,7 @@ object NotificationHints {
 		val text: String?,
 		val atMillis: Long = System.currentTimeMillis(),
 	) {
-		/** Everything we saw, for the Phase 0 report. */
+		/** Everything observed on the notification surface. */
 		fun describe(): String =
 			"host=${host ?: "<none>"} subText=${quote(subText)} " +
 				"title=${quote(title)} text=${quote(text)}"

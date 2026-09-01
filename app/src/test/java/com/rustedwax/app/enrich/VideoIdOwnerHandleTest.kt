@@ -93,12 +93,6 @@ class VideoIdOwnerHandleTest {
 		)
 	}
 
-	/**
-	 * Measured 2026-08-05 on `QnRnooyKeZk`. YouTube auto-translates titles for
-	 * the viewer, so the foreground observer reads the *displayed* title off the
-	 * screen while `videoDetails` keeps the uploaded one. Comparing only against
-	 * the original refused every auto-translated Short — silently, and forever.
-	 */
 	@Test
 	fun `the page's own displayed title also satisfies the title gate`() {
 		val resolver = VideoIdResolver()

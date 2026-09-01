@@ -2,11 +2,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
 	xmlns:tools="http://schemas.android.com/tools">
 
-	<!--
-		Phases 0–2: detection probe, encrypted key storage, manual broadcast.
-		No foreground service yet — automatic scrobbling is Phase 3.
-	-->
-
 	<!-- Talking to Hive nodes: validating a key, and broadcasting scrobbles. -->
 	<uses-permission android:name="android.permission.INTERNET" />
 	<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -75,7 +70,7 @@
 		</service>
 
 		<!--
-			Phase 4: optional browser-evidence watcher. Off unless the user
+			Optional browser-evidence watcher. Off unless the user
 			enables it in Accessibility settings. Reads the URL bar plus exact
 			visible YouTube Shorts ad labels, and is scoped to browser packages
 			in accessibility_service_config.xml, which the OS enforces.

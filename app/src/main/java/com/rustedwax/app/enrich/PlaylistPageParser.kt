@@ -4,31 +4,6 @@ import com.rustedwax.app.detect.TitleParser
 import org.json.JSONArray
 import org.json.JSONObject
 
-/**
- * Reads a YouTube playlist page into its entries. Pure — no network, no
- * Android.
- *
- * ## Why the playlist beats searching
- *
- * Searching finds *an* upload matching the title; a playlist names the *exact*
- * one being played. Measured on the reported playlist
- * (`PLmGqppZSJ9nXHUioh-WAy7ne8I3nP4FOR`, 2026-07-27): searching "Doomed /
- * Bring Me The Horizon" resolves `CZFTfYYql4k` (Topic, 274 s), while the
- * playlist actually contains `5Oc0ja19_GU` (4:35). Both are the same song by
- * the same artist at the same length, so no amount of title/channel/duration
- * strictness separates them — search would have written a link to a *different
- * upload than the one played*. The playlist is exact, and one fetch covers
- * every track in it.
- *
- * ## Markup note
- *
- * Playlist pages no longer use `playlistVideoRenderer`. They render through
- * `lockupViewModel`, where the id is `contentId`, the title sits at
- * `metadata.lockupMetadataViewModel.title.content`, the channel is the next
- * metadata row, and the duration is a thumbnail badge. Verified against the
- * live page; [YouTubePageResolver]-style `EXTRACTION FAILED` logging covers
- * the day this changes again.
- */
 object PlaylistPageParser {
 
 	/** Within a known playlist the set is bounded, so title + duration suffices. */
@@ -119,17 +94,6 @@ object PlaylistPageParser {
 		}.distinctBy(SearchResultsParser.Candidate::videoId)
 	}
 
-	/**
-	 * The one entry this session is playing, or null when that is not decidable.
-	 *
-	 * **Exactly one**, never the first of several. A playlist can hold the same
-	 * song twice — two uploads of one track, or the same track under two
-	 * different ids — and picking whichever the page happened to render first
-	 * would put a coin-flip URL on an immutable chain. The contract
-	 * (`<redacted-private-path>` §7.2 rule 8) requires the second
-	 * match to refuse, which is the same rule the search route has always
-	 * applied; until v0.9.6 the playlist route quietly did not.
-	 */
 	fun match(
 		entries: List<SearchResultsParser.Candidate>,
 		title: String,

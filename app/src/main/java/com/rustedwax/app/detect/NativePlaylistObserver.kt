@@ -1,13 +1,5 @@
 package com.rustedwax.app.detect
 
-/**
- * Process-local bridge carrying the latched native playlist to SessionProbe.
- *
- * Mirrors [NativeShortsObserver]: the accessibility service writes, the probe
- * reads, and nothing else touches it. Scoped to `com.google.android.youtube`
- * only — YouTube Music was not probed for this phase and its resource ids must
- * not be assumed to transfer (`<redacted-private-path>` §7.1).
- */
 object NativePlaylistObserver {
 
 	private val latch = NativePlaylistLatch()

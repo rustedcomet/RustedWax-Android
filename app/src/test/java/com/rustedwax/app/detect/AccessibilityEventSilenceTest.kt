@@ -39,13 +39,6 @@ class AccessibilityEventSilenceTest {
 		}
 	}
 
-	/**
-	 * Measured 2026-08-06 15:08:39: the detector reported a 45-second outage
-	 * while, inside that window, the service measured the seekbar thirteen times
-	 * and credited forty seconds of playback. A latched Short is read by the
-	 * service's own 1s poll and YouTube emits no callbacks at all while it is —
-	 * so events are not liveness, and successful captures are.
-	 */
 	@Test
 	fun `a measuring observer is alive even with no events at all`() {
 		val silence = AccessibilityEventSilence()
@@ -95,12 +88,6 @@ class AccessibilityEventSilenceTest {
 		assertTrue(line.contains("unobserved"))
 	}
 
-	/**
-	 * Reproduced on demand 2026-08-06: press Back out of the Shorts player and
-	 * YouTube keeps `reel_time_bar` in its hierarchy while the player root stops
-	 * being visible, so every capture reads `found 0; captured 2 nodes`. 36% of
-	 * the day's captures were that shape — the app open and idle, nothing lost.
-	 */
 	@Test
 	fun `an idle YouTube with nothing playing is never an outage`() {
 		val silence = AccessibilityEventSilence()

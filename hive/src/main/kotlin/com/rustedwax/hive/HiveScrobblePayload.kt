@@ -6,18 +6,6 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
-/**
- * The scrobble payload, ported verbatim from the extension's
- * `src/core/scrobbler/hive/hive.types.ts`.
- *
- * Field names are the on-chain contract with the indexers — do not rename,
- * reorder meaningfully, or "improve" them. Absent fields are omitted entirely
- * rather than serialized as null, matching the extension's behaviour of only
- * assigning properties it actually has.
- *
- * v1 populates the music-side fields only; the movie/episode fields exist in
- * the upstream type but are unreachable without DOM access (see <redacted-private-path>).
- */
 data class HiveScrobblePayload(
 	val kind: String = KIND_VIDEO,
 	val title: String,
@@ -31,16 +19,7 @@ data class HiveScrobblePayload(
 	val url: String? = null,
 	val app: String = APP_NAME,
 ) {
-	/**
-	 * Listens are invalid without the canonical link the indexer renders.
-	 *
-	 * The rule is unchanged and just as strict; what changed is that the shape is
-	 * no longer written here. Each platform declares its own canonical form, so a
-	 * future source neither fails this check wrongly nor slips past it — see
-	 * `<redacted-private-path>` §5.3. Platforms with no declared shape are unrestricted
-	 * rather than silently rejected, which is what a platform we have not taught
-	 * the app about actually means.
-	 */
+
 	val hasRequiredYouTubeUrl: Boolean
 		get() = canonicalUrlPatternFor(platform)?.matches(url.orEmpty()) ?: true
 
@@ -95,16 +74,6 @@ data class HiveScrobblePayload(
 		fun canonicalUrlPatternFor(platform: String?): Regex? =
 			if (platform == PLATFORM_YOUTUBE) YOUTUBE_WATCH_URL else null
 
-		/**
-		 * JSON string escaping matching JavaScript's `JSON.stringify`.
-		 *
-		 * Hand-rolled on purpose. Android's bundled `org.json` escapes forward
-		 * slashes (`hivescrobblesai\/1.0`) while `JSON.stringify` does not, so
-		 * using `JSONObject.quote` produced payloads that differed byte-for-byte
-		 * from the extension's — and the JVM `org.json` used in unit tests
-		 * doesn't reproduce that behaviour, so the tests passed while the device
-		 * wrote something else. Observed on-chain, 2026-07-23.
-		 */
 		fun quoteJson(value: String): String {
 			val sb = StringBuilder(value.length + 2)
 			sb.append('"')
@@ -128,25 +97,8 @@ data class HiveScrobblePayload(
 			return sb.toString()
 		}
 
-		/** `custom_json` id. The indexers filter on this exact string. */
 		const val CUSTOM_JSON_ID = "hive_scrobble_ai"
 
-		/**
-		 * Who wrote this entry.
-		 *
-		 * Was `hivescrobblesai/1.0` — byte-identical to Hive Scrobbler's, which
-		 * made RustedWax entries indistinguishable from theirs on an immutable
-		 * ledger. That contradicts the README's unaffiliated positioning in the
-		 * direction that matters most: any RustedWax defect landed attributed to
-		 * someone else's app, and they had no way to tell the two apart or to
-		 * filter ours out.
-		 *
-		 * The `custom_json` id is deliberately *not* changed. Sharing it is the
-		 * point — the entries belong in the same feed. Only the authorship claim
-		 * was wrong. `<redacted-private-path>` §9.3 remains open on whether the
-		 * scrobble.life maintainer would rather have a distinct id as well; that
-		 * is their call and this change does not pre-empt it.
-		 */
 		const val APP_NAME = "rustedwax/$BUILD_VERSION"
 
 		const val KIND_SONG = "song"

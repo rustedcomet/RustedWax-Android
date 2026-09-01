@@ -4,36 +4,6 @@ import com.rustedwax.app.detect.SessionSnapshot
 import com.rustedwax.hive.HiveScrobblePayload
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * What became of one finalized track, as a value.
- *
- * ## Why this type exists
- *
- * `<redacted-private-path>` asked for "exactly one payload or one typed refusal
- * per finalized track". That wording cannot be satisfied by this engine and
- * should not be: it has no name for the boundaries that are *deliberately*
- * silent — monitoring stopped, auto-scrobble off, a package that is not a
- * target, a stale source epoch, no posting key — and it forbids the second
- * payload the existing repeat-listen rule legitimately produces. Making the
- * code match that sentence would mean inventing Not-logged rows for switches
- * the user themselves turned off, which is a product regression dressed as a
- * test fix.
- *
- * So the gate is restated as the thing that is actually worth guaranteeing:
- * **every finalized target presented to an initialized engine produces exactly
- * one terminal outcome, and that outcome is one of these three.** No silent
- * fall-through, no double-counting, no path that reaches the end of
- * finalization having decided nothing.
- *
- * ## What this type is not
- *
- * It is not a new decision. Nothing here chooses an outcome; each variant is
- * reported *from* the branch the engine already takes, at the moment it takes
- * it. A recorder that inferred the outcome afterwards — from the skip list, the
- * broadcast list and some rules about which wins — would be a second
- * implementation of the pipeline, and would agree with the first right up until
- * the moment it mattered.
- */
 sealed interface FinalizationOutcome {
 
 	/**

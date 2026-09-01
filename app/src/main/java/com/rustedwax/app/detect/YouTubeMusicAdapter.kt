@@ -4,37 +4,6 @@ import com.rustedwax.core.*
 import com.rustedwax.core.MetadataFields
 import com.rustedwax.core.SourceSessionId
 
-/**
- * The native YouTube Music app.
- *
- * ## The one difference that has teeth
- *
- * `<redacted-private-path>` §3.2, in one field. The YouTube **app** publishes the
- * *channel* in the MediaSession artist slot; YouTube **Music** publishes a real
- * artist and a real album. One rule covering both packages was correct for one
- * of them and wrote the channel on-chain as the artist for the other:
- *
- * ```
- * TITLE:  Snoop Doggy Dogg - Intro
- * ARTIST: King Of Rap          ← the channel
- *   → broadcast as artist "King Of Rap", title "Snoop Doggy Dogg - Intro"
- * ```
- *
- * That is [SourceProfile.trustsMetadataArtist], and it is declared **here and
- * only here**. Everything downstream reads the declaration; nothing asks whether
- * the package happens to be YouTube Music. Pano reaches the same split by
- * package list — every YouTube fork is in
- * `DEFAULT_IGNORE_ARTIST_META_WITHOUT_FALLBACK`, and YouTube Music deliberately
- * is not.
- *
- * ## The two things it must *not* inherit
- *
- * The native playlist observer is scoped to the YouTube app's watch screen by
- * the accessibility service that feeds it. Reading it here would attach one
- * app's visible playlist bar to another app's listen, and clearing it here would
- * discard evidence the YouTube app is still using. Both are refused explicitly
- * rather than by the base class happening not to be reached.
- */
 class YouTubeMusicAdapter(
 	packageName: String,
 	appLabel: String,

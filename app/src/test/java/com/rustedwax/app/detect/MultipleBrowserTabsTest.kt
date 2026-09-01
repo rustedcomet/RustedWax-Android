@@ -84,15 +84,6 @@ class MultipleBrowserTabsTest {
 		assertEquals("dQw4w9WgXcQ", coverage?.videoId)
 	}
 
-	/**
-	 * The two halves joined, on the case that produced the defect.
-	 *
-	 * One MediaSession is playing `dQw4w9WgXcQ`. The tab in front is showing
-	 * `7i_2TJv96Wk`, and it is that tab the scan describes. The selector must
-	 * refuse — and because it refuses, nothing reaches the evidence store at all,
-	 * so the playing listen keeps whatever coverage it already had rather than
-	 * acquiring a proof of a page it never played.
-	 */
 	@Test
 	fun `a scan of a different visible tab never becomes the playing listen's coverage`() {
 		val playing = instance(1, "Sleepwalking")

@@ -4,15 +4,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The two continuity defects measured on the Galaxy A36, 2026-08-18, and the
- * guard rails that keep their fixes narrow.
- *
- * Each timeline is taken from `rustedwax-log (25).txt`. Before the fix, the
- * first two tests here reproduced the split and the lost credit exactly; they
- * now assert the continuity, and everything after them asserts what still must
- * not continue.
- */
 class ShortsContinuityFieldTest {
 
 	private val threshold = 0.60
@@ -21,15 +12,6 @@ class ShortsContinuityFieldTest {
 
 	// --- Defect 1: the footer title blinking during a 2x hold ---------------
 
-	/**
-	 * 16:31:27–16:33:10, `9s38_ONe2mE` / "This girl was crazy…" / @nyangear / 178s.
-	 *
-	 * One continuous viewing, seekbar 2s → 119s. The 2× hold took the footer off
-	 * screen and it came back in two steps, so the tracker read
-	 * `title → null → title` and finalized three times: 84s, 3s, 24s, logged as
-	 * `played 48%`, `played 2%` and `played 14%` — three Not logged rows for a
-	 * viewing that was over the bar.
-	 */
 	@Test
 	fun `a title blinking out during a 2x hold stays one listen and clears the bar`() {
 		val tracker = tracker()
@@ -144,17 +126,6 @@ class ShortsContinuityFieldTest {
 
 	// --- Defect 2: the picture-in-picture handback --------------------------
 
-	/**
-	 * 15:37:13–15:37:52, `8Bh_XF6-48E` / @enika_dj / 59s.
-	 *
-	 * Read to `8s of 59s`, sent to PiP for 23 seconds, handed back at
-	 * `41s of 59s` still playing. Only witnessed deltas were ever added, so the
-	 * 33 seconds the bar itself accounted for became 23 seconds of wall-clock
-	 * inference and the listen finalized at 54%.
-	 *
-	 * Here the bar returns before the no-credit grace runs out, so the listen is
-	 * never interrupted and the reconciliation happens in place.
-	 */
 	@Test
 	fun `a Short handed back from PiP in time is credited what its bar shows`() {
 		val tracker = tracker()
@@ -377,21 +348,6 @@ class ShortsContinuityFieldTest {
 
 	// --- Defect 3: the same blink while YouTube renders no seekbar -----------
 
-	/**
-	 * The seekbar-less path carried the same split the measured path did.
-	 *
-	 * `v0.11.0l` §1 fixed the blink on the measured `OrganicObservation` path and
-	 * recorded the seekbar-less one as "deliberately unchanged; no evidence of a
-	 * defect on it exists". The owner reported the evidence on 2026-08-25: a
-	 * Short held at 2x produced a Not logged row saying it played a few seconds,
-	 * and then a second, full entry in History when the same viewing ended.
-	 *
-	 * YouTube intermittently renders no Shorts progress bar at all (v0.9.10), and
-	 * a footer whose title has blinked out while that is true arrives here as an
-	 * `UnmeasuredObservation` carrying `title = null`. The identity key then
-	 * misses, the fragment already earned is finalized on its own, and the
-	 * listen restarts from zero — one viewing, two rows.
-	 */
 	@Test
 	fun `a title blinking out with no seekbar stays one listen`() {
 		val tracker = tracker()

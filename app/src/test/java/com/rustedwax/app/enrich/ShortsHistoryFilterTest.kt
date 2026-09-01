@@ -5,21 +5,6 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The Shorts filter on the watch-history page.
- *
- * Measured 2026-08-17 against the live account: the unfiltered history page —
- * the one [WatchHistoryResolver] has always fetched — returned 200 ordinary
- * entries and **zero** `shortsLockupViewModel`, while the same session's
- * `?bp=<Shorts chip params>` response returned 200 Shorts including every id
- * that had failed to scrobble that evening. The renderer never changed, so
- * [WatchHistoryParser.collectShorts] needed no edit; only the feed being asked
- * for was wrong.
- *
- * These fixtures keep the real shapes: a `chipViewModel` whose `browseEndpoint`
- * carries `browseId: FEhistory` and the filter `params`, and a Shorts feed of
- * `shortsLockupViewModel` cards carrying the id under `reelWatchEndpoint`.
- */
 class ShortsHistoryFilterTest {
 
 	private val chipBar = """

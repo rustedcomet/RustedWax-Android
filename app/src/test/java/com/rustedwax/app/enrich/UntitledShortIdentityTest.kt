@@ -46,14 +46,7 @@ class UntitledShortIdentityTest {
 
 	@Test
 	fun `same channel same length is broken by watch-history recency`() {
-		// Measured 2026-08-06: a Short opened straight into picture-in-picture
-		// counted to 100% and was then thrown away, because its channel had two
-		// 57-second uploads and there was no title to tell them apart.
-		//
-		// Candidates arrive newest-first from watch history, and the Short being
-		// identified is the one playing now — so the newest survivor is the
-		// current one. Handle and duration still both have to agree; recency only
-		// says which survivor is current.
+
 		val attempt = VideoIdResolver().selectOwnerHandleMatch(
 			candidates = listOf(
 				candidate("aaaaaaaaaaa", "Watched just now", "@creator", 50),
@@ -137,11 +130,7 @@ class UntitledShortIdentityTest {
 
 	@Test
 	fun `a Short with no on-screen title still builds a payload`() {
-		// Measured 2026-08-06: a Short sent straight to picture-in-picture
-		// counted to 100%, resolved correctly from watch history, and was then
-		// dropped with "payload not buildable" because the builder had no title.
-		// The resolver had the canonical one all along — it corroborated the id
-		// on that video's own watch page.
+
 		val session = SessionSnapshot(
 			packageName = YouTubeProbe.YOUTUBE_PACKAGE,
 			appLabel = "YouTube Shorts (foreground)",

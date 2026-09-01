@@ -11,14 +11,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
-/**
- * Play time surviving a media session that vanished mid-track.
- *
- * Chrome destroys and recreates its `MediaSession` around ad breaks and playlist
- * transitions, which used to reset `playedMs` to zero and score each fragment
- * separately. The 2026-07-30 session lost a 196-second video that had been
- * watched to 80% because it arrived in three pieces, none of which reached 60%.
- */
 class TrackProgressCarryTest {
 
 	private val pkg = "com.android.chrome"
@@ -284,22 +276,6 @@ class TrackProgressCarryTest {
 		sourceItemId = "6AVRCQBc59w",
 	)
 
-	/**
-	 * Measured 2026-08-09, native YouTube. The user minimized the app four
-	 * minutes mid-song and came back to it:
-	 *
-	 * ```
-	 * 21:52:07  session ended, 105s carried, stopped at pos=105s
-	 * 21:53:07  [session continuation expired]  played 105s of 234s → 45%, skipped
-	 * 21:56:10  session +  pos=107968ms
-	 * 21:58:25  [track change]                  played 129s of 234s → 55%, skipped
-	 * ```
-	 *
-	 * 105 + 129 = 234 — the whole video, watched end to end, and nothing was
-	 * broadcast. The replacement resumed within three seconds of where the first
-	 * fragment stopped, on the same resolved id, so it could prove it was the
-	 * same viewing. Only the 60-second clock said otherwise.
-	 */
 	@Test
 	fun `a listen resumed minutes later still adds up to one full listen`() {
 		val native = YouTubeProbe.YOUTUBE_PACKAGE
@@ -476,12 +452,6 @@ class TrackProgressCarryTest {
 		assertEquals(1, TrackProgressCarry.size())
 	}
 
-	/**
-	 * The user's "it played 100% and then a couple of ads came" case, measured
-	 * 2026-08-09 in Chrome: `pos=223381ms` of a 223s video with 210s measured.
-	 * That listen is finished and over threshold; the ads after it carry no id,
-	 * so nothing would collect it. Waiting is only for a listen that can resume.
-	 */
 	@Test
 	fun `a track that ran to its end is not held waiting to resume`() {
 		val native = YouTubeProbe.YOUTUBE_PACKAGE
@@ -512,7 +482,7 @@ class TrackProgressCarryTest {
 	}
 
 	/**
-	 * Physical regression, Galaxy A36 2026-08-20. YouTube Music token 553
+	 * Reduced physical regression. YouTube Music token 553
 	 * disappeared at 199165ms of 299235ms (66.6%) after resolving exact id
 	 * UxQv0SGRt8g. The generic resumable-position path parked that already-earned
 	 * auto-scrobble for fifteen minutes, leaving it in neither History nor Not
@@ -602,12 +572,6 @@ class TrackProgressCarryTest {
 		assertNull(TrackProgressCarry.claim(pkg, track, now = later))
 	}
 
-	/**
-	 * Measured 2026-08-09: Chrome playing `eC-F_VZ2T1c`, the id latched from the
-	 * address bar, minimized for 100 seconds — and it split anyway, because the
-	 * long window was keyed to where *native* keeps its exact id. The browser
-	 * proves the same fact by another route, so it earns the same window.
-	 */
 	@Test
 	fun `a browser with a latched address-bar id resumes like a native one`() {
 		val chromeTrack = TrackIdentity(

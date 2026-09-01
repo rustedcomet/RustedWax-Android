@@ -6,48 +6,6 @@ import com.rustedwax.core.PlaybackSourceCapabilities
 import com.rustedwax.core.SourceSessionId
 import com.rustedwax.core.SourceDescriptor
 
-/**
- * One source's interpretation of its own observations.
- *
- * ## Why this exists
- *
- * `<redacted-private-path>` §1: browser, native YouTube, Shorts and YouTube Music
- * "share one controller binding, despite relying on fundamentally different
- * evidence", expressed as "repeated `isNative` checks and package-specific
- * branches", so "a browser fix can therefore alter shared finalization or
- * lifecycle behavior used by native YouTube."
- *
- * Phase 3 moved the *measurement* half out, into [PlaybackReducer], and gave it
- * [PlaybackSourceCapabilities] so it never sees a package name. This is the
- * *evidence* half. A source declares what its own observations mean, and
- * `SessionProbe` stops knowing.
- *
- * ## The rules it holds to
- *
- * - **No Android.** Every member takes values — [MetadataFields], longs,
- *   strings — never a `MediaMetadata`, `PlaybackState` or `MediaController`.
- *   `SessionProbe` is the thin gateway that extracts primitives from framework
- *   objects; the decisions are here, where they run on a JVM.
- * - **No finalization.** Nothing here can build a `SessionSnapshot`, invoke
- *   `onTrackFinalized`, broadcast, queue, claim dedup or write a setting. The
- *   return types are the proof: an adapter answers questions and asks for
- *   [SourceEffect]s, exactly as the reducer answers with [PlaybackEffect]s, and
- *   neither vocabulary can express any of those things.
- * - **No shared mutable selection state.** An adapter is constructed per watch
- *   from immutable values. Two adapters for the same package, or for different
- *   packages, hold nothing in common.
- * - **No adapter knows another.** There is no cross-adapter call and no
- *   `when (adapter)` anywhere downstream of [SourceRegistry.forPackage].
- *
- * ## What is deliberately still outside
- *
- * Latching, corroboration and rejected-id bookkeeping remain in
- * the legacy `Watch`: `<redacted-private-path>` types that stack in **Phase 6**,
- * and dragging it forward would be the redesign this phase is forbidden to
- * start. What moves here is the *sourcing* of evidence — which stores a source
- * consults and what its own metadata means — which is what the Phase 4 adapter
- * table lists.
- */
 interface SourceAdapter : com.rustedwax.android.sources.SourceAdapter {
 
 	/** Which package this adapter speaks for, and how the log names it. */
@@ -118,7 +76,7 @@ interface SourceAdapter : com.rustedwax.android.sources.SourceAdapter {
 	 * Pure with respect to the listen: the request carries everything about the
 	 * listen the reading may consult, and the reply carries the resolver evidence
 	 * this source contributed plus any [SourceEffect] the host owes. Latching and
-	 * corroboration of the reply stay with the caller (Phase 6).
+	 * corroboration of the reply stay with the caller.
 	 */
 	fun readIdentity(request: SourceIdentityRequest): SourceIdentityReading
 
@@ -147,7 +105,7 @@ interface SourceAdapter : com.rustedwax.android.sources.SourceAdapter {
 	 * The listen has settled on an identity; what this source does about it.
 	 *
 	 * Separate from [readIdentity] because the settling itself — latching,
-	 * corroboration, rejected ids — is the caller's until Phase 6. What is *this
+	 * corroboration, and rejected ids — belongs to the caller. What is *this
 	 * source's* is what follows from the answer: a browser retries a parked carry
 	 * the moment the address bar finally names the item, and looks for visible ad
 	 * evidence filed against exactly that id.
@@ -337,19 +295,6 @@ data class SourceIdentityRequest(
 	val soleSession: Boolean,
 )
 
-/**
- * What one reading of a source's own evidence produced.
- *
- * [identity] is [com.rustedwax.core.ItemIdentity], not a YouTube verdict, so
- * a source that has never heard of YouTube can answer this contract. The legacy
- * `SessionSnapshot` is still YouTube-typed until the Phase 7 finalization split,
- * and `SessionProbe` names that seam explicitly rather than hiding it here.
- *
- * The evidence *observations* below still carry the existing `detect` store
- * types. Re-typing those stores is `<redacted-private-path>` Phase 5, which this
- * phase is forbidden to begin; adapters read them through their existing narrow
- * ports instead.
- */
 data class SourceIdentityReading(
 	val identity: com.rustedwax.core.ItemIdentity,
 	/** Resolver evidence after this source's contribution, in place of the request's. */
@@ -373,7 +318,7 @@ data class SourceObservationCandidate(
 	val key: Long,
 	/** This listen is the one playing the item the observation named. */
 	val describesNamedItem: Boolean = false,
-	/** The listen has ended; nothing observed now belongs to it. */
+
 	val finalized: Boolean = false,
 	/** The transport is playing. Carried so a refusal can say what the ambiguity was. */
 	val playing: Boolean = true,
@@ -389,14 +334,8 @@ data class SourceHostObservationRequest(
 /** Which listen an observation was bound to, or why it was refused. */
 sealed interface SourceBinding {
 
-	/**
-	 * @param namedThisInstance the observation carried an item id and this listen
-	 * is the one playing it, so the binding rests on the observation naming itself
-	 * rather than on there being nothing else it could be.
-	 */
 	data class Bound(val key: Long, val namedThisInstance: Boolean) : SourceBinding
 
-	/** @param reason the tail of one log line; the host prefixes its own. */
 	data class Refused(val reason: String) : SourceBinding
 }
 

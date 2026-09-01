@@ -45,15 +45,6 @@ object UrlEvidence {
 	private val byPackage = ConcurrentHashMap<String, Evidence>()
 	private val generationByPackage = ConcurrentHashMap<String, Long>()
 
-	/**
-	 * Last playlist seen per package, kept far longer than [FRESH_MS].
-	 *
-	 * A playlist is context, not a position: it stays true for the whole
-	 * sitting even though the bar stops naming individual videos within
-	 * seconds. Field logs showed the bar silent for 40 minutes while a
-	 * playlist kept advancing, so the ordinary freshness window would throw
-	 * away the one piece of evidence that can still identify those tracks.
-	 */
 	private val playlistByPackage = ConcurrentHashMap<String, Pair<String, Long>>()
 
 	private const val PLAYLIST_FRESH_MS = 3L * 60 * 60 * 1000

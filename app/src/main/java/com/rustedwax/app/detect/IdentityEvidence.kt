@@ -2,40 +2,12 @@ package com.rustedwax.app.detect
 
 import com.rustedwax.core.ItemIdentity
 
-/**
- * Everything a finalized listen knows about *what it was*, frozen.
- *
- * ## Why this is a separate concept
- *
- * `<redacted-private-path>` §5 lists eight responsibilities fused into one
- * 27-field transport object. This is the one the audit's target architecture
- * describes as "identity resolution knows finalized evidence, but not
- * foreground/minimized UI state": the verdict the probe reached, the inputs a
- * resolver may consult, and the literal observations that can veto a listen —
- * and nothing about measurement or about how the source is displayed.
- *
- * ## Why it is in `detect` and not in `core`
- *
- * Every field here is one of five types that are today nested inside
- * Android-importing files in this package — `YouTubeProbe.Identity`,
- * `ResolverContext`, `NotificationHints.Hint`,
- * `MediaSessionAccessibilityEvidence.Coverage` and [SourceProof]. Moving them
- * would touch several hundred call sites, which is a package-boundary change
- * and belongs to the audit's Phase 8 ("establish package boundaries first"),
- * not to a phase whose whole contract is behaviour preservation.
- *
- * What this file does hold to is the direction rule: it imports nothing from
- * `scrobble`, `enrich`, `hive` or `ui`, and it contains no Android types of its
- * own. When the evidence types move, this moves with them and its callers do
- * not change.
- */
 data class IdentityEvidence(
 	/**
 	 * The verdict the probe reached and froze; never re-derived at finalization.
 	 *
 	 * Typed as the source-neutral [ItemIdentity], not as `YouTubeProbe.Identity`.
-	 * That was the concrete violation the Phase 2/3 report named: a shared
-	 * finalized-track type that can only hold a YouTube verdict is one a Spotify
+	 * A shared finalized-track type that can only hold a YouTube verdict is one a Spotify
 	 * adapter cannot reach without inventing a `videoId`. YouTube's identity
 	 * implements the interface, so every existing caller is unchanged and the
 	 * YouTube-specific accessors below still work by narrowing.

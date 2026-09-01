@@ -7,9 +7,9 @@ package com.rustedwax.core
  * names. Each field asks a behavioral question so a future source can declare
  * its own evidence and transport semantics without source-name branches.
  *
- * Phase 4 moves the *evidence* branches — browser notifications, address bar,
- * browser ad checks — into per-source adapters. This is the measurement and
- * lifecycle half, which is what Phase 3 owns.
+ * Per-source adapters own evidence branches such as browser notifications,
+ * address-bar observations, and browser ad checks. This type describes the
+ * measurement and lifecycle capabilities shared with the reducer.
  */
 data class PlaybackSourceCapabilities(
 	/**

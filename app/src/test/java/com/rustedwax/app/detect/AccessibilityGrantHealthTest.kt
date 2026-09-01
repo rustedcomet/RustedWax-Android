@@ -23,9 +23,7 @@ class AccessibilityGrantHealthTest {
 
 	@Test
 	fun `a grant that was once live and is now off is a drop, not a choice`() {
-		// The 2026-08-05 case: Android disables a crashed accessibility service,
-		// which is byte-identical to the user revoking it. The app must not
-		// claim the user did it, and must not stay silent either.
+
 		assertEquals(
 			GrantHealth.DROPPED,
 			AccessibilityGrantHealth.classify(
@@ -38,12 +36,7 @@ class AccessibilityGrantHealthTest {
 
 	@Test
 	fun `the post-install window is not reported as a crash`() {
-		// Measured immediately after `adb install -r` on 2026-08-05:
-		// accessibility_enabled read 0 while both services were still named in
-		// enabled_accessibility_services, and settled to 1 seconds later with
-		// both reconnecting. Warning here would fire on every install — the
-		// mirror image of the bug this class exists to catch, and the fastest
-		// way to train the owner to ignore the warning that matters.
+
 		assertEquals(
 			GrantHealth.SETTLING,
 			AccessibilityGrantHealth.classify(

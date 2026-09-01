@@ -76,17 +76,6 @@ class Settings internal constructor(
 		SettingsMigration.ensure(store)
 	}
 
-	/**
-	 * Whether the app watches media sessions at all.
-	 *
-	 * The outer of the two switches, and the stronger one: with this off the
-	 * probe is torn down, browser notifications are not read, and nothing is
-	 * observed or logged. [autoScrobble] only gates the *last* step of the
-	 * pipeline, so it can't answer "stop reading anything".
-	 *
-	 * Defaults on — a fresh install that has been granted Notification Access
-	 * is expected to be watching.
-	 */
 	var monitoringEnabled: Boolean
 		get() = store.getBoolean(KEY_MONITORING, true)
 		set(value) = store.putBoolean(KEY_MONITORING, value)
@@ -165,20 +154,6 @@ class Settings internal constructor(
 		get() = store.getBoolean(KEY_WATCH_HISTORY, false)
 		set(value) = store.putBoolean(KEY_WATCH_HISTORY, value)
 
-	/**
-	 * Whether each accessibility grant has ever been observed as live.
-	 *
-	 * Android drops a service from `enabled_accessibility_services` when it
-	 * crashes, which looks exactly like the user turning it off — and on
-	 * 2026-08-05 that happened to the browser watcher and went unnoticed for a
-	 * day, with roughly half the day's watch history never reaching the app.
-	 * Remembering that a grant was once live is what lets the UI distinguish
-	 * "you have not enabled this yet" from "this stopped on its own", which are
-	 * the same boolean but very different messages.
-	 *
-	 * Deliberately one-way: only cleared when the user re-grants and it goes
-	 * live again, so a crash cannot quietly reset the evidence of itself.
-	 */
 	var browserEvidenceEverGranted: Boolean
 		get() = store.getBoolean(KEY_BROWSER_EVER_GRANTED, false)
 		set(value) = store.putBoolean(KEY_BROWSER_EVER_GRANTED, value)

@@ -35,22 +35,6 @@ import kotlinx.coroutines.withContext
 /** Taps on the version that unlock [SettingsRow.DEVELOPER_MODE]. */
 const val DEVELOPER_TAPS = 7
 
-/**
- * The version, and the way in to the developer tier.
- *
- * Deliberately one line. "About" screens accumulate — a licence, a link, a
- * credit, a build hash — and this one exists to answer "which build is this?"
- * and to be tapped.
- *
- * The unlock is unannounced on purpose: the tier behind it holds a plain-text
- * recording of what somebody watched and a switch that decides what reaches an
- * unerasable ledger, and neither is something to invite an ordinary install into
- * by putting a `Show` button next to it. Someone who needs it has been told how.
- *
- * @param onUnlock called once, on the seventh consecutive tap. The counter is
- * not reset by anything else on the screen; there is nothing here worth
- * protecting from a determined tapper, only from an accidental one.
- */
 @Composable
 fun AboutRow(version: String, unlocked: Boolean, onUnlock: () -> Unit) {
 	var taps by remember { mutableIntStateOf(0) }
@@ -65,40 +49,6 @@ fun AboutRow(version: String, unlocked: Boolean, onUnlock: () -> Unit) {
 	}
 }
 
-/**
- * Everything that used to be behind `Advanced`, and now is not offered at all
- * until somebody asks for it seven times.
- *
- * ## What happened to Advanced
- *
- * `Advanced` was a `Show`/`Hide` disclosure holding four privacy switches, the
- * Shorts rule and the event log. It was a second settings screen anybody could
- * open, and its contents were not *advanced* so much as *unasked* — nobody
- * arrives at a scrobbler wanting to configure per-kind envelope encryption.
- *
- * The privacy switches are **not deleted**: `Settings.privacyMusic` and its
- * three siblings, `PrivacyCipher`, `PrivateScrobble` and the broadcast path that
- * consults them are all untouched, and every stored answer is preserved. They
- * are off the menu because there is currently no case for them, which is a
- * decision about a menu and is meant to be cheap to reverse.
- *
- * What is here is what someone diagnosing this app actually reaches for: the
- * log, the Shorts rule that decides what a feed can put on-chain, and a
- * connection check that answers "can this device scrobble at all" without
- * broadcasting anything to find out.
- *
- * Reads and writes [Settings] directly, as its predecessor did — nothing else on
- * the screen depends on the Shorts switch, so hoisting it would add coupling to
- * gain nothing. `Event log` is the exception and is passed in: whether it is on
- * decides whether the `Log` destination exists at all, so the screen above has
- * to know the answer and two copies of it would be two answers.
- *
- * @param onLock puts the tier away again. The settings behind it keep their
- * values — locking changes what is *shown*, never what is recorded.
- * @param postingPublicKey derives the `STM…` **public** posting key from the
- * vault. A function rather than a value so the read happens off the main thread
- * inside the check, and so the private key never crosses into the UI at all.
- */
 @Composable
 fun DeveloperModeSection(
 	eventLogging: Boolean,

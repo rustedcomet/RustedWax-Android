@@ -16,7 +16,7 @@ import java.net.URL
  * which answers `song` vs `video` far better than any title heuristic — plus
  * the description, where cover uploads routinely credit the original artist.
  *
- * ## This is the fragile part of Phase 4 (decision D8)
+ * ## Unsupported-page boundary
  *
  * `ytInitialPlayerResponse` is an undocumented blob in a page nobody promised
  * would keep its shape. The mitigations are not optional:
@@ -47,11 +47,6 @@ class YouTubePageResolver(
 			return it
 		}
 
-		// Asked first, and asked even when the page succeeds. It is 10 KB against
-		// ~615 KB, it answers the music question better than anything the page
-		// carries, and it is the only source left when the page times out —
-		// which happened on ~12% of ids in field testing and is what let a stale
-		// video id reach the chain with the wrong url.
 		val music = resolveFromYouTubeMusic(videoId)
 
 		val html = withTimeoutOrNull(TIMEOUT_MS) { fetch(videoId) }
@@ -104,15 +99,6 @@ class YouTubePageResolver(
 		return finish(merge(parsed, music), fellBackToMusic = false)
 	}
 
-	/**
-	 * Fold the music client's answer into the watch page's.
-	 *
-	 * The page wins wherever both speak, because its description is the richer
-	 * source — the music client's `description` is a bare artist name, not the
-	 * `Provided to YouTube by …` block that yields the album and the original
-	 * artist. The music client contributes what the page can't: the catalogue
-	 * verdict, and Art Track credits.
-	 */
 	private fun merge(page: VideoFacts, music: YouTubeMusicParser.Result?): VideoFacts {
 		if (music == null) return page
 		return page.copy(

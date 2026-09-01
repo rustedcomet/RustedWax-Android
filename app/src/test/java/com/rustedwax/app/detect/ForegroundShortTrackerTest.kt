@@ -31,12 +31,6 @@ class ForegroundShortTrackerTest {
 		assertEquals(5_000, advanced.active!!.playedMs)
 	}
 
-	/**
-	 * Measured 2026-08-06 late: YouTube stopped rendering the Shorts progress bar
-	 * entirely, so 47 of 71 Shorts in 85 minutes credited nothing — not because
-	 * the inference refused, but because a Short with no reading could never be
-	 * *started*, and `proofMissing` returns immediately when nothing is active.
-	 */
 	@Test
 	fun `a Short with no seekbar still starts and accrues inferred time`() {
 		val tracker = ForegroundShortTracker()
@@ -76,14 +70,6 @@ class ForegroundShortTrackerTest {
 		assertEquals(60_000L, measured.active!!.durationMs)
 	}
 
-	/**
-	 * Measured 2026-08-07: the owner scrolled Shorts while switching between the
-	 * Home and Shorts tabs and **nothing scrobbled for 42 minutes**. Each switch
-	 * outlasts the 3-second grace, so the Short finalized; each switch back
-	 * re-acquired the same Short from zero. One 32-second Short finalized at
-	 * `0s`, `3s` and `5s` across three switches, never reaching a threshold it
-	 * had long since earned in total.
-	 */
 	@Test
 	fun `a Short interrupted by a tab switch resumes what it earned`() {
 		val tracker = ForegroundShortTracker()
@@ -161,14 +147,6 @@ class ForegroundShortTrackerTest {
 		assertEquals(0, late.active!!.playedMs)
 	}
 
-	/**
-	 * Measured 2026-08-09: a 107s Short taken away at `52s` and re-acquired at
-	 * `52s of 107s` after 105 seconds — minimizing YouTube rather than switching
-	 * tabs — started over at zero and finished below threshold having been
-	 * watched right through. The thirty-second window was measured on tab
-	 * switches; a person putting their phone down is the same interruption at a
-	 * different speed, and the seekbar says so.
-	 */
 	@Test
 	fun `a Short resumed minutes later continues where its seekbar left off`() {
 		val tracker = ForegroundShortTracker()
@@ -236,7 +214,7 @@ class ForegroundShortTrackerTest {
 	}
 
 	/**
-	 * Galaxy A36 / YouTube 20.32.36 field shape: the player, title, exact handle,
+	 * Reduced test-device field shape: the player, title, exact handle,
 	 * duration and seekbar all remain visible, but the seekbar value is cached for
 	 * more than a minute while audio and the YouTube window remain active.
 	 */
@@ -288,7 +266,7 @@ class ForegroundShortTrackerTest {
 
 	/**
 	 * Regression for the exact field route: Home Short, Shorts-tab Short, then a
-	 * Home Short finished in PiP. All three A36 seekbars stayed cached while the
+	 * Home Short finished in PiP. All three seekbars stayed cached while the
 	 * paired evidence remained true; each listen must end once and independently.
 	 */
 	@Test
@@ -360,13 +338,6 @@ class ForegroundShortTrackerTest {
 		assertEquals(3, finalized.size)
 	}
 
-	/**
-	 * Measured 2026-08-08 on a 121-second Short held at 2× throughout: 58 seconds
-	 * of content traversed between two polls and **2** were credited, so it
-	 * finalized at `played 6s of 121s` — 5%, skipped. The same Short at 1×
-	 * scrobbled at 98%. "Played" is content consumed, which is what the
-	 * MediaSession path has scaled by playback rate since Phase 3.
-	 */
 	@Test
 	fun `a Short played at double speed earns the content it traversed`() {
 		val tracker = ForegroundShortTracker()
@@ -494,10 +465,7 @@ class ForegroundShortTrackerTest {
 
 	@Test
 	fun `only the lost-surface signature marks a finalize as unmeasurable`() {
-		// The shipped regression (FIELD §3.1): the marker was wired to
-		// frozenForMissingProof, which is true whenever a Short ends — scrolling
-		// away included — so "(progress surface lost …)" was appended to
-		// essentially every Short finalize.
+
 		val ordinary = ForegroundShortTracker()
 		ordinary.observe(organic(position = 0, at = 0))
 		ordinary.observe(organic(position = 12, at = 12_000))
@@ -543,9 +511,7 @@ class ForegroundShortTrackerTest {
 
 	@Test
 	fun `returning from PiP clears the marker so the finalize is honest again`() {
-		// FIELD §4.3, measured: the seekbar is restored within ~5s of returning
-		// to fullscreen and survives a swipe to the next Short. A Short that came
-		// back and was measured to the end must not be reported as unmeasurable.
+
 		val tracker = ForegroundShortTracker()
 		tracker.observe(organic(position = 0, at = 0))
 		tracker.observe(organic(position = 9, at = 9_000))
@@ -611,11 +577,7 @@ class ForegroundShortTrackerTest {
 
 	@Test
 	fun `a fully credited PiP Short finalizes instead of hanging forever`() {
-		// The bug this pins: holding the end-of-track grace open while inferring
-		// meant a Short left playing in picture-in-picture accrued to its full
-		// length and then never ended. Measured 2026-08-06 — it sat at "inferred
-		// total 25s" climbing, with no finalize and no scrobble, so the inference
-		// that was meant to rescue the listen was losing it instead.
+
 		val tracker = ForegroundShortTracker()
 		tracker.observe(organic(position = 0, total = 20, at = 0))
 		tracker.observe(organic(position = 1, total = 20, at = 1_000))
@@ -693,11 +655,7 @@ class ForegroundShortTrackerTest {
 		assertFalse(back.foregroundProgressLost)
 		// The 2s already inferred is banked, not discarded and not double counted.
 		assertEquals(2_000, back.inferredPlayedMs)
-		// 3s of content passed under PiP and the inference was paid for 2s of it.
-		// The third second is the bar's own evidence and is reconciled on the way
-		// back — see `pipHandbackSeconds`. Until 2026-08-18 it was silently lost,
-		// which is what finalized `8Bh_XF6-48E` at 54% after its seekbar handed
-		// back at 69%.
+
 		assertEquals(13_000, back.playedMs)
 		// Measuring resumes from the new baseline.
 		val advanced = tracker.observe(organic(position = 16, total = 60, at = 16_500)).active!!
@@ -730,10 +688,7 @@ class ForegroundShortTrackerTest {
 
 	@Test
 	fun `a Short left looping banks its listen instead of counting forever`() {
-		// Measured 2026-08-06: a 105s Short left playing reached
-		// "measured total 461s" over four loops and never finalized once, because
-		// a Short only ended when something took it away. Left alone it never
-		// ends, so it banked nothing and scrobbled nothing.
+
 		val tracker = ForegroundShortTracker()
 		tracker.observe(organic(position = 0, total = 20, at = 0))
 		var banked: SessionSnapshot? = null
@@ -773,11 +728,7 @@ class ForegroundShortTrackerTest {
 
 	@Test
 	fun `a banked listen is not finalized again when the Short goes away`() {
-		// Measured 2026-08-07 on 4x_q2gBomZI: banked at 20:31:29 when it reached
-		// its own 60s, finalized again at 20:31:31 when the next Short arrived.
-		// Both were resolved and enriched, and the second broadcast was stopped
-		// only by the dedup ledger — which is the last line of defence, not the
-		// design.
+
 		listOf<(ForegroundShortTracker, Long) -> ForegroundShortTracker.Update>(
 			{ tracker, now -> tracker.observe(organic(title = "Next", position = 0, at = now)) },
 			{ tracker, now -> tracker.proofMissing(now, "player went away") },
@@ -831,13 +782,6 @@ class ForegroundShortTrackerTest {
 		assertEquals(32_000, later.active!!.playedMs)
 	}
 
-	/**
-	 * Measured 2026-08-08: the 2× hold hides the title and owner handle and leaves
-	 * the seekbar readable — `the seekbar still read 23s of 121s` while the only
-	 * labels left were `2x` and `Pull down to lock 2x speed`. Refusing that threw
-	 * away a measurement that was right there, and the Short died four seconds
-	 * into every hold with only what it had earned before.
-	 */
 	@Test
 	fun `a footerless poll still measures the Short already acquired`() {
 		val tracker = ForegroundShortTracker()
@@ -1010,16 +954,6 @@ class ForegroundShortTrackerTest {
 		assertEquals(0, transitioned.active!!.playedMs)
 	}
 
-	// ---- Defect 1: the screen-off evidence dropout (device-proven 2026-08-19) ----
-
-	/**
-	 * Measured on the A36, 2026-08-19. A 162s Short playing in picture-in-picture
-	 * was credited normally until the screen went off; the paired audio +
-	 * visible-window evidence then went false for 3.5s and came back true while
-	 * the Short was still playing. The dropout outlasts [MISSING_PROOF_GRACE_MS],
-	 * so the Short finalized at 90s of 162s — 56%, four points under threshold —
-	 * and the evidence returned 1.8s after it had already been scored.
-	 */
 	@Test
 	fun `a screen-off evidence dropout does not finalize a Short that is still playing`() {
 		val tracker = ForegroundShortTracker()
@@ -1205,32 +1139,6 @@ class ForegroundShortTrackerTest {
 		sourceEpoch = 3,
 	)
 
-	/**
-	 * One viewing, two terminal outcomes — the 2026-08-28 14:23 field case on
-	 * `hDvSV9JfUEc`, reported as "it scrobbled but it is in History *and* Not
-	 * logged".
-	 *
-	 * The Short played entirely in picture-in-picture, so every second of it was
-	 * inferred wall-clock with no seekbar. Once the inference reaches the item's
-	 * own length the grace is deliberately let run — otherwise a Short left in PiP
-	 * accrues to full length and never ends — and that finalizes the listen. But
-	 * that path never sets `bankedFullListen`, and `remember` carries the listen
-	 * forward as resumable with no record that it has already been scored. The
-	 * Short coming back on screen restores it complete and unbanked, so
-	 * `observe` banks it a second time:
-	 *
-	 * ```
-	 * 14:23:13.587  foreground proof grace expired at the last valid seekbar value
-	 *               played 179s of 179s (0s measured + 179s inferred)
-	 * 14:23:14.578  completed a full listen of 179s while still on screen; banked it
-	 *               played 179s of 179s (0s measured + 179s inferred)
-	 * ```
-	 *
-	 * Both stamped `start=1787944812`. Downstream, one reached the chain and the
-	 * other was refused as "already scrobbled", which files the duplicate **Not
-	 * logged** row. The architecture requires exactly one typed terminal outcome
-	 * per finalized target.
-	 */
 	@Test
 	fun `a Short scored by the picture-in-picture grace is not scored again on return`() {
 		val tracker = ForegroundShortTracker()

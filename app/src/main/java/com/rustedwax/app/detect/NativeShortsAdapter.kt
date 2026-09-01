@@ -1,45 +1,7 @@
 package com.rustedwax.app.detect
 
 import com.rustedwax.core.*
-/**
- * Foreground native Shorts.
- *
- * ## What this owns
- *
- * `<redacted-private-path>`: accessibility-tree observations; parsing and
- * stabilization; foreground Short identity and progress; handover to
- * picture-in-picture; progress-loss inference; miniplayer exclusion.
- *
- * ## Why it is shaped differently from the other three
- *
- * The other adapters speak for one `MediaController`. This one speaks for a
- * surface that has **no controller at all**: a foreground Short is observed
- * through the accessibility tree, and its MediaSession — when there is one —
- * describes the same player from a second, weaker angle. `<redacted-private-path>`
- * §1 names the consequence: Shorts "require a handover between accessibility and
- * MediaSession state", and that handover lived inside `SessionProbe` as a 140-
- * line method whose every branch tested one package constant.
- *
- * So this is a host-scoped translator rather than a per-watch adapter: one
- * observation in, neutral [PlaybackInput] values out, and the host performs
- * them.
- *
- * It owns only the short-lived accessibility identity stabilizer. It holds no
- * playback tracker, touches no store, measures nothing, and cannot return a
- * `SessionSnapshot` — so it cannot finalize, even by accident. The host owns the
- * foreground tracker, suppression, log and engine callback, because
- * `<redacted-private-path>` puts finalization extraction in Phase 7.
- *
- * ## The separations that must survive
- *
- * - **Miniplayer exclusion.** A retained in-app mini-player is not a foreground
- *   Short. That is enforced by [NativeShortParser] on the tree's own structure;
- *   nothing here relaxes it.
- * - **No double credit.** Picture-in-picture inference is offered to the
- *   ordinary MediaSession watch *only* when the foreground route holds nothing —
- *   [pictureInPictureCredit] returns null otherwise — so a Short being tracked
- *   properly can never also be credited as inferred time.
- */
+
 class NativeShortsAdapter {
 	private val stabilizer = NativeShortStabilizer()
 
@@ -63,9 +25,9 @@ class NativeShortsAdapter {
 	 * Pure: no store is touched, nothing is measured, and — the point of this
 	 * boundary — nothing that could carry a finalized listen is returned. What
 	 * comes back is expressed in the same neutral [PlaybackInput] vocabulary as
-	 * every controller-backed source. The host owns the tracker, the
-	 * suppression, the log and the engine callback, exactly as `Architecture_Audit`
-	 * Phase 7 requires finalization to stay put until it is extracted.
+	 * every controller-backed source. The host owns the tracker, suppression,
+	 * logging, and engine callback; finalization remains at the shared application
+	 * boundary.
 	 */
 	fun read(
 		event: NativeShortsObserver.Event,
@@ -121,7 +83,7 @@ class NativeShortsAdapter {
 	/**
 	 * Interpret one captured accessibility tree.
 	 *
-	 * This is the boundary the Phase 4 table asks for: parsing, the structural
+	 * This source boundary owns parsing, the structural
 	 * miniplayer refusal it performs, and the decision about whether unmeasurable
 	 * playback may be inferred at all, are **this source's**, not the Android
 	 * service's. The service captures framework nodes and primitive facts and
@@ -142,12 +104,7 @@ class NativeShortsAdapter {
 			}
 			return ShortsSurfaceReading.Proven(
 				result = result,
-				// This pair is consulted for every proven organic Short, but it earns
-				// time only when the tracker sees that direct progress is absent or
-				// stalled. Measured 2026-08-15 on a Galaxy A36: YouTube kept a visible,
-				// parseable seekbar at one cached value for 63–104 seconds while the
-				// Short continued playing. Restricting the pair to a missing seekbar
-				// turned those complete watches into zero seconds.
+
 				inferredPlaying = when (result) {
 					is NativeShortParser.Result.Organic,
 					is NativeShortParser.Result.OrganicUnnamed,
@@ -158,17 +115,7 @@ class NativeShortsAdapter {
 				},
 			)
 		}
-		// Only the picture-in-picture signature may accrue. Every other refusal
-		// means the Short is gone, not unmeasurable, and must accrue nothing.
-		//
-		// A visible speed chip is the exception, and a stronger signal than the
-		// pair PiP has to settle for. Measured 2026-08-08: holding a Short to play
-		// it at 2x strips the overlay, so nothing is measurable, and the
-		// audio/usage evidence PiP relies on did not answer for it either — so the
-		// Short was dropped three seconds into every hold and finalized at whatever
-		// it had earned. YouTube drawing `2x` over the player is that player saying
-		// it is playing, and at what rate; it is drawn only while the gesture is
-		// actually speeding playback up.
+
 		val speedChip = result.playbackRate
 		return ShortsSurfaceReading.Absent(
 			reason = result.reason,

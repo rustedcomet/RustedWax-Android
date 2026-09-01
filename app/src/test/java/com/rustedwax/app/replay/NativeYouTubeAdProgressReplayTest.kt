@@ -44,10 +44,6 @@ class NativeYouTubeAdProgressReplayTest : ReplayScenarioTest() {
 		}
 	}
 
-	/**
-	 * Exact 2026-08-27 shape: title-only 952s organic metadata, late channel plus
-	 * 7s/77s replacements, STOPPED generations, then the organic position resumes.
-	 */
 	private fun interruptedListen(beforeMs: Long, afterMs: Long): List<PlaybackEvent> = listOf(
 		PlaybackEvent.SessionMetadata(title = title, durationMs = durationMs),
 		PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 0),
@@ -340,15 +336,6 @@ class NativeYouTubeAdProgressReplayTest : ReplayScenarioTest() {
 		harness.assertOneOutcomePerFinalization(2)
 	}
 
-	/**
-	 * Exact 2026-08-27 22:05 device order on `kObfOT4gwlM`.
-	 *
-	 * Native YouTube opened the session with the organic title and artist but the
-	 * pre-roll interstitial's 54s length and position, the viewer skipped at
-	 * ~5.8s, and only then did the 1,192s organic presentation appear. The
-	 * interstitial must never hold the organic anchor, and its seconds must never
-	 * be credited.
-	 */
 	private fun preRollThenOrganic(organicMs: Long, watchedMs: Long): List<PlaybackEvent> = listOf(
 		PlaybackEvent.SessionMetadata(title = title, artist = channel, durationMs = 54_000),
 		PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 2_577),
@@ -444,13 +431,6 @@ class NativeYouTubeAdProgressReplayTest : ReplayScenarioTest() {
 		harness.assertOneOutcomePerFinalization(1)
 	}
 
-	/**
-	 * Exact 2026-08-27 22:26 device order on `kObfOT4gwlM`: a two-item pre-roll
-	 * pod. A 29s surface played 26s, wrapped to zero, a 33s surface followed, and
-	 * by the time the 1,192s organic presentation arrived the pod had accumulated
-	 * 59s of measured play under a 29s anchor. Play that exceeds the anchor's own
-	 * length is proof the anchor is not the work being played.
-	 */
 	@Test
 	fun `a pre-roll pod longer than its own anchor may not hold the organic listen`() {
 		val organicMs = 1_192_000L
@@ -484,15 +464,6 @@ class NativeYouTubeAdProgressReplayTest : ReplayScenarioTest() {
 		harness.assertOneOutcomePerFinalization(1)
 	}
 
-
-	/**
-	 * Exact 2026-08-27 22:55 device order on `kObfOT4gwlM`: a 27s interstitial
-	 * followed by a 12s one. Twelve seconds of surface after twenty-five seconds
-	 * played satisfies the bounded remaining-time arithmetic by coincidence, so
-	 * the pod's second item reads as a rebase of its first. A rebase that a
-	 * provisional anchor happened to satisfy must not then protect that anchor
-	 * from the work.
-	 */
 	@Test
 	fun `a provisional anchor that looked like a rebase still yields to the work`() {
 		val organicMs = 1_192_000L
@@ -527,13 +498,6 @@ class NativeYouTubeAdProgressReplayTest : ReplayScenarioTest() {
 		harness.assertOneOutcomePerFinalization(1)
 	}
 
-	/**
-	 * Exact 2026-08-27 23:00 device order on `kObfOT4gwlM`: a 13s interstitial,
-	 * then a 58s one watched all the way through, then the 1,192s work. An
-	 * interstitial that runs to its own end is still an interstitial — how much
-	 * of a surface the viewer sat through says nothing about whether that surface
-	 * is the work they chose.
-	 */
 	@Test
 	fun `an interstitial watched to its own end still yields to the work`() {
 		val organicMs = 1_192_000L
@@ -565,23 +529,6 @@ class NativeYouTubeAdProgressReplayTest : ReplayScenarioTest() {
 		harness.assertOneOutcomePerFinalization(1)
 	}
 
-	/**
-	 * Exact 2026-08-28 11:13 device order on `kObfOT4gwlM`, reported as "it says
-	 * 10% and that is not true".
-	 *
-	 * YouTube resumed the video 17:48 in, played a 27s and a 6s interstitial, then
-	 * ran the last 124s to the end. **124s of 1,192s is correct** — it is an
-	 * accurate account of everything this session ever published — so this test
-	 * pins the measurement rather than trying to improve it.
-	 *
-	 * It also pins the repair: the interstitial's trailing position (6,058 ms)
-	 * arrives one callback before the organic one, and it used to establish
-	 * first-seen — landing under the ten-second bar, so the listen said nothing
-	 * about having been resumed. The finalize line itself is covered by
-	 * `ProbeParityTest.declared divergence - only the current implementation
-	 * reports a resumed lead-in`, which runs the same shape through the harness
-	 * that captures finalize lines.
-	 */
 	@Test
 	fun `a resumed video measures only what was published to it`() {
 		val organicMs = 1_192_000L
@@ -632,19 +579,6 @@ class NativeYouTubeAdProgressReplayTest : ReplayScenarioTest() {
 		)
 	}
 
-	/**
-	 * Length authority follows measurement.
-	 *
-	 * Exact 2026-08-27 23:38 device shape: the organic 1,192s presentation was
-	 * established and measured to 1,072s — 90% — and then a 1,817s ad-inclusive
-	 * surface arrived. Its *measurement* was correctly quarantined, but it was
-	 * still installed as metadata, and the finalized duration was taken as
-	 * `max(installed, longest)` — so the listen finalized as "1072s of 1817s",
-	 * 59%, and the resolver's 1,192s then read as an identity contradiction.
-	 *
-	 * A presentation whose playback this listen refused to measure may not define
-	 * how long the listen was.
-	 */
 	@Test
 	fun `a quarantined surface may not define the finalized duration`() {
 		val organicMs = 1_192_000L
@@ -674,7 +608,6 @@ class NativeYouTubeAdProgressReplayTest : ReplayScenarioTest() {
 		assertEquals(90, harness.broadcasts.single().percentPlayed)
 	}
 
-	/** The same shape with the 2,163s sponsored surface measured on 2026-08-28. */
 	@Test
 	fun `a sponsored surface open at finalize may not define the duration`() {
 		val organicMs = 1_192_000L

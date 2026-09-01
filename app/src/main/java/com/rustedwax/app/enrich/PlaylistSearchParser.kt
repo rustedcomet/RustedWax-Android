@@ -5,25 +5,6 @@ import org.json.JSONObject
 import java.text.Normalizer
 import java.util.Locale
 
-/**
- * Finds a playlist id from the name the native YouTube player put on screen.
- *
- * Native YouTube names the playlist but never its id, so the id is recovered by
- * one playlist-filtered search. That is only safe because playlist names are far
- * more distinctive than song titles. Measured 2026-08-04 against the live
- * playlist-filtered search page:
- *
- * | query | playlist results | exact-title matches |
- * | --- | ---: | ---: |
- * | `Reggaeton 2016,17,18` | 20 | **1** |
- * | `Reggaeton` | 20 | 0 |
- * | `Workout` | 18 | 0 |
- *
- * So requiring an *exact* normalized title either yields exactly one playlist or
- * yields none — a generic name fails closed by construction rather than by a
- * heuristic. Anything other than a single survivor resolves to nothing and the
- * caller falls back to the existing search path.
- */
 object PlaylistSearchParser {
 
 	data class Candidate(

@@ -8,19 +8,6 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The playback state machine, driven directly.
- *
- * `<redacted-private-path>` §8 names the gap this closes: "no behavioral test
- * driving the real private callback-to-reducer/finalization state
- * machine". It was private, it was inner, and it was written against
- * `MediaController`, `PlaybackState` and `android.os.SystemClock`, so nothing on
- * the JVM could reach it at all.
- *
- * The replay corpus exercises the reducer end to end through the engine. This
- * file exercises it on its own, where a single transition can be stated and
- * checked without a listen having to survive identity, policy and dedup first.
- */
 class PlaybackReducerTest {
 
 	private val browser = PlaybackSourceCapabilities(
@@ -161,8 +148,7 @@ class PlaybackReducerTest {
 
 	@Test
 	fun `played time is content consumed, scaled by the rate`() {
-		// The 2026-07-29 regression in one assertion: 50 s of wall clock at 1.25×
-		// is 62.5 s of a video, and the threshold divides by the video's length.
+
 		val (reducer, initial) = start()
 		val playing = reducer.reduce(initial, playing(elapsedRealtimeMs = 1_000, speed = 1.25)).state
 
@@ -322,8 +308,7 @@ class PlaybackReducerTest {
 
 	@Test
 	fun `an empty bundle mid-track is silence, not a track ending`() {
-		// Measured 2026-08-07: a 155-second trailer was finalized against a
-		// placeholder on every tab switch and finished having banked 18 seconds.
+
 		val (reducer, initial) = start()
 		val playing = reducer.reduce(initial, playing(elapsedRealtimeMs = 0)).state
 		val empty = reducer.reduce(
@@ -362,9 +347,7 @@ class PlaybackReducerTest {
 
 	@Test
 	fun `the browser naming its tab ends the track and starts nothing`() {
-		// Measured 2026-08-11: Brave published TITLE = "YouTube" and then said
-		// nothing for seven minutes while a real video played, and all seven
-		// minutes landed on it.
+
 		val (reducer, initial) = start()
 		val playing = reducer.reduce(initial, playing(elapsedRealtimeMs = 0)).state
 		val tabOnly = reducer.reduce(
@@ -385,8 +368,7 @@ class PlaybackReducerTest {
 
 	@Test
 	fun `a native session republishing a shorter length quarantines its measurement`() {
-		// Measured 2026-08-06: a 415 s live set reported 415 s, then 11 s, then
-		// 6 s while still playing the same thing.
+
 		val (reducer, initial) = start(nativeApp, identity(durationMs = 415_000))
 		val playing = reducer.reduce(initial, playing(elapsedRealtimeMs = 0)).state
 		val shorter = reducer.reduce(
@@ -715,8 +697,7 @@ class PlaybackReducerTest {
 
 	@Test
 	fun `carried progress is added to what the replacement already measured`() {
-		// Measured 2026-08-09: assigning over the running total threw away the
-		// seconds between the replacement starting and the claim landing.
+
 		val (reducer, initial) = start()
 		val replacement = reducer.reduce(initial, playing(elapsedRealtimeMs = 0)).state
 		val carried = reducer.reduce(
@@ -928,10 +909,7 @@ class PlaybackReducerTest {
 
 	@Test
 	fun `a listen that runs past its own length with nothing published is ended`() {
-		// Measured 2026-08-12: a browser video reached its end, the transport
-		// stayed PLAYING with an unchanged update time, and the clock accrued for
-		// a further 1h47m because a browser listen only ends on a track change, a
-		// navigation or a closed tab.
+
 		val (reducer, initial) = start()
 		val playing = reducer.reduce(initial, playing(elapsedRealtimeMs = 1_000)).state
 

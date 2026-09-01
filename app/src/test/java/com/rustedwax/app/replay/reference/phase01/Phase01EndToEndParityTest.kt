@@ -22,8 +22,8 @@ import org.junit.Test
  * Old and new, end to end, over the whole acceptance surface.
  *
  * `Phase01ParityTest` compares the two state machines on measurement and
- * lifecycle. That is not the gate. `<redacted-private-provenance>` asks for zero
- * unexplained difference across **identity, measurement, instances, typed
+ * lifecycle. The end-to-end gate requires zero unexplained difference across
+ * **identity, measurement, instances, typed
  * outcomes, payload bytes and order, dedup, queue/retry/dispatch, persistence,
  * EventLog, and UI history** — everything a listen touches on its way to the
  * chain, not just the part that counts milliseconds.

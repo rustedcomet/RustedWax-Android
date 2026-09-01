@@ -8,7 +8,7 @@ import java.util.Locale
 import java.util.concurrent.Executors
 
 /**
- * Structured, read-only Phase 3 device evidence.
+ * Structured, read-only playback telemetry for debug builds.
  *
  * This is deliberately a debug-build logcat surface rather than a preference,
  * file, receiver or provider. A host gate can sample the same immutable

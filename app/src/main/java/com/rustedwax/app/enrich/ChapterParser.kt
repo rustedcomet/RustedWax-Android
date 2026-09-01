@@ -36,11 +36,6 @@ object ChapterParser {
 	/** Fewer than this is a placeholder, not a chaptered video. */
 	private const val MIN_CHAPTERS = 2
 
-	/**
-	 * @param initialPlayerJson the `ytInitialData` blob from the watch page.
-	 * @return the chapters in start order, or an empty list. Never null — an
-	 * unchaptered video is the ordinary case, not an error worth distinguishing.
-	 */
 	fun parse(initialPlayerJson: String?): List<Chapter> {
 		val root = runCatching { JSONObject(initialPlayerJson.orEmpty()) }.getOrNull()
 			?: return emptyList()

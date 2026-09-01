@@ -57,18 +57,6 @@ class WatchHistoryHealth(
 			copy.routeFaultKind = routeFaultKind
 		}
 
-	/**
-	 * The distinct things that have gone missing in this run, newest last.
-	 *
-	 * A set, not a counter with a one-deep memory. It used to be
-	 * `consecutiveMisses` plus `lastMissKey`, which only rejected a repeat that
-	 * arrived *immediately* after itself: `A, B, A` counted as three tracks and
-	 * so did `<empty feed>, A, <empty feed>`. Two things going missing while one
-	 * of them is retried is not three things going missing, and a Shorts feed
-	 * revisits the same items constantly. Bounded by [missesBeforeRefusing],
-	 * because it refuses the moment it is full and there is nothing to remember
-	 * after that.
-	 */
 	private val missKeys = LinkedHashSet<String>()
 
 	/** Distinguishes an anonymous observation from a repeat of a named one. */
@@ -147,20 +135,6 @@ class WatchHistoryHealth(
 	 */
 	enum class Refusal { SIGNED_OUT, HISTORY_PAUSED, ACCOUNT_MISMATCH, MARKUP_CHANGED }
 
-	/**
-	 * Whether a lookup may be attempted now.
-	 *
-	 * @param accountEvidence whether this lookup is health-eligible native
-	 * playback — the only thing the mismatch diagnosis is about, and the only
-	 * thing that can disprove it. A browser lookup is neither: it runs straight
-	 * through a mismatch pause, and asking must not spend the one probe that
-	 * pause allows native playback.
-	 *
-	 * A declared route fault is different in kind and gates both: it blocks
-	 * everything until the interval is up, and then lets *whichever* consumer
-	 * asks first make one probe. That probe is what a browser-only user has to
-	 * recover with.
-	 */
 	@Synchronized
 	fun mayRun(nowMillis: Long, accountEvidence: Boolean = true): Boolean {
 		if (routeFault != null) {
@@ -205,23 +179,6 @@ class WatchHistoryHealth(
 		mismatchProbeMillis = 0
 	}
 
-	/**
-	 * The feed read fine and simply did not contain the track that just played.
-	 *
-	 * @param trackKey identifies the track this miss is about. Misses of the
-	 * *same* track are one data point however they are interleaved — measured
-	 * 2026-08-06, "See Every TIME Cover From 2025" was looked up three times in
-	 * three minutes as it was replayed, each absence counted separately, and the
-	 * route stood itself down on a diagnosis ("the last 3 native tracks were not
-	 * written to the watch history") that was true of exactly one track. Two
-	 * untitled Shorts were then refused during the fifteen-minute pause, in
-	 * silence, having already earned their listens. The diagnosis this exists
-	 * for — the YouTube app is on another account — shows up as *different*
-	 * tracks going missing, so requiring different tracks costs it nothing.
-	 *
-	 * A null key is an observation with nothing to name it by, so it can never
-	 * be recognised as a repeat and each one counts.
-	 */
 	@Synchronized
 	fun recordMiss(nowMillis: Long, trackKey: String? = null) {
 		if (mismatch != null) return
