@@ -14,8 +14,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import com.rustedwax.core.Clock
+import com.rustedwax.hive.HivePreparationResult
 import com.rustedwax.hive.HiveRpc
 import com.rustedwax.hive.HiveScrobblePayload
+import com.rustedwax.hive.PreparedHiveTransaction
 import com.rustedwax.hive.PrivateScrobble
 import com.rustedwax.app.detect.ScrobbleBuilder
 import com.rustedwax.app.detect.FinalizedTrack
@@ -162,8 +164,21 @@ object FinalizationRuntime {
 		val atEpochSec: Long,
 		val playedSeconds: Long,
 		val durationSeconds: Long?,
-		/** The exact video this row opens. Not-logged rows are hyperlinks too. */
-		val videoId: String,
+		/**
+		 * The exact video this row opens, when one was proven.
+		 *
+		 * Null when identity never resolved — offline, or a catalog lookup that
+		 * corroborated nothing. A hyperlink is a requirement of *broadcasting*:
+		 * nothing reaches the chain without a canonical watch URL, and that gate
+		 * is untouched. It is not a requirement of telling the user their listen
+		 * was seen and declined. Refusing the row as well made the commonest
+		 * offline refusal invisible in every surface at once — the listen was
+		 * measured, explained in the event log, and then shown nowhere. A row
+		 * that does not open is honest; an absent row reads as a lost listen.
+		 * Never fabricated: an unproven id stays null rather than becoming a
+		 * guess that opens somebody else's re-upload.
+		 */
+		val videoId: String?,
 	)
 
 	private const val MIN_NOTABLE_PLAYED_MS = 3_000L
@@ -1619,92 +1634,22 @@ object FinalizationRuntime {
 	private fun retryQueuedPayloads() {
 		scope.launch {
 			broadcastLock.withLock {
-					val account = vault.account ?: return@withLock
-					val key = vault.loadKey() ?: return@withLock
-					for (entry in queue.due()) {
-						if (!entry.username.equals(account.username, ignoreCase = true)) {
-							EventLog.append(
-								"queue",
-								"waiting for @${entry.username}: current key belongs to " +
-									"@${account.username}; entry left untouched",
-							)
-							continue
-						}
-						val result = runCatching {
-							broadcaster.broadcastJson(account.username, key, entry.json)
-						}.getOrElse { HiveRpc.BroadcastResult.NetworkFailure(it.message ?: "error") }
+				val account = vault.account ?: return@withLock
+				val key = vault.loadKey() ?: return@withLock
+				for (entry in queue.due()) {
+					if (!entry.username.equals(account.username, ignoreCase = true)) {
+						EventLog.append(
+							"queue",
+							"waiting for @${entry.username}: current key belongs to " +
+								"@${account.username}; entry left untouched",
+						)
+						continue
+					}
 
-						when (result) {
-							is HiveRpc.BroadcastResult.Success -> {
-								val removed = queue.remove(entry.id)
-								EventLog.append(
-									"engine",
-									"queued scrobble sent (${result.evidence.name.lowercase()}): " +
-										"${entry.label} — tx ${result.txId}",
-								)
-								note(
-									entry.label,
-									if (removed) {
-										"sent from queue"
-									} else {
-										"sent, but retry-queue removal failed — do not retry"
-									},
-									result.txId,
-									entry.percentPlayed,
-									videoId = entry.videoId,
-								)
-							}
-
-						is HiveRpc.BroadcastResult.AcceptedUnconfirmed -> {
-							// The accepting node has it. Retrying with a new
-							// expiration would create a different tx id and can
-							// permanently duplicate the listen.
-								val removed = queue.remove(entry.id)
-							EventLog.append(
-								"engine",
-								"queued scrobble accepted but confirmation unavailable: " +
-									"${entry.label} — tx ${result.txId}",
-							)
-								note(
-									entry.label,
-									if (removed) {
-										"accepted — confirmation unavailable"
-									} else {
-										"accepted, but retry-queue removal failed — do not retry"
-									},
-									result.txId,
-									entry.percentPlayed,
-									videoId = entry.videoId,
-								)
-							}
-
-							is HiveRpc.BroadcastResult.Rejected -> {
-								// The chain will keep rejecting this; don't loop.
-								val removed = queue.remove(entry.id)
-								EventLog.append(
-									"engine",
-									"queued scrobble dropped (rejected): ${result.message}",
-								)
-								note(
-									entry.label,
-									if (removed) {
-										"queue failed permanently: ${result.message}"
-									} else {
-										"rejected; retry-queue removal failed"
-									},
-									null,
-									entry.percentPlayed,
-									videoId = entry.videoId,
-								)
-							}
-
-							is HiveRpc.BroadcastResult.Deferred -> {
-								handleQueuedFailure(entry, result.message)
-							}
-
-							is HiveRpc.BroadcastResult.NetworkFailure -> {
-								handleQueuedFailure(entry, result.message)
-							}
+					when (entry.state) {
+						BroadcastQueue.State.QUEUED -> prepareQueuedEntry(entry, key)
+						BroadcastQueue.State.IN_FLIGHT -> reconcileInFlight(entry, key)
+						BroadcastQueue.State.SETTLED -> Unit
 					}
 				}
 				_queueSize.value = queue.size()
@@ -1713,8 +1658,243 @@ object FinalizationRuntime {
 		}
 	}
 
+	private fun prepareQueuedEntry(entry: BroadcastQueue.Entry, key: com.rustedwax.hive.HiveKey) {
+		when (val preparation = broadcaster.prepareJson(entry.username, key, entry.json)) {
+			is HivePreparationResult.Failed -> when (val result = preparation.result) {
+				is HiveRpc.BroadcastResult.NetworkFailure -> handleQueuedFailure(entry, result.message)
+				is HiveRpc.BroadcastResult.Deferred -> handleQueuedFailure(entry, result.message)
+				is HiveRpc.BroadcastResult.Rejected -> retireRejected(entry, result.message)
+				is HiveRpc.BroadcastResult.Success,
+				is HiveRpc.BroadcastResult.AcceptedUnconfirmed,
+				-> EventLog.append("queue", "invalid preparation result; queued operation left untouched")
+			}
+
+			is HivePreparationResult.Ready -> {
+				if (!persistBeforeBroadcast(entry, preparation.transaction)) return
+				broadcastPrepared(entry, preparation.transaction, initialAttempt = false)
+			}
+		}
+	}
+
+	/** An IN_FLIGHT row never authorizes a new transaction without reconciliation. */
+	private fun reconcileInFlight(entry: BroadcastQueue.Entry, key: com.rustedwax.hive.HiveKey) {
+		val prepared = entry.preparedTransaction()
+		if (prepared == null) {
+			EventLog.append(
+				"queue",
+				"CORRUPT IN_FLIGHT state for ${entry.label}; automatic broadcast blocked",
+			)
+			return
+		}
+
+		val evidence = runCatching {
+			broadcaster.observeTransaction(prepared.txId, prepared.expirationEpochSec)
+		}
+			.getOrDefault(HiveRpc.TransactionEvidence.UNAVAILABLE)
+		when (evidence) {
+			HiveRpc.TransactionEvidence.BLOCK,
+			HiveRpc.TransactionEvidence.MEMPOOL,
+			-> {
+				val settled = queue.settle(entry)
+				EventLog.append(
+					"queue",
+					"reconciled prepared transaction ${prepared.txId} as ${evidence.name.lowercase()}",
+				)
+				logSettlement(settled, entry.label)
+			}
+
+			HiveRpc.TransactionEvidence.UNAVAILABLE -> EventLog.append(
+				"queue",
+				"prepared transaction ${prepared.txId} could not be reconciled; left fail-closed",
+			)
+
+			HiveRpc.TransactionEvidence.ABSENT -> {
+				if (clock.nowEpochSeconds() < prepared.expirationEpochSec) {
+					// Exact same signed transaction and id; never a replacement.
+					broadcastPrepared(entry, prepared, initialAttempt = false)
+				} else {
+					// Independent nodes established expired-irreversible absence using
+					// the saved expiration. Only now may a replacement be persisted.
+					prepareQueuedEntry(entry.copy(state = BroadcastQueue.State.QUEUED), key)
+				}
+			}
+		}
+	}
+
+	private fun persistBeforeBroadcast(
+		entry: BroadcastQueue.Entry,
+		prepared: PreparedHiveTransaction,
+	): Boolean = when (queue.markInFlight(entry, prepared)) {
+		BroadcastQueue.PrepareOutcome.STORED -> true
+		BroadcastQueue.PrepareOutcome.NOT_FOUND -> {
+			EventLog.append("queue", "queued operation disappeared before preparation; nothing sent")
+			false
+		}
+		BroadcastQueue.PrepareOutcome.STORAGE_ERROR -> {
+			EventLog.append(
+				"queue",
+				"STORAGE ERROR persisting PREPARED/IN_FLIGHT state for ${entry.label}; nothing sent",
+			)
+			false
+		}
+	}
+
+	private fun broadcastPrepared(
+		entry: BroadcastQueue.Entry,
+		prepared: PreparedHiveTransaction,
+		initialAttempt: Boolean,
+		onFeedback: ((String, Boolean) -> Unit)? = null,
+	) {
+		val result = runCatching { broadcaster.broadcastPrepared(prepared) }
+			.getOrElse { HiveRpc.BroadcastResult.NetworkFailure(it.message ?: "error") }
+		when (result) {
+			is HiveRpc.BroadcastResult.Success -> {
+				val settled = queue.settle(entry)
+				val evidence = result.evidence.name.lowercase()
+				EventLog.append(
+					"engine",
+					if (initialAttempt) {
+						"scrobbled ($evidence): ${entry.label} — tx ${result.txId}"
+					} else {
+						"queued scrobble sent ($evidence): ${entry.label} — tx ${result.txId}"
+					},
+				)
+				logSettlement(settled, entry.label)
+				note(
+					entry.label,
+					if (initialAttempt) {
+						if (result.evidence == HiveRpc.BroadcastResult.Evidence.BLOCK) {
+							"confirmed in block" + settlementSuffix(settled)
+						} else {
+							"seen relaying in mempool" + settlementSuffix(settled)
+						}
+					} else {
+						"sent from queue" + settlementSuffix(settled)
+					},
+					result.txId,
+					entry.percentPlayed,
+					videoId = entry.videoId,
+				)
+				onFeedback?.invoke("Confirmed in a block — tx ${result.txId}", false)
+			}
+
+			is HiveRpc.BroadcastResult.AcceptedUnconfirmed -> {
+				val settled = queue.settle(entry)
+				EventLog.append(
+					"engine",
+					if (initialAttempt) {
+						"accepted but confirmation unavailable: ${entry.label} — tx ${result.txId}"
+					} else {
+						"queued scrobble accepted but confirmation unavailable: " +
+							"${entry.label} — tx ${result.txId}"
+					},
+				)
+				logSettlement(settled, entry.label)
+				note(
+					entry.label,
+					if (initialAttempt) {
+						"accepted — confirmation unavailable; not retried" + settlementSuffix(settled)
+					} else {
+						"accepted — confirmation unavailable" + settlementSuffix(settled)
+					},
+					result.txId,
+					entry.percentPlayed,
+					videoId = entry.videoId,
+				)
+				onFeedback?.invoke(
+					"Accepted, but confirmation was unavailable — do not retry" +
+						(result.txId?.let { " — tx $it" } ?: ""),
+					false,
+				)
+			}
+
+			is HiveRpc.BroadcastResult.Rejected -> {
+				retireRejected(entry, result.message, initialAttempt)
+				onFeedback?.invoke("Chain rejected it: ${result.message}", true)
+			}
+
+			is HiveRpc.BroadcastResult.Deferred -> {
+				if (initialAttempt) {
+					recordInitialQueueFailure(entry, "waiting to retry — ${result.message}")
+				} else {
+					handleQueuedFailure(entry, result.message)
+				}
+			}
+
+			is HiveRpc.BroadcastResult.NetworkFailure -> {
+				if (initialAttempt) {
+					recordInitialQueueFailure(entry, "queued — offline")
+				} else {
+					handleQueuedFailure(entry, result.message)
+				}
+			}
+		}
+	}
+
+	private fun recordInitialQueueFailure(entry: BroadcastQueue.Entry, status: String) {
+		EventLog.append("engine", "$status: ${entry.label}")
+		note(
+			entry.label,
+			status,
+			null,
+			entry.percentPlayed,
+			queued = true,
+			videoId = entry.videoId,
+		)
+	}
+
+	private fun retireRejected(
+		entry: BroadcastQueue.Entry,
+		message: String,
+		initialAttempt: Boolean = false,
+	) {
+		val settled = queue.settle(entry)
+		EventLog.append(
+			"engine",
+			if (initialAttempt) "rejected: $message" else "queued scrobble dropped (rejected): $message",
+		)
+		logSettlement(settled, entry.label)
+		note(
+			entry.label,
+			(if (initialAttempt) "rejected: $message" else "queue failed permanently: $message") +
+				settlementSuffix(settled),
+			null,
+			entry.percentPlayed,
+			videoId = entry.videoId,
+		)
+	}
+
+	/**
+	 * Say which durable fail-closed state remains when settled cleanup cannot
+	 * complete. Both outcomes survive restart; neither relies on a diagnostic.
+	 */
+	private fun logSettlement(outcome: BroadcastQueue.SettleOutcome, label: String) {
+		when (outcome) {
+			BroadcastQueue.SettleOutcome.RETIRED -> Unit
+
+			BroadcastQueue.SettleOutcome.SETTLED_DURABLY -> EventLog.append(
+				"queue",
+				"STORAGE ERROR removing settled retry state: $label. " +
+					"SETTLED remains durable and cannot broadcast.",
+			)
+
+			BroadcastQueue.SettleOutcome.IN_FLIGHT_RETAINED -> EventLog.append(
+				"queue",
+				"STORAGE FAILURE settling a sent scrobble: $label. The exact durable " +
+					"IN_FLIGHT transaction remains fail-closed for reconciliation.",
+			)
+		}
+	}
+
+	private fun settlementSuffix(outcome: BroadcastQueue.SettleOutcome): String = when (outcome) {
+		BroadcastQueue.SettleOutcome.RETIRED -> ""
+		BroadcastQueue.SettleOutcome.SETTLED_DURABLY -> " — settled cleanup remains pending"
+		BroadcastQueue.SettleOutcome.IN_FLIGHT_RETAINED ->
+			" — exact in-flight transaction retained for reconciliation"
+	}
+
 	private fun handleQueuedFailure(entry: BroadcastQueue.Entry, message: String) {
-		when (queue.recordFailure(entry.id, message)) {
+		when (queue.recordFailure(entry, message)) {
 			BroadcastQueue.FailureOutcome.RETAINED ->
 				EventLog.append("engine", "queued scrobble still waiting: $message")
 
@@ -1732,6 +1912,9 @@ object FinalizationRuntime {
 				)
 			}
 
+			BroadcastQueue.FailureOutcome.AWAITING_RECONCILIATION ->
+				resolveExhaustedInFlight(entry, message)
+
 			BroadcastQueue.FailureOutcome.NOT_FOUND ->
 				EventLog.append("queue", "retry entry disappeared before failure could be recorded")
 
@@ -1748,6 +1931,59 @@ object FinalizationRuntime {
 					videoId = entry.videoId,
 				)
 			}
+		}
+	}
+
+	/**
+	 * Preserve the eight-attempt ceiling without discarding an ambiguous send.
+	 * Proven absence closes it as a genuine failure; positive evidence settles it;
+	 * unavailable evidence leaves the exact transaction fail-closed.
+	 */
+	private fun resolveExhaustedInFlight(entry: BroadcastQueue.Entry, message: String) {
+		val prepared = entry.preparedTransaction()
+		if (prepared == null) {
+			EventLog.append("queue", "retry ceiling reached with corrupt IN_FLIGHT state; left fail-closed")
+			return
+		}
+		when (runCatching {
+			broadcaster.observeTransaction(prepared.txId, prepared.expirationEpochSec)
+		}
+			.getOrDefault(HiveRpc.TransactionEvidence.UNAVAILABLE)) {
+			HiveRpc.TransactionEvidence.BLOCK,
+			HiveRpc.TransactionEvidence.MEMPOOL,
+			-> {
+				val settled = queue.settle(entry)
+				logSettlement(settled, entry.label)
+				note(
+					entry.label,
+					"reconciled after ambiguous retry" + settlementSuffix(settled),
+					prepared.txId,
+					entry.percentPlayed,
+					videoId = entry.videoId,
+				)
+			}
+
+			HiveRpc.TransactionEvidence.ABSENT -> {
+				val settled = queue.settle(entry)
+				logSettlement(settled, entry.label)
+				EventLog.append(
+					"engine",
+					"queued scrobble exhausted retry limit and was absent: ${entry.label}",
+				)
+				note(
+					entry.label,
+					"failed after 8 queued attempts: $message" + settlementSuffix(settled),
+					null,
+					entry.percentPlayed,
+					videoId = entry.videoId,
+				)
+			}
+
+			HiveRpc.TransactionEvidence.UNAVAILABLE -> EventLog.append(
+				"queue",
+				"retry ceiling reached for ${entry.label}, but transaction status is unavailable; " +
+					"exact IN_FLIGHT state retained",
+			)
 		}
 	}
 
@@ -1820,130 +2056,117 @@ object FinalizationRuntime {
 					return@withLock
 				}
 				EventLog.append("engine", "broadcasting: $json")
-				val result = runCatching {
-					broadcaster.broadcastJson(account.username, key, json)
-				}.getOrElse { HiveRpc.BroadcastResult.NetworkFailure(it.message ?: "error") }
-
-				when (result) {
-					is HiveRpc.BroadcastResult.Success -> {
-						val evidence = result.evidence.name.lowercase()
-						EventLog.append(
-							"engine",
-							"scrobbled ($evidence): $label — tx ${result.txId}",
-						)
-						note(
-							label,
-							if (result.evidence == HiveRpc.BroadcastResult.Evidence.BLOCK) {
-								"confirmed in block"
-							} else {
-								"seen relaying in mempool"
-							},
-							result.txId,
-							payload.percentPlayed,
-							videoId = videoId,
-						)
-						onFeedback?.invoke("Confirmed in a block — tx ${result.txId}", false)
-					}
-
-					is HiveRpc.BroadcastResult.AcceptedUnconfirmed -> {
-						EventLog.append(
-							"engine",
-							"accepted but confirmation unavailable: $label — tx ${result.txId}",
-						)
-						note(
-							label,
-							"accepted — confirmation unavailable; not retried",
-							result.txId,
-							payload.percentPlayed,
-							videoId = videoId,
-						)
-						onFeedback?.invoke(
-							"Accepted, but confirmation was unavailable — do not retry" +
-								(result.txId?.let { " — tx $it" } ?: ""),
-							false,
-						)
-					}
-
-					is HiveRpc.BroadcastResult.Rejected -> {
-						// Bad auth, malformed op — this will fail identically
-						// forever, so queuing would only loop.
-						EventLog.append("engine", "rejected: ${result.message}")
-						note(label, "rejected: ${result.message}", null, payload.percentPlayed, videoId = videoId)
-						onFeedback?.invoke("Chain rejected it: ${result.message}", true)
-					}
-
-					// Refused for a reason that should pass later, or accepted and
-					// never included. The listen is still owed, so it queues.
-						is HiveRpc.BroadcastResult.Deferred -> {
-							if (trigger == FinalizationTrigger.MANUAL) {
-								onFeedback?.invoke(
-									"Not on-chain yet — ${result.message}. Try again in a moment.",
-									true,
-								)
-								return@withLock
-							}
-							val persisted = queue.add(
-								account.username,
-								json,
-								label,
-								payload.percentPlayed,
-								videoId,
-							)
-							_queueSize.value = queue.size()
-							EventLog.append(
-								"engine",
-								if (persisted) {
-									"queued for retry: ${result.message}"
-								} else {
-									"QUEUE STORAGE FAILURE — scrobble could not be persisted"
-								},
-							)
-							note(
-								label,
-								if (persisted) {
-									"waiting to retry — ${result.message}"
-								} else {
-									"failed to persist retry — export the log"
-								},
-								null,
-								payload.percentPlayed,
-								queued = persisted,
-								videoId = videoId,
-							)
-						}
-
-						is HiveRpc.BroadcastResult.NetworkFailure -> {
-							if (trigger == FinalizationTrigger.MANUAL) {
-								onFeedback?.invoke("Couldn't reach a node: ${result.message}", true)
-								return@withLock
-							}
-							val persisted = queue.add(
-								account.username,
-								json,
-								label,
-								payload.percentPlayed,
-								videoId,
-							)
-							_queueSize.value = queue.size()
-							EventLog.append(
-								"engine",
-								if (persisted) {
-									"queued (offline): $label"
-								} else {
-									"QUEUE STORAGE FAILURE while offline: $label"
-								},
-							)
-							note(
-								label,
-								if (persisted) "queued — offline" else "failed to persist offline retry",
-								null,
-								payload.percentPlayed,
-								queued = persisted,
-								videoId = videoId,
-							)
-						}
+				if (trigger == FinalizationTrigger.MANUAL) {
+					broadcastDirect(account.username, key, json, label, payload, videoId, onFeedback)
+					return@withLock
 				}
+
+				// Automatic transport is write-ahead: even an ordinary online send
+				// becomes a queue operation before signing/broadcast can cross the
+				// irreversible boundary. A failed queue write means nothing is sent.
+				val entry = queue.enqueue(
+					account.username,
+					json,
+					label,
+					payload.percentPlayed,
+					videoId,
+				)
+				if (entry == null) {
+					EventLog.append("queue", "QUEUE STORAGE FAILURE before broadcast: $label; nothing sent")
+					note(
+						label,
+						"failed to persist pre-send state — nothing sent",
+						null,
+						payload.percentPlayed,
+						videoId = videoId,
+					)
+					onFeedback?.invoke("Retry state could not be persisted. Nothing sent.", true)
+					return@withLock
+				}
+
+				when (val preparation = broadcaster.prepareJson(account.username, key, json)) {
+					is HivePreparationResult.Ready -> {
+						if (persistBeforeBroadcast(entry, preparation.transaction)) {
+							broadcastPrepared(
+								entry,
+								preparation.transaction,
+								initialAttempt = true,
+								onFeedback = onFeedback,
+							)
+						}
+					}
+
+					is HivePreparationResult.Failed -> when (val failure = preparation.result) {
+						is HiveRpc.BroadcastResult.NetworkFailure ->
+							recordInitialQueueFailure(entry, "queued — offline")
+						is HiveRpc.BroadcastResult.Deferred ->
+							recordInitialQueueFailure(entry, "waiting to retry — ${failure.message}")
+						is HiveRpc.BroadcastResult.Rejected -> retireRejected(entry, failure.message, true)
+						is HiveRpc.BroadcastResult.Success,
+						is HiveRpc.BroadcastResult.AcceptedUnconfirmed,
+						-> EventLog.append("queue", "invalid preparation result; operation left queued")
+					}
+				}
+				_queueSize.value = queue.size()
 			}
+		}
+	}
+
+	/** Manual transport keeps its established no-queue behavior. */
+	private fun broadcastDirect(
+		username: String,
+		key: com.rustedwax.hive.HiveKey,
+		json: String,
+		label: String,
+		payload: HiveScrobblePayload,
+		videoId: String?,
+		onFeedback: ((String, Boolean) -> Unit)?,
+	) {
+		val result = runCatching { broadcaster.broadcastJson(username, key, json) }
+			.getOrElse { HiveRpc.BroadcastResult.NetworkFailure(it.message ?: "error") }
+		when (result) {
+			is HiveRpc.BroadcastResult.Success -> {
+				val evidence = result.evidence.name.lowercase()
+				EventLog.append("engine", "scrobbled ($evidence): $label — tx ${result.txId}")
+				note(
+					label,
+					if (result.evidence == HiveRpc.BroadcastResult.Evidence.BLOCK) {
+						"confirmed in block"
+					} else {
+						"seen relaying in mempool"
+					},
+					result.txId,
+					payload.percentPlayed,
+					videoId = videoId,
+				)
+				onFeedback?.invoke("Confirmed in a block — tx ${result.txId}", false)
+			}
+			is HiveRpc.BroadcastResult.AcceptedUnconfirmed -> {
+				EventLog.append("engine", "accepted but confirmation unavailable: $label — tx ${result.txId}")
+				note(
+					label,
+					"accepted — confirmation unavailable; not retried",
+					result.txId,
+					payload.percentPlayed,
+					videoId = videoId,
+				)
+				onFeedback?.invoke(
+					"Accepted, but confirmation was unavailable — do not retry" +
+						(result.txId?.let { " — tx $it" } ?: ""),
+					false,
+				)
+			}
+			is HiveRpc.BroadcastResult.Rejected -> {
+				EventLog.append("engine", "rejected: ${result.message}")
+				note(label, "rejected: ${result.message}", null, payload.percentPlayed, videoId = videoId)
+				onFeedback?.invoke("Chain rejected it: ${result.message}", true)
+			}
+			is HiveRpc.BroadcastResult.Deferred -> onFeedback?.invoke(
+				"Not on-chain yet — ${result.message}. Try again in a moment.",
+				true,
+			)
+			is HiveRpc.BroadcastResult.NetworkFailure ->
+				onFeedback?.invoke("Couldn't reach a node: ${result.message}", true)
 		}
 	}
 
@@ -1977,9 +2200,12 @@ object FinalizationRuntime {
 		val title = session.title?.takeIf { it.isNotBlank() }
 			?: resolvedTitle?.takeIf { it.isNotBlank() }
 			?: return
-		val linkedVideoId = videoId
-			?.takeIf { YouTubeProbe.canonicalWatchUrl(it) != null }
-			?: return
+		// Not a guard. An id that cannot authorize a canonical watch URL is
+		// dropped from the *row*, not the row from the list: the hyperlink is
+		// owed to the broadcast, which still refuses to publish anything without
+		// one, while the user is owed the record of a listen this app measured
+		// and declined. Nothing is invented to fill the gap.
+		val linkedVideoId = videoId?.takeIf { YouTubeProbe.canonicalWatchUrl(it) != null }
 		val record = SkipRecord(
 			title = title,
 			artist = session.artist,

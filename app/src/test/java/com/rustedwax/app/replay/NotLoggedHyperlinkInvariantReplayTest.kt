@@ -7,10 +7,22 @@ import com.rustedwax.youtube.identity.VideoResolutionAttempt
 import com.rustedwax.app.scrobble.FinalizationOutcome
 import com.rustedwax.app.scrobble.FinalizationRuntime
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Every user-facing playback-history row opens the exact video it describes. */
+/**
+ * Where a proven hyperlink is required, and where it is not.
+ *
+ * History is a hyperlink surface: nothing reaches the chain without a canonical
+ * watch URL, so every entry can open the exact video it describes. Not logged
+ * is a *record* surface — its job is to answer "why wasn't this scrobbled" —
+ * and it used to enforce the same rule, which meant the commonest offline
+ * refusal (no id resolved, because every id route needs the network) produced
+ * no row at all. The rule here is now split: a Not-logged row shows a link when
+ * one was proven and stands without one when it was not, and no id is ever
+ * invented to manufacture the link.
+ */
 class NotLoggedHyperlinkInvariantReplayTest : ReplayScenarioTest() {
 
 	private val videoId = "shortFloor1"
@@ -104,7 +116,7 @@ class NotLoggedHyperlinkInvariantReplayTest : ReplayScenarioTest() {
 	}
 
 	@Test
-	fun `an unresolved refusal stays in outcomes but not in user-facing history`() {
+	fun `an unresolved refusal is recorded in Not logged without a link`() {
 		val harness = ReplayHarness(ReplaySource.BRAVE)
 
 		harness.feed(
@@ -120,11 +132,15 @@ class NotLoggedHyperlinkInvariantReplayTest : ReplayScenarioTest() {
 		)
 
 		assertTrue(harness.outcomes.single().outcome is FinalizationOutcome.Refused)
-		assertEquals(emptyList<FinalizationRuntime.SkipRecord>(), FinalizationRuntime.skipped.value)
+		val row = FinalizationRuntime.skipped.value.single()
+		assertEquals("Unresolved video", row.title)
+		// Not a dead link and not a fabricated one: no id was proven, so the row
+		// carries none and simply does not open.
+		assertNull(row.videoId)
 	}
 
 	@Test
-	fun `every History and Not logged row has a canonical hyperlink`() {
+	fun `every row that claims an id has a canonical hyperlink`() {
 		val harness = ReplayHarness(ReplaySource.NATIVE_YOUTUBE)
 		configureResolvableShort(harness)
 		harness.feed(
@@ -140,7 +156,7 @@ class NotLoggedHyperlinkInvariantReplayTest : ReplayScenarioTest() {
 
 		assertTrue(
 			FinalizationRuntime.skipped.value.all {
-				YouTubeProbe.canonicalWatchUrl(it.videoId) != null
+				it.videoId == null || YouTubeProbe.canonicalWatchUrl(it.videoId) != null
 			},
 		)
 		assertTrue(

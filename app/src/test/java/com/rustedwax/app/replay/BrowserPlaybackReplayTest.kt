@@ -231,7 +231,7 @@ class BrowserPlaybackReplayTest : ReplayScenarioTest() {
 			List(3) { RefusalKind.NO_VERIFIED_VIDEO_ID },
 			harness.terminalRefusalKinds,
 		)
-		assertEquals(emptyList<ReplayHarness.Refusal>(), harness.refusals)
+		assertEquals(List(3) { RefusalKind.NO_VERIFIED_VIDEO_ID }, harness.unlinkedRefusalKinds)
 		assertEquals(emptyList<ReplayHarness.BroadcastPayload>(), harness.broadcasts)
 	}
 
@@ -258,7 +258,7 @@ class BrowserPlaybackReplayTest : ReplayScenarioTest() {
 		// while the track is still playing, so a contradicting page disproves the
 		// id there and finalization simply never gets one.
 		assertEquals(listOf(RefusalKind.NO_VERIFIED_VIDEO_ID), harness.terminalRefusalKinds)
-		assertEquals(emptyList<ReplayHarness.Refusal>(), harness.refusals)
+		assertEquals(listOf(RefusalKind.NO_VERIFIED_VIDEO_ID), harness.unlinkedRefusalKinds)
 		// And the row still knows the bar named something, which is what keeps
 		// this diagnosable rather than merely refused.
 		assertEquals("fctnSdDjxiY", harness.finalized.single().resolverContext.observedVideoId)

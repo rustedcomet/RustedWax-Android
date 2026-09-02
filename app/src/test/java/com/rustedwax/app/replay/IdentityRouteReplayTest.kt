@@ -229,7 +229,10 @@ class IdentityRouteReplayTest : ReplayScenarioTest() {
 			listOf(RefusalKind.NO_VERIFIED_VIDEO_ID, RefusalKind.NO_VERIFIED_VIDEO_ID),
 			harness.terminalRefusalKinds,
 		)
-		assertEquals(emptyList<ReplayHarness.Refusal>(), harness.refusals)
+		assertEquals(
+			listOf(RefusalKind.NO_VERIFIED_VIDEO_ID, RefusalKind.NO_VERIFIED_VIDEO_ID),
+			harness.unlinkedRefusalKinds,
+		)
 	}
 
 	// ---- temporary failure ----------------------------------------------------
@@ -348,7 +351,7 @@ class IdentityRouteReplayTest : ReplayScenarioTest() {
 		harness.feed(playing("Track Five", "A Channel", 200_000))
 		assertEquals(listOf(RefusalKind.NO_VERIFIED_VIDEO_ID), harness.terminalRefusalKinds)
 		assertTrue(harness.terminalRefusalReasons.single().contains("resolver failed"))
-		assertEquals(emptyList<ReplayHarness.Refusal>(), harness.refusals)
+		assertEquals(listOf(RefusalKind.NO_VERIFIED_VIDEO_ID), harness.unlinkedRefusalKinds)
 
 		harness.feed(playing("Track Five", "A Channel", 200_000))
 		assertEquals(1, harness.broadcasts.size)
@@ -392,7 +395,7 @@ class IdentityRouteReplayTest : ReplayScenarioTest() {
 
 		assertFalse(harness.broadcasts.any { it.videoId == "carriedIdAa" })
 		assertEquals(listOf(RefusalKind.NO_VERIFIED_VIDEO_ID), harness.terminalRefusalKinds)
-		assertEquals(emptyList<ReplayHarness.Refusal>(), harness.refusals)
+		assertEquals(listOf(RefusalKind.NO_VERIFIED_VIDEO_ID), harness.unlinkedRefusalKinds)
 	}
 
 	// ---- the identity contract ------------------------------------------------
@@ -443,7 +446,7 @@ class IdentityRouteReplayTest : ReplayScenarioTest() {
 		assertTrue(
 			harness.terminalRefusalReasons.single().contains("without a unique finalized-track match"),
 		)
-		assertEquals(emptyList<ReplayHarness.Refusal>(), harness.refusals)
+		assertEquals(listOf(RefusalKind.NO_VERIFIED_VIDEO_ID), harness.unlinkedRefusalKinds)
 	}
 
 	@Test
@@ -458,7 +461,7 @@ class IdentityRouteReplayTest : ReplayScenarioTest() {
 
 		assertEquals(emptyList<ReplayHarness.BroadcastPayload>(), harness.broadcasts)
 		assertEquals(listOf(RefusalKind.IDENTITY_CONTRADICTION), harness.terminalRefusalKinds)
-		assertEquals(emptyList<ReplayHarness.Refusal>(), harness.refusals)
+		assertEquals(listOf(RefusalKind.IDENTITY_CONTRADICTION), harness.unlinkedRefusalKinds)
 	}
 
 	// ---- lookups turned off ---------------------------------------------------
@@ -488,7 +491,7 @@ class IdentityRouteReplayTest : ReplayScenarioTest() {
 		)
 		assertEquals(emptyList<ReplayHarness.BroadcastPayload>(), unproven.broadcasts)
 		assertTrue(unproven.terminalRefusalReasons.single().contains("video lookup is disabled"))
-		assertEquals(emptyList<ReplayHarness.Refusal>(), unproven.refusals)
+		assertEquals(listOf(RefusalKind.NO_VERIFIED_VIDEO_ID), unproven.unlinkedRefusalKinds)
 		assertEquals(emptyList<Route>(), unproven.identityRoutes)
 	}
 }

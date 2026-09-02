@@ -11,7 +11,9 @@ import com.rustedwax.app.enrich.WatchHistoryHealth
 import com.rustedwax.app.enrich.WatchHistoryParser
 import com.rustedwax.app.enrich.WatchHistoryResolver
 import com.rustedwax.hive.HiveKey
+import com.rustedwax.hive.HivePreparationResult
 import com.rustedwax.hive.HiveRpc
+import com.rustedwax.hive.PreparedHiveTransaction
 import com.rustedwax.hive.PrivateScrobble
 import com.rustedwax.app.scrobble.AccountSessionStore
 import com.rustedwax.app.scrobble.BroadcastQueue
@@ -180,23 +182,36 @@ class ReplayRetryQueue(private val clock: Clock) : RetryQueue {
 	/** Set to make persistence fail, for the "queue storage failure" branch. */
 	var storageWorks: Boolean = true
 
+	/** Set to fail the atomic PREPARED/IN_FLIGHT write before network I/O. */
+	var preparationWorks: Boolean = true
+
+	/** Set to fail the first post-send SETTLED write. */
+	var settlementWorks: Boolean = true
+
+	/** Set to fail removal after SETTLED was already persisted. */
+	var removalWorks: Boolean = true
+
 	val all: List<BroadcastQueue.Entry> get() = entries.toList()
 
-	override fun size(): Int = entries.size
+	override fun size(): Int = entries.count { it.state != BroadcastQueue.State.SETTLED }
 
 	override fun due(): List<BroadcastQueue.Entry> =
-		entries.filter { it.nextAttemptAtMs <= clock.nowMillis() }
+		entries.filter {
+			it.nextAttemptAtMs <= clock.nowMillis() && it.state != BroadcastQueue.State.SETTLED
+		}
 
-	override fun add(
+	override fun enqueue(
 		username: String,
 		json: String,
 		label: String,
 		percentPlayed: Int?,
 		videoId: String?,
-	): Boolean {
-		if (!storageWorks) return false
-		entries += BroadcastQueue.Entry(
-			id = nextId++,
+	): BroadcastQueue.Entry? {
+		if (!storageWorks) return null
+		val id = nextId++
+		val entry = BroadcastQueue.Entry(
+			id = id,
+			operationId = "operation-$id",
 			username = username,
 			json = json,
 			label = label,
@@ -206,31 +221,75 @@ class ReplayRetryQueue(private val clock: Clock) : RetryQueue {
 			lastError = null,
 			nextAttemptAtMs = clock.nowMillis(),
 		)
-		return true
+		entries += entry
+		return entry
 	}
 
-	override fun remove(id: Long): Boolean = entries.removeAll { it.id == id }
+	override fun markInFlight(
+		entry: BroadcastQueue.Entry,
+		prepared: PreparedHiveTransaction,
+	): BroadcastQueue.PrepareOutcome {
+		if (!preparationWorks) return BroadcastQueue.PrepareOutcome.STORAGE_ERROR
+		val index = entries.indexOfFirst { it.operationId == entry.operationId }
+		if (index < 0) return BroadcastQueue.PrepareOutcome.NOT_FOUND
+		entries[index] = entries[index].copy(
+			state = BroadcastQueue.State.IN_FLIGHT,
+			preparedTransactionJson = prepared.signedTransactionJson,
+			preparedTransactionId = prepared.txId,
+			preparedExpirationEpochSec = prepared.expirationEpochSec,
+		)
+		return BroadcastQueue.PrepareOutcome.STORED
+	}
 
-	override fun recordFailure(id: Long, error: String): BroadcastQueue.FailureOutcome {
+	override fun settle(entry: BroadcastQueue.Entry): BroadcastQueue.SettleOutcome {
+		val index = entries.indexOfFirst { it.operationId == entry.operationId }
+		if (index < 0) return BroadcastQueue.SettleOutcome.RETIRED
+		if (!settlementWorks) return BroadcastQueue.SettleOutcome.IN_FLIGHT_RETAINED
+		entries[index] = entries[index].copy(state = BroadcastQueue.State.SETTLED)
+		return if (removalWorks) {
+			entries.removeAt(index)
+			BroadcastQueue.SettleOutcome.RETIRED
+		} else {
+			BroadcastQueue.SettleOutcome.SETTLED_DURABLY
+		}
+	}
+
+	override fun recordFailure(
+		entry: BroadcastQueue.Entry,
+		error: String,
+	): BroadcastQueue.FailureOutcome {
 		if (!storageWorks) return BroadcastQueue.FailureOutcome.STORAGE_ERROR
-		val index = entries.indexOfFirst { it.id == id }
+		val index = entries.indexOfFirst { it.operationId == entry.operationId }
 		if (index < 0) return BroadcastQueue.FailureOutcome.NOT_FOUND
 		val entry = entries[index]
 		val attempts = entry.attempts + 1
 		if (attempts >= MAX_ATTEMPTS) {
+			if (entry.state == BroadcastQueue.State.IN_FLIGHT) {
+				entries[index] = entry.copy(
+					attempts = MAX_ATTEMPTS,
+					lastError = error,
+					nextAttemptAtMs = clock.nowMillis(),
+				)
+				return BroadcastQueue.FailureOutcome.AWAITING_RECONCILIATION
+			}
 			entries.removeAt(index)
 			return BroadcastQueue.FailureOutcome.DROPPED
 		}
 		entries[index] = entry.copy(
 			attempts = attempts,
 			lastError = error,
-			nextAttemptAtMs = clock.nowMillis(),
+			nextAttemptAtMs = clock.nowMillis() + minOf(
+				BASE_DELAY_MS shl (attempts - 1),
+				MAX_DELAY_MS,
+			),
 		)
 		return BroadcastQueue.FailureOutcome.RETAINED
 	}
 
 	private companion object {
-		/** Matches `BroadcastQueue`'s own limit; the engine's message quotes 8. */
+		/** Matches `BroadcastQueue`; replay tests exercise the production policy. */
+		const val BASE_DELAY_MS = 60_000L
+		const val MAX_DELAY_MS = 60L * 60_000L
 		const val MAX_ATTEMPTS = 8
 	}
 }
@@ -283,9 +342,34 @@ class RecordingBroadcaster(
 	private val results: MutableList<HiveRpc.BroadcastResult> = mutableListOf(),
 ) : PayloadBroadcaster {
 
-	data class Sent(val username: String, val json: String)
+	data class Sent(val username: String, val json: String, val txId: String)
+	data class Prepared(val username: String, val json: String, val transaction: PreparedHiveTransaction)
+	data class Observation(val txId: String, val expirationEpochSec: Long)
 
-	val sent = mutableListOf<Sent>()
+	/**
+	 * Synchronized because the duplicate-send probes drive several drains from
+	 * real threads at once. Deliberately *not* a mutually exclusive broadcast: if
+	 * the engine's own lock failed, two threads must be able to get in here and
+	 * be counted, which is the whole point of that test.
+	 */
+	val sent: MutableList<Sent> = java.util.Collections.synchronizedList(mutableListOf())
+	val prepared: MutableList<Prepared> = java.util.Collections.synchronizedList(mutableListOf())
+	val observed: MutableList<Observation> = java.util.Collections.synchronizedList(mutableListOf())
+	private val nextPrepared = AtomicInteger(0)
+	private val observations = java.util.concurrent.ConcurrentHashMap<String, HiveRpc.TransactionEvidence>()
+
+	/** Preparation can fail before any signed transaction is persisted or sent. */
+	var preparationFailure: HiveRpc.BroadcastResult? = null
+
+	/** Network/Deferred attempts are absent unless a scenario makes them ambiguous. */
+	var defaultObservation: HiveRpc.TransactionEvidence = HiveRpc.TransactionEvidence.ABSENT
+
+	/**
+	 * Runs inside the broadcast, before a result is chosen, with the 1-based call
+	 * index. A concurrency probe blocks here to hold the broadcast open while it
+	 * launches the other drains.
+	 */
+	var onBroadcast: ((callIndex: Int) -> Unit)? = null
 
 	/** Result for every call once [results] is exhausted. */
 	var defaultResult: HiveRpc.BroadcastResult =
@@ -305,20 +389,60 @@ class RecordingBroadcaster(
 		results += scripted
 	}
 
+	fun willObserve(txId: String, evidence: HiveRpc.TransactionEvidence) {
+		observations[txId] = evidence
+	}
+
+	override fun prepareJson(
+		username: String,
+		key: HiveKey,
+		payloadJson: String,
+	): HivePreparationResult {
+		preparationFailure?.let { return HivePreparationResult.Failed(it) }
+		val transaction = PreparedHiveTransaction(
+			signedTransactionJson = payloadJson,
+			txId = "prepared-${nextPrepared.incrementAndGet()}",
+			expirationEpochSec = 4_000_000_000L,
+		)
+		prepared += Prepared(username, payloadJson, transaction)
+		return HivePreparationResult.Ready(transaction)
+	}
+
+	override fun broadcastPrepared(prepared: PreparedHiveTransaction): HiveRpc.BroadcastResult {
+		throwOnBroadcast?.let { throw it }
+		val username = this.prepared.lastOrNull { it.transaction.txId == prepared.txId }?.username.orEmpty()
+		sent += Sent(username, prepared.signedTransactionJson, prepared.txId)
+		onBroadcast?.invoke(sent.size)
+		val next = if (results.isEmpty()) defaultResult else results.removeAt(0)
+		return when (next) {
+			is HiveRpc.BroadcastResult.Success -> {
+				observations[prepared.txId] = when (next.evidence) {
+					HiveRpc.BroadcastResult.Evidence.BLOCK -> HiveRpc.TransactionEvidence.BLOCK
+					HiveRpc.BroadcastResult.Evidence.MEMPOOL -> HiveRpc.TransactionEvidence.MEMPOOL
+				}
+				next.copy(txId = prepared.txId)
+			}
+			is HiveRpc.BroadcastResult.AcceptedUnconfirmed ->
+				next.copy(txId = prepared.txId)
+			else -> next
+		}
+	}
+
+	override fun observeTransaction(
+		txId: String,
+		expirationEpochSec: Long,
+	): HiveRpc.TransactionEvidence {
+		observed += Observation(txId, expirationEpochSec)
+		return observations[txId] ?: defaultObservation
+	}
+
 	override fun broadcastJson(
 		username: String,
 		key: HiveKey,
 		payloadJson: String,
-	): HiveRpc.BroadcastResult {
-		throwOnBroadcast?.let { throw it }
-		sent += Sent(username, payloadJson)
-		val next = if (results.isEmpty()) defaultResult else results.removeAt(0)
-		return when (next) {
-			// Give each transaction its own id so a duplicate is visible as two
-			// ids rather than hidden behind one repeated constant.
-			is HiveRpc.BroadcastResult.Success -> next.copy(txId = "${next.txId}-${sent.size}")
-			else -> next
-		}
+	): HiveRpc.BroadcastResult = when (val preparation = prepareJson(username, key, payloadJson)) {
+		is HivePreparationResult.Ready -> broadcastPrepared(preparation.transaction)
+		is HivePreparationResult.Failed -> preparation.result
 	}
 }
 

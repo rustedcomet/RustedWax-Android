@@ -36,10 +36,10 @@ The current source has several unresolved hardening items:
 
 - Some production HTTP/RPC clients read a response without a shared byte
   ceiling. This is primarily an availability risk from an oversized response.
-- A transaction accepted by one Hive node but not observed by independent
-  nodes can enter retry handling after the confirmation window. Under a narrow
-  divergent-node condition, a later retry could create a duplicate immutable
-  entry.
+- An automatic transaction accepted by one Hive node but not observed by
+  independent nodes can remain in fail-closed retry state indefinitely. This
+  favors duplicate-write safety over prompt delivery while node evidence is
+  unavailable.
 - The embedded Google/YouTube sign-in WebView does not yet enforce a complete
   navigation allowlist and explicit legacy file/content-access policy.
 - Android device-transfer exclusions are not explicitly defined for every
