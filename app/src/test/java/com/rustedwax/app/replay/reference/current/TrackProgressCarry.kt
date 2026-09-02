@@ -1,9 +1,14 @@
-package com.rustedwax.app.detect
+package com.rustedwax.app.replay.reference.current
 
+// GENERATED — do not edit. See tools/phase03/generate-current-mirror.sh.
+// Body below is byte-identical to the shipping detect/TrackProgressCarry.kt.
+
+import com.rustedwax.app.detect.*
 import com.rustedwax.core.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
+import com.rustedwax.app.replay.reference.phase01.VirtualSystem as System
 
 object TrackProgressCarry {
 

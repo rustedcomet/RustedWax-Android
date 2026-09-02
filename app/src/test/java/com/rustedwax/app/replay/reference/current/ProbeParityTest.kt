@@ -63,8 +63,11 @@ class ProbeParityTest {
 	private fun oldRun(script: List<ParityStep>, packageName: String) =
 		capture { ReferenceRun.snapshots(script, packageName) }
 
-	private fun newRun(script: List<ParityStep>, packageName: String) =
-		capture { CurrentRun.snapshots(script, packageName) }
+	private fun newRun(
+		script: List<ParityStep>,
+		packageName: String,
+		virtualWallClock: Boolean = false,
+	) = capture { CurrentRun.snapshots(script, packageName, virtualWallClock) }
 
 	private fun assertParity(name: String, script: List<ParityStep>, packageName: String = native) {
 		val oldSide = oldRun(script, packageName)
@@ -581,9 +584,8 @@ class ProbeParityTest {
 	 * not coming back. The carry is displaced, and the owner's polling tick
 	 * collects the fragment and finalizes it exactly once.
 	 *
-	 * This is the reachable half of continuation expiry; the deadline half is
-	 * wall-clock bound on both sides — see
-	 * [known limitation - the continuation deadline is wall-clock on both sides].
+	 * The deadline half is exercised separately against the generated current
+	 * mirror's virtual wall clock below.
 	 */
 	@Test
 	fun `a displaced continuation is finalized by its owner`() = assertParity(
@@ -620,23 +622,9 @@ class ProbeParityTest {
 		),
 	)
 
-	/**
-	 * **A known limitation, asserted rather than claimed.**
-	 *
-	 * `TrackProgressCarry.expire` compares `System.currentTimeMillis()` against
-	 * the entry's own `atMillis`; neither implementation routes that through the
-	 * injectable clock, and the reference body is frozen, so no amount of virtual
-	 * time expires a parked continuation on either side. The unclaimed-deadline
-	 * path is therefore **not covered by this JVM gate** — it is the instrumented
-	 * suite's, where the timer and the clock are the real ones.
-	 *
-	 * Written as a test because a limitation recorded only in prose stops being
-	 * true without anyone noticing. This fails the moment either side starts
-	 * honouring virtual time here, which is the change that would make the gap
-	 * closeable.
-	 */
+	/** The real current mirror's timer observes the same virtual wall clock as carry. */
 	@Test
-	fun `known limitation - the continuation deadline is wall-clock on both sides`() {
+	fun `virtual wall clock expires an unclaimed current-mirror continuation`() {
 		val script = listOf(
 			ParityStep.Metadata("Abandoned", durationMs = 1_800_000, mediaId = "aaaaaaaaaaa"),
 			playing(0),
@@ -644,36 +632,15 @@ class ProbeParityTest {
 			ParityStep.DestroySession,
 			ParityStep.Advance(30 * 60_000),
 		)
-		val old = oldRun(script, native)
-		val new = newRun(script, native)
+		val new = newRun(script, native, virtualWallClock = true)
 
 		assertEquals(
-			"the reference expired a wall-clock TTL on virtual time",
-			0,
-			old.snapshots.size,
-		)
-		assertEquals(
-			"the current side expired a wall-clock TTL on virtual time",
-			0,
+			"the current mirror did not expire its wall-clock continuation",
+			1,
 			new.snapshots.size,
 		)
-
-		// Non-vacuity: both sides really did park the listen rather than simply
-		// dropping it, which is what makes "neither expired it" a statement about
-		// the deadline instead of about the carry never having happened.
-		assertTrue(
-			"the reference never opened a continuation: ${old.log}",
-			old.log.any { it.contains("before finalizing") },
-		)
-		assertTrue(
-			"the current side never opened a continuation: ${new.log}",
-			new.log.any { it.contains("before finalizing") },
-		)
-		assertEquals(
-			"the two sides describe the wait differently",
-			old.log.normaliseLog(),
-			new.log.normaliseLog(),
-		)
+		assertEquals(150_000L, new.snapshots.single().playedMs)
+		assertTrue(new.log.any { it.contains("session continuation expired") })
 	}
 
 	// ── 4. finalization causes ─────────────────────────────────────────────

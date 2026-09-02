@@ -27,6 +27,7 @@ set -eu
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 original="$root/app/src/main/java/com/rustedwax/app/detect/SessionProbe.kt"
+carry_original="$root/app/src/main/java/com/rustedwax/app/detect/TrackProgressCarry.kt"
 out="$root/app/src/test/java/com/rustedwax/app/replay/reference/current"
 
 mkdir -p "$out"
@@ -48,6 +49,7 @@ mkdir -p "$out"
 	echo 'import com.rustedwax.app.replay.reference.phase01.MediaSessionManager'
 	echo 'import com.rustedwax.app.replay.reference.phase01.PlaybackState'
 	echo 'import com.rustedwax.app.replay.reference.phase01.PlaybackStateDump'
+	echo 'import com.rustedwax.app.replay.reference.phase01.VirtualSystem as System'
 	echo 'import com.rustedwax.app.replay.reference.phase01.SystemClock'
 	echo 'import com.rustedwax.app.replay.reference.phase01.UrlWatcherService'
 	grep '^import kotlinx' "$original" || true
@@ -57,5 +59,19 @@ mkdir -p "$out"
 	awk 'BEGIN { body = 0 } /^\/\*\*/ { body = 1 } body { print }' "$original"
 } > "$out/SessionProbe.kt"
 
+{
+	echo 'package com.rustedwax.app.replay.reference.current'
+	echo
+	echo '// GENERATED — do not edit. See tools/phase03/generate-current-mirror.sh.'
+	echo '// Body below is byte-identical to the shipping detect/TrackProgressCarry.kt.'
+	echo
+	echo 'import com.rustedwax.app.detect.*'
+	grep '^import ' "$carry_original"
+	echo 'import com.rustedwax.app.replay.reference.phase01.VirtualSystem as System'
+	echo
+	awk 'BEGIN { body = 0 } /^object TrackProgressCarry/ { body = 1 } body { print }' "$carry_original"
+} > "$out/TrackProgressCarry.kt"
+
 echo "regenerated:"
 echo "  $out/SessionProbe.kt"
+echo "  $out/TrackProgressCarry.kt"

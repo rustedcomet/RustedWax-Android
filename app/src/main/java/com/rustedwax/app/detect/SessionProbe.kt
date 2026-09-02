@@ -121,6 +121,17 @@ class SessionProbe(
 		FinalizedPlaybackTombstones.None,
 	private val automaticWriteAuthorization: () -> AutomaticWriteAuthorization =
 		{ AutomaticWriteAuthorization.LegacyEnabled },
+	/**
+	 * Whether the display is on right now.
+	 *
+	 * Injected rather than read from [context] because this file is also compiled
+	 * against the JVM stand-in platform the old/new parity gate runs on, where
+	 * there is no `PowerManager` to ask. The default answers "on", which is the
+	 * behaviour every path had before [StoppedInterruption] existed, so a caller
+	 * that does not wire it can only get the old finalization, never a longer one.
+	 * `RustedWaxListenerService` wires the real display state.
+	 */
+	private val displayInteractive: () -> Boolean = { true },
 ) {
 
 	private val appContext = context.applicationContext
@@ -1062,6 +1073,14 @@ class SessionProbe(
 
 		/** Tokenized grace for exact-ID-less native STOPPED → metadata replacement. */
 		private var nativeStoppedFinalizeToken: Long = 0
+		/** One line per display-off hold, not one per poll. */
+		private var nativeStoppedScreenOffNoted = false
+		/** Epoch boundary shared with a continuation if this STOPPED loses its session. */
+		private var nativeStoppedInterruptionStartedAtMillis: Long? = null
+		private var nativeStoppedInterruptionDeadlineMillis: Long? = null
+		/** Position reset/restore signature proving the native playback surface disappeared. */
+		private var nativeStoppedResetFromPositionMs: Long? = null
+		private var nativeStoppedSurfaceDisappearanceConfirmed = false
 		/** Generation/signature for one bounded in-flight native carry lookup. */
 		private var nativeResolutionGeneration: Long = 0
 		private var nativeResolutionSignature: String? = null
@@ -1188,6 +1207,11 @@ class SessionProbe(
 						nextInstanceToken = allocateTrackToken(evidenceSourceSession),
 					),
 				)
+				noteNativeStoppedInterruptionEvidence(
+					previousPositionMs = previousPosition.takeUnless { restartedFromTombstone },
+					newPositionMs = extrapolatedPosition(ps),
+					transport = transportStateOf(ps),
+				)
 				arbitrateExclusivePlayback(this@AndroidSessionBinding)
 				publish()
 			}
@@ -1259,6 +1283,13 @@ class SessionProbe(
 		private fun openContinuation(reason: String) {
 			val now = System.currentTimeMillis()
 			val identityKey = trackIdentity
+			val interruptedStoppedTransport =
+				state?.state == PlaybackState.STATE_STOPPED &&
+					nativeStoppedSurfaceDisappearanceConfirmed
+			val interruptionStartedAt = nativeStoppedInterruptionStartedAtMillis
+				.takeIf { interruptedStoppedTransport }
+			val interruptionDeadline = nativeStoppedInterruptionDeadlineMillis
+				.takeIf { interruptedStoppedTransport }
 			val frozenCoverage = currentAccessibilityCoverage(now)
 			// This AndroidSessionBinding leaves the active map immediately after disappearance.
 			// Freeze what it knew while active; the expiry callback must not
@@ -1283,12 +1314,22 @@ class SessionProbe(
 						identityKey.durationMs,
 					) == true,
 				automaticWriteAuthorization = trackAutomaticWriteAuthorization,
+				interruptionStartedAtMillis = interruptionStartedAt,
+				interruptionDeadlineMillis = interruptionDeadline,
 			)
 			val token = TrackProgressCarry.remember(
 				packageName = packageName,
 				trackIdentity = identityKey,
 				progress = progress,
-			) ?: return
+			)
+			if (token == null) {
+				val originalInterruptionExpired = interruptionDeadline?.let { now >= it } == true
+				clearNativeStoppedInterruption()
+				if (originalInterruptionExpired) {
+					finalizeCurrent("screen-off interruption expired before session continuation")
+				}
+				return
+			}
 			continuationIdentity = frozenIdentity
 			continuationAccessibilityCoverage = frozenCoverage
 			continuationToken = token
@@ -1297,17 +1338,26 @@ class SessionProbe(
 			// same predicate the claim will apply — asked here against the carry's
 			// own stopping point so the log states the wait it will actually keep.
 			val resumable = TrackProgressCarry.holdsResumeWindow(identityKey, progress)
+			val continuationDeadline =
+				TrackProgressCarry.continuationDeadlineMillis(identityKey, progress)
+			val remainingMs = (continuationDeadline - now).coerceAtLeast(0)
 
 			logDeparture(
 				"$packageName [$reason] waiting " +
 					if (resumable) {
-						"up to ${TrackProgressCarry.RESUMED_TTL_MS / 60_000}m for this listen to " +
+						(if (interruptionDeadline != null) {
+							"until the original screen-off interruption deadline " +
+								"(${remainingMs / 1000}s remain)"
+						} else {
+							"up to ${TrackProgressCarry.RESUMED_TTL_MS / 60_000}m"
+						}) + " for this listen to " +
 							"resume near ${(progress.lastPositionMs ?: 0L) / 1000}s before finalizing"
 					} else {
 						"${TrackProgressCarry.TTL_MS / 1000}s for a replacement session " +
 							"before finalizing"
 					},
 			)
+			clearNativeStoppedInterruption()
 			// Polled rather than fired once: the wait can now end three ways — a
 			// claim, a newer continuation displacing this one, or the deadline —
 			// and only asking can tell "still waiting" from "someone else settled
@@ -1336,7 +1386,9 @@ class SessionProbe(
 					}
 				}
 			}
-			handler.postDelayed(tick, TrackProgressCarry.TTL_MS + CONTINUATION_TIMER_SLOP_MS)
+			val firstPollDelayMs = minOf(TrackProgressCarry.TTL_MS, remainingMs) +
+				CONTINUATION_TIMER_SLOP_MS
+			handler.postDelayed(tick, firstPollDelayMs)
 		}
 
 		private fun cancelContinuation() {
@@ -1487,6 +1539,7 @@ class SessionProbe(
 		 */
 		private fun freezeAndReport(reason: String, persistRestartTombstone: Boolean) {
 			val snapshot = snapshot(finalizedTrack = true)
+			clearNativeStoppedInterruption()
 			// Persist only the terminal condition this store can identify safely on a
 			// later process: Chromium kept PLAYING after the item ran out. A service
 			// teardown also finalizes in-flight work, but the identical transport may
@@ -1534,7 +1587,7 @@ class SessionProbe(
 			// This effect is performed only after the reducer has installed the new
 			// logical track. Freeze the current opt-in interval at that same boundary.
 			trackAutomaticWriteAuthorization = automaticWriteAuthorization()
-			cancelNativeStoppedFinalization()
+			clearNativeStoppedInterruption()
 			invalidateNativeResolution()
 			taintedReason = null
 			latchedVideo = null
@@ -1618,18 +1671,63 @@ class SessionProbe(
 
 		private fun scheduleNativeStoppedFinalization() {
 			val token = ++nativeStoppedFinalizeToken
+			nativeStoppedScreenOffNoted = false
+			val nowMillis = System.currentTimeMillis()
+			nativeStoppedInterruptionStartedAtMillis = nowMillis
+			nativeStoppedInterruptionDeadlineMillis =
+				nowMillis + StoppedInterruption.SCREEN_OFF_HOLD_CAP_MS
+			nativeStoppedResetFromPositionMs = null
+			nativeStoppedSurfaceDisappearanceConfirmed = false
 			EventLog.append(
 				"native-identity",
 				"$packageName exact-ID-less STOPPED state waiting " +
 					"${NATIVE_STOPPED_FINALIZE_GRACE_MS / 1000}s for a metadata replacement",
 			)
+			postNativeStoppedFinalizeCheck(token, SystemClock.elapsedRealtime())
+		}
+
+		/**
+		 * Ask again, one grace period from now, whether this STOPPED ends the listen.
+		 *
+		 * Polled rather than fired once because the answer can change while the
+		 * grace runs: [StoppedInterruption] combines the current display state with
+		 * the transport's reset-and-restore surface-disappearance evidence. Every
+		 * check that decides the listen is still merely interrupted re-posts itself
+		 * against the same [stoppedSinceElapsedMs], so the cap is measured from the
+		 * transport's STOPPED transition rather than being renewed by each poll.
+		 *
+		 * A held listen is not a measuring one — a STOPPED transport banks nothing
+		 * and arms no idle deadline — so this changes what the same viewing is
+		 * allowed to continue into, not what it is credited.
+		 */
+		private fun postNativeStoppedFinalizeCheck(token: Long, stoppedSinceElapsedMs: Long) {
 			handler.postDelayed(
 				{
-					if (token == nativeStoppedFinalizeToken && !finalized &&
-						state?.state == PlaybackState.STATE_STOPPED
+					if (token != nativeStoppedFinalizeToken || finalized) return@postDelayed
+					if (state?.state != PlaybackState.STATE_STOPPED) return@postDelayed
+					val stoppedForMs = SystemClock.elapsedRealtime() - stoppedSinceElapsedMs
+					if (StoppedInterruption.holdsListenOpen(
+							displayInteractive = displayInteractive(),
+							stoppedForMs = stoppedForMs,
+							surfaceDisappearanceConfirmed =
+								nativeStoppedSurfaceDisappearanceConfirmed,
+							stoppedAtMs = extrapolatedPosition(state),
+							durationMs = durationOf(currentMetadata),
+						)
 					) {
-						finalizeCurrent("stopped replacement grace expired")
+						if (!nativeStoppedScreenOffNoted) {
+							nativeStoppedScreenOffNoted = true
+							EventLog.append(
+								"native-identity",
+								"$packageName proved a display-off surface interruption — holding " +
+									"this listen open for the same item to continue into rather " +
+									"than finalizing an interruption nobody asked for",
+							)
+						}
+						postNativeStoppedFinalizeCheck(token, stoppedSinceElapsedMs)
+						return@postDelayed
 					}
+					finalizeCurrent("stopped replacement grace expired")
 				},
 				NATIVE_STOPPED_FINALIZE_GRACE_MS,
 			)
@@ -1637,6 +1735,40 @@ class SessionProbe(
 
 		private fun cancelNativeStoppedFinalization() {
 			nativeStoppedFinalizeToken++
+			nativeStoppedScreenOffNoted = false
+		}
+
+		private fun noteNativeStoppedInterruptionEvidence(
+			previousPositionMs: Long?,
+			newPositionMs: Long?,
+			transport: TransportState,
+		) {
+			if (transport != TransportState.STOPPED) {
+				clearNativeStoppedInterruption()
+				return
+			}
+			if (nativeStoppedInterruptionStartedAtMillis == null) return
+			if (nativeStoppedResetFromPositionMs == null) {
+				nativeStoppedResetFromPositionMs = StoppedInterruption.resetCandidate(
+					previousPositionMs,
+					newPositionMs,
+				)
+			}
+			if (StoppedInterruption.confirmsSurfaceDisappearance(
+					nativeStoppedResetFromPositionMs,
+					newPositionMs,
+				)
+			) {
+				nativeStoppedSurfaceDisappearanceConfirmed = true
+			}
+		}
+
+		private fun clearNativeStoppedInterruption() {
+			cancelNativeStoppedFinalization()
+			nativeStoppedInterruptionStartedAtMillis = null
+			nativeStoppedInterruptionDeadlineMillis = null
+			nativeStoppedResetFromPositionMs = null
+			nativeStoppedSurfaceDisappearanceConfirmed = false
 		}
 
 		/**
