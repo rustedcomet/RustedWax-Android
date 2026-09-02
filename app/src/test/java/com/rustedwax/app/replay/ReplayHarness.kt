@@ -95,6 +95,9 @@ class ReplayHarness(
 		FinalizationRuntime.finalizationObserver = FinalizationObserver { session, outcome ->
 			outcomes += RecordedOutcome(session, outcome)
 		}
+		if (source == ReplaySource.NATIVE_YOUTUBE_MUSIC) {
+			trace.onCarryAuthorityRequested = FinalizationRuntime::resolveNativeCarryIdentity
+		}
 	}
 
 	/** One finalized listen and the single terminal outcome the engine filed. */

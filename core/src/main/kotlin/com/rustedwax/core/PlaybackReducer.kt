@@ -58,6 +58,36 @@ class PlaybackReducer(
 			} else {
 				transition
 			}
+		}.let { transition ->
+			val exactPublishedPresentation =
+				(input as? PlaybackInput.MetadataPublished)?.identity?.takeIf {
+					it.hasExactSourceItemId && (it.durationMs ?: 0) > 0
+				}
+			if (source.republishesAlternateMediaDurations &&
+				exactPublishedPresentation != null && !transition.state.finalized
+			) {
+				return@let transition.copy(
+					state = transition.state.copy(
+						organicPresentationDurationMs = exactPublishedPresentation.durationMs,
+						presentationUnprovenForNamedWork = false,
+					),
+				)
+			}
+			val currentPresentationIsAmbiguous =
+				source.republishesAlternateMediaDurations &&
+					transition.state.trackIdentity.isUsable &&
+					(transition.state.trackIdentity.durationMs ?: 0) > 0 &&
+					transition.state.organicPresentationDurationMs == null &&
+					!transition.state.finalized
+			if (currentPresentationIsAmbiguous &&
+				!transition.state.presentationUnprovenForNamedWork
+			) {
+				transition.copy(
+					state = transition.state.copy(presentationUnprovenForNamedWork = true),
+				)
+			} else {
+				transition
+			}
 		}
 
 	private fun dispatch(state: ListenState, input: PlaybackInput): Transition = when (input) {
@@ -79,11 +109,32 @@ class PlaybackReducer(
 		is PlaybackInput.ExactIdEstablished -> Transition(
 			state.copy(trackIdentity = state.trackIdentity.copy(sourceItemId = input.sourceItemId)),
 		)
+		is PlaybackInput.PresentationAttributionEstablished ->
+			onPresentationAttributionEstablished(state, input)
 		is PlaybackInput.ForegroundShortTookOver -> onForegroundShortTookOver(state, input)
 		is PlaybackInput.ForegroundShortReleased -> onForegroundShortReleased(state, input)
 		is PlaybackInput.PictureInPictureObserved -> onPictureInPicture(state, input)
 		is PlaybackInput.ForegroundSurface -> Transition(state)
 		is PlaybackInput.IdleDeadlineReached -> onIdleDeadline(state, input)
+	}
+
+	private fun onPresentationAttributionEstablished(
+		state: ListenState,
+		input: PlaybackInput.PresentationAttributionEstablished,
+	): Transition {
+		val currentDurationMs = state.trackIdentity.durationMs
+		if (!source.republishesAlternateMediaDurations || state.finalized ||
+			state.durationReplacementMs != null || state.durationReplacementReturnPending ||
+			state.trackIdentity.sourceItemId != input.sourceItemId ||
+			currentDurationMs == null || currentDurationMs <= 0 ||
+			currentDurationMs != input.presentationDurationMs
+		) return Transition(state)
+		return Transition(
+			state.copy(
+				organicPresentationDurationMs = currentDurationMs,
+				presentationUnprovenForNamedWork = false,
+			),
+		)
 	}
 
 	private fun onIdleDeadline(
@@ -94,6 +145,13 @@ class PlaybackReducer(
 			return Transition(state)
 		}
 		if (state.transport != TransportState.PLAYING) return Transition(state)
+		// A presentation the source itself has not let this reducer attribute cannot
+		// say when the named work should have ended, and a finalize is the one
+		// decision here that cannot be taken back. The field ended a 213 s song at
+		// 202 % on an interstitial's 30 s before a note of the song had played. A
+		// listen held open costs nothing: STOPPED, the next track and the session's
+		// own teardown all still end it.
+		if (state.presentationUnprovenForNamedWork) return Transition(state)
 		val played = state.playedMsAt(input.elapsedRealtimeMs)
 		val duration = input.durationMs?.takeIf { it > 0 }
 		if (duration == null) {
@@ -206,7 +264,17 @@ class PlaybackReducer(
 		if (loopDetected || !positionWrapped(previousPositionMs, newPositionMs, durationMs)) {
 			return this to emptyList()
 		}
-		return copy(loopDetected = true) to listOf(
+		// A pod handing one interstitial to the next wraps end-to-start exactly like
+		// a repeat does, and this source publishes nothing that separates them. The
+		// wrap is recorded either way — it is a true reading — but for a source that
+		// republishes alternate lengths for one work it stops being *proof* that the
+		// named work was consumed twice, so the interval it bounds is no longer
+		// attributable until a presentation is proven organic.
+		return copy(
+			loopDetected = true,
+			presentationUnprovenForNamedWork = presentationUnprovenForNamedWork ||
+				(source.republishesAlternateMediaDurations && organicPresentationDurationMs == null),
+		) to listOf(
 			PlaybackEffect.Note(
 				"playback",
 				"playback position wrapped from end to start" +
@@ -406,7 +474,30 @@ class PlaybackReducer(
 			state.trackIdentity.durationMs ?: 0,
 			state.longestDurationMs ?: 0,
 		).takeIf { it > 0 }
-		if (source.republishesAlternateMediaDurations) {
+		val newDuration = new.durationMs ?: 0
+		// A source that republishes alternate media lengths names one selected work
+		// across its presentations, and both renderings of that work are the work.
+		// An interstitial published under that same title is not one of them, and
+		// this source publishes no advertisement key to say so — the captured
+		// interstitial bundle is field-for-field identical to the song's.
+		//
+		// A fully consumed surface followed by a longer one is enough to discard only
+		// while the source still has not positively attributed that surface. Once a
+		// live exact-item proof corroborates the current duration, natural end is
+		// ordinary playback and a later Song↔Video update retains the listen. This is
+		// scale-free: duration never decides whether a presentation is organic.
+		val spentPlayedMs = state.playedMsAt(input.elapsedRealtimeMs)
+		val outgoingWasSpent = priorDuration != null &&
+			(
+				spentPlayedMs >= priorDuration ||
+					(state.lastObservedPositionMs ?: 0) >= priorDuration
+				)
+		val spentSurfaceSuperseded = source.republishesAlternateMediaDurations &&
+			state.presentationUnprovenForNamedWork &&
+			priorDuration != null &&
+			newDuration > priorDuration &&
+			outgoingWasSpent
+		if (source.republishesAlternateMediaDurations && !spentSurfaceSuperseded) {
 			val longest = maxOf(priorDuration ?: 0, new.durationMs ?: 0).takeIf { it > 0 }
 			return Transition(
 				state.copy(
@@ -435,7 +526,6 @@ class PlaybackReducer(
 				),
 			)
 		}
-		val newDuration = new.durationMs ?: 0
 		val activeOrganicDuration = state.organicPresentationDurationMs
 			?: state.trackIdentity.durationMs
 			?: priorDuration
@@ -467,6 +557,8 @@ class PlaybackReducer(
 				durationReplacementReturnGraceScheduled =
 					(state.durationReplacementReturnGraceScheduled || armGrace) && returnPending,
 				durationReplacementCandidatePositionMs = null,
+				presentationUnprovenForNamedWork =
+					state.presentationUnprovenForNamedWork && returnPending,
 				playingSinceElapsedMs = input.elapsedRealtimeMs.takeIf {
 					state.transport == TransportState.PLAYING && positionConfirmed
 				},
@@ -520,6 +612,7 @@ class PlaybackReducer(
 						organicPresentationRebased = true,
 						durationReplacementReturnGraceScheduled = false,
 						durationReplacementCandidatePositionMs = null,
+						presentationUnprovenForNamedWork = false,
 					),
 					before = listOf(
 						PlaybackEffect.CancelStoppedFinalizationGrace,
@@ -549,7 +642,14 @@ class PlaybackReducer(
 			// left alone, because that decision is already in flight.
 			!state.durationReplacementReturnPending &&
 
-			priorDuration * ORGANIC_ANCHOR_SUPERSEDE_FACTOR <= newDuration
+			(
+				(!source.republishesAlternateMediaDurations &&
+					priorDuration * ORGANIC_ANCHOR_SUPERSEDE_FACTOR <= newDuration) ||
+					// A surface already played through whole and then replaced by a
+					// longer one is provisional by the same standard this branch
+					// already applies, without asking how long either of them is.
+					spentSurfaceSuperseded
+			)
 		if (provisionalAnchorSuperseded) {
 			val provisionalPlayedMs = state.playedMsAt(input.elapsedRealtimeMs)
 			return Transition(
@@ -579,6 +679,8 @@ class PlaybackReducer(
 					durationReplacementEndedAtBoundary = false,
 					durationReplacementReturnGraceScheduled = false,
 					durationReplacementCandidatePositionMs = null,
+					// Organic measurement starts here, so the listen is attributable again.
+					presentationUnprovenForNamedWork = false,
 					playingSinceElapsedMs = input.elapsedRealtimeMs
 						.takeIf { state.transport == TransportState.PLAYING },
 				),
@@ -851,6 +953,45 @@ class PlaybackReducer(
 					PlaybackEffect.Note(
 						"native-shorts",
 						"[${input.reason}] stale transport session finalization suppressed",
+					),
+				),
+			)
+		}
+		// Every terminal event in the app arrives here — STOPPED, the next track,
+		// session teardown, disposal, the idle deadline — so this is the one place
+		// that has to refuse. While the source has published lengths this reducer
+		// could not attribute to the work it named, the measured interval is not the
+		// work's progress and may not be reported as it: a pre-roll abandoned before
+		// the song begins would otherwise freeze the song's title over the
+		// interstitial's played time and duration, which is a false record whether or
+		// not identity verification later happens to refuse it. Reported as zero
+		// rather than suppressed, because the listen still has to end exactly once
+		// and the outcome path already treats no measured progress as nothing to
+		// file. Nothing is invented: progress is removed, never added.
+		if (state.presentationUnprovenForNamedWork) {
+			return Transition(
+				state.copy(
+					playedMs = 0,
+					pipInferredMs = 0,
+					pipInference = null,
+					playingSinceElapsedMs = null,
+					finalized = true,
+				),
+				before = listOf(
+					PlaybackEffect.CancelStoppedFinalizationGrace,
+					PlaybackEffect.Note(
+						"native-identity",
+						"[${input.reason}] the source never established which presentation was " +
+							"the named work, so the " +
+							"${state.playedMsAt(input.elapsedRealtimeMs) / 1000}s measured here is not " +
+							"credited to it; ending the listen with no progress rather than " +
+							"reporting an interval that may belong to an interstitial",
+					),
+				),
+				effects = listOf(
+					PlaybackEffect.FreezeAndReport(
+						input.reason,
+						input.persistRestartTombstone,
 					),
 				),
 			)
@@ -1340,6 +1481,7 @@ class PlaybackReducer(
 		durationReplacementCandidatePositionMs = null,
 		organicPresentationDurationMs = null,
 		organicPresentationRebased = false,
+		presentationUnprovenForNamedWork = false,
 		lastObservedPositionMs = null,
 		pipInference = null,
 		pipInferredMs = 0,
@@ -1507,6 +1649,21 @@ data class ListenState(
 	val organicPresentationDurationMs: Long? = null,
 	/** True only after the bounded total-minus-played arithmetic established that rebase. */
 	val organicPresentationRebased: Boolean = false,
+	/**
+	 * The source has not established which of the lengths it published is the work
+	 * it named, so this listen's measured interval is not attributable to it.
+	 *
+	 * Set for every positive-duration presentation from a source that republishes
+	 * alternate media lengths for one work. A provider-corroborated exact-item
+	 * proof clears it only while that id and duration still describe the current
+	 * surface. Supersede, return and bounded rebase evidence may also establish the
+	 * organic surface; a new track begins ambiguous again.
+	 *
+	 * It carries no claim about *what* the surface is, and none about how long it
+	 * is. It says only that no terminal event may report this interval as the
+	 * named work's progress, and no length-derived deadline may end the listen.
+	 */
+	val presentationUnprovenForNamedWork: Boolean = false,
 	/** Last position published by this transport, retained across metadata callbacks. */
 	val lastObservedPositionMs: Long? = null,
 
@@ -1574,8 +1731,11 @@ data class ListenState(
 	fun idleFinalizeDelayMs(elapsedRealtimeMs: Long, durationMs: Long?): Long? {
 		if (finalized || suppressedByForegroundShort || describingTabOnly) return null
 		if (transport != TransportState.PLAYING) return null
+		// Nothing this deadline could decide: the source has not established which
+		// length is the work, so neither that length nor silence measured against it
+		// may end this listen.
+		if (presentationUnprovenForNamedWork) return null
 		val total = durationMs?.takeIf { it > 0 }
-
 			?: return PlaybackReducer.IDLE_FINALIZE_MAX_SILENCE_MS
 		val remainingContent = (total - playedMsAt(elapsedRealtimeMs)).coerceAtLeast(0)
 		val remainingWallClock = if (speed > 0) (remainingContent / speed).toLong() else remainingContent
@@ -1742,6 +1902,18 @@ sealed interface PlaybackInput {
 	 * reducer quietly acquires a platform.
 	 */
 	data class ExactIdEstablished(val sourceItemId: String) : PlaybackInput
+
+	/**
+	 * Live, source-corroborated proof that the current duration surface belongs to
+	 * the exact item named by [sourceItemId]. Terminal identity verification is
+	 * deliberately insufficient: it can prove the work while an interstitial is
+	 * still borrowing that work's metadata. The reducer spends this proof only
+	 * when both the exact id and the current presentation duration still match.
+	 */
+	data class PresentationAttributionEstablished(
+		val sourceItemId: String,
+		val presentationDurationMs: Long,
+	) : PlaybackInput
 
 	data class ForegroundShortTookOver(
 		/** The Short being acquired is the very item this session was describing. */

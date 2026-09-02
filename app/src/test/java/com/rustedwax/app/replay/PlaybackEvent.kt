@@ -91,6 +91,12 @@ sealed interface PlaybackEvent {
 		val route: NativePreResolvedRoute,
 	) : PlaybackEvent
 
+	/** Independent playback evidence attributed the current duration surface. */
+	data class PresentationAttributionEstablished(
+		val videoId: String,
+		val durationMs: Long,
+	) : PlaybackEvent
+
 	/** The foreground Shorts observer read the player. */
 	data class ForegroundShortObserved(
 		val title: String?,
@@ -121,6 +127,19 @@ sealed interface PlaybackEvent {
 	 * MediaSession recreation" gate.
 	 */
 	data object SessionRecreated : PlaybackEvent
+
+	/**
+	 * A native replacement controller starts from the same metadata bundle but
+	 * without the resolver-derived exact id held by the outgoing binding.
+	 * Production can reclaim its continuation only after carry authority resolves.
+	 */
+	data object NativeSessionRecreatedAwaitingCarryAuthority : PlaybackEvent
+
+	/** The probe binding is disposed and must run its real terminal policy. */
+	data class ProbeDisposed(
+		val finalize: Boolean = true,
+		val allowContinuation: Boolean = false,
+	) : PlaybackEvent
 
 	/**
 	 * The whole app process went away and came back.
