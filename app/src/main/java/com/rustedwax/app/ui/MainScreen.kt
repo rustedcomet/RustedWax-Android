@@ -1053,7 +1053,13 @@ private fun AppearanceRow(choice: ThemeChoice, onChoice: (ThemeChoice) -> Unit) 
  */
 @Composable
 private fun VideoLink(
-	videoId: String,
+	/**
+	 * Null when identity never resolved. The row still draws — a Not-logged
+	 * entry explaining a refusal is worth reading whether or not it can open the
+	 * video — it simply is not tappable, exactly as an id that fails
+	 * [YouTubeProbe.canonicalWatchUrl] already was.
+	 */
+	videoId: String?,
 	thumbnails: Boolean,
 	onOpenVideo: (String) -> Unit,
 	/**
@@ -1228,9 +1234,10 @@ private fun SkippedList(
 		LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
 			items(skipped) { s ->
 				SettingCard {
-					// A Not-logged row is still playback history. Unresolved
-					// refusals remain in the event log instead of becoming a dead
-					// title that cannot open the exact video it describes.
+					// A Not-logged row is still playback history. An unresolved
+					// refusal draws here too, without a link: the tab exists to
+					// answer "why wasn't this scrobbled", and the answer is owed
+					// whether or not identity ever resolved.
 					VideoLink(s.videoId, thumbnails, onOpenVideo) { titleModifier ->
 						Text(
 							s.artist?.let { "$it — ${s.title}" } ?: s.title,

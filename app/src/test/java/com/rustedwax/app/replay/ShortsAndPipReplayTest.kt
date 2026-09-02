@@ -291,7 +291,7 @@ class ShortsAndPipReplayTest : ReplayScenarioTest() {
 		assertTrue(
 			harness.terminalRefusalReasons.single().contains("watch-page handle evidence was unavailable"),
 		)
-		assertEquals(emptyList<ReplayHarness.Refusal>(), harness.refusals)
+		assertEquals(listOf(RefusalKind.IDENTITY_CONTRADICTION), harness.unlinkedRefusalKinds)
 	}
 
 	@Test
@@ -378,7 +378,7 @@ class ShortsAndPipReplayTest : ReplayScenarioTest() {
 		)
 
 		assertEquals(listOf(RefusalKind.SHORTS_DISABLED), harness.terminalRefusalKinds)
-		assertEquals(emptyList<ReplayHarness.Refusal>(), harness.refusals)
+		assertEquals(listOf(RefusalKind.SHORTS_DISABLED), harness.unlinkedRefusalKinds)
 		assertEquals(emptyList<String>(), harness.env.facts.resolved)
 		assertEquals(emptyList<ReplayIdentitySource.Route>(), harness.identityRoutes)
 	}

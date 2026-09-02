@@ -109,10 +109,34 @@ payload from a live session.
 
 - Permanent rejection is removed from retry.
 - Network failure remains eligible for bounded backoff.
+- Returning usable connectivity retries entries whose backoff has already
+  elapsed, without requiring the user to open the app. It selects nothing that
+  the backoff does not already consider due and does not extend the attempt
+  ceiling.
+- That retry is a process-lifetime observation, not a scheduled background job.
+  It runs while the application process is runnable, and may be delivered once a
+  suspended process is allowed to run again. A retry deadline that elapses while
+  connectivity is unchanged is not woken independently; it waits for the next
+  connectivity change or application lifecycle event. The entry remains
+  persisted meanwhile.
+- Before any automatic broadcast, the queue atomically records a stable operation
+  id and the exact signed transaction as `IN_FLIGHT`. If that write fails,
+  nothing is broadcast.
+- An `IN_FLIGHT` operation is reconciled by transaction id and its saved
+  expiration after restart. Known block or mempool evidence settles it;
+  unavailable evidence leaves it waiting fail-closed. Independent
+  `expired_irreversible` responses are required to prove absence. Bare
+  `unknown`, `too_old`, `expired_reversible`, malformed, mixed, or unavailable
+  responses cannot authorize replacement. Only proven absence permits an
+  expired transaction to be replaced, and the replacement is persisted before
+  network I/O.
+- Settlement and cleanup failures leave either durable `SETTLED` state or the
+  exact durable `IN_FLIGHT` transaction. Neither state can become an ordinary
+  payload eligible to be signed blindly, and live state is not age/count pruned.
 - Accepted but confirmation-unavailable is treated as potentially successful
   and is not retried.
-- The accepted-but-independently-not-found state is a known limitation; see
-  [SECURITY.md](../../SECURITY.md).
+- If independent status remains unavailable, the operation can remain waiting
+  indefinitely rather than risk a newly signed duplicate.
 
 ## Evidence
 

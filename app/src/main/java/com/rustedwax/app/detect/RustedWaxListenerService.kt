@@ -5,6 +5,7 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
 import com.rustedwax.core.SourceSessionId
+import com.rustedwax.app.scrobble.ConnectivityRetryTrigger
 import com.rustedwax.app.scrobble.FinalizationRuntime
 import com.rustedwax.app.scrobble.FinalizationTrigger
 import kotlinx.coroutines.CoroutineScope
@@ -20,6 +21,25 @@ class RustedWaxListenerService : NotificationListenerService() {
 
 	/** Lives exactly as long as the listener binding does. */
 	private var scope: CoroutineScope? = null
+
+	/**
+	 * Retries the queue when the network comes back, so that a listen earned
+	 * offline no longer waits for the user to open the app.
+	 *
+	 * Released from [onListenerDisconnected] *and* [onDestroy]. They are separate
+	 * platform callbacks and neither is promised to imply the other, so treating
+	 * disconnect as the universal cleanup point would leave a `NetworkCallback`
+	 * registered — those live until the process exits or they are unregistered —
+	 * and a replacement service instance would add another. Release is idempotent,
+	 * so covering both boundaries costs nothing when both happen.
+	 */
+	private var connectivityRetry: ConnectivityRetryTrigger? = null
+
+	/** Both teardown callbacks, and the rebuild in [onListenerConnected], end here. */
+	private fun releaseConnectivityRetry() {
+		connectivityRetry?.unregister()
+		connectivityRetry = null
+	}
 
 	override fun onListenerConnected() {
 		Log.i(TAG, "Notification listener connected — media sessions readable")
@@ -71,12 +91,19 @@ class RustedWaxListenerService : NotificationListenerService() {
 		// even while stopped: those scrobbles were earned before Stop, and
 		// holding them hostage only drifts their timestamps further.
 		FinalizationRuntime.flushQueue()
+
+		// …and from here on, so does the next return of usable connectivity.
+		// Connecting is one moment; the offline spell that stranded a scrobble
+		// usually ends at some other one, with the app nowhere near the screen.
+		releaseConnectivityRetry()
+		connectivityRetry = ConnectivityRetryTrigger().also { it.register(applicationContext) }
 	}
 
 	override fun onListenerDisconnected() {
 		Log.w(TAG, "Notification listener disconnected")
 		EventLog.append("listener", "disconnected")
 		NativeSourceSwitches.invalidateAll("listener disconnected")
+		releaseConnectivityRetry()
 		scope?.cancel()
 		scope = null
 		// System teardown, not a user Stop — a track in flight really is ending,
@@ -86,6 +113,20 @@ class RustedWaxListenerService : NotificationListenerService() {
 		evidenceCoordinator = null
 		probe = null
 		ProbeHolder.set(null)
+	}
+
+	/**
+	 * The other teardown boundary.
+	 *
+	 * A service instance can be destroyed without [onListenerDisconnected] having
+	 * run, and the platform's own guidance for this class is to release registered
+	 * resources here. The connectivity callback is the only resource this class
+	 * registers outside the binding's own lifetime, so it is the one that has to
+	 * be let go twice rather than once.
+	 */
+	override fun onDestroy() {
+		releaseConnectivityRetry()
+		super.onDestroy()
 	}
 
 	/**

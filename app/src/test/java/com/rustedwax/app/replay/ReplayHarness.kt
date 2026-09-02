@@ -352,6 +352,20 @@ class ReplayHarness(
 
 	val refusalKinds: List<RefusalKind> get() = refusals.map { it.kind }
 
+	/**
+	 * Not-logged rows for refusals that never proved a video id.
+	 *
+	 * These used to be dropped between the event log and every user-facing
+	 * surface: the row required a canonical hyperlink, and an id is precisely
+	 * what a refused-for-identity listen does not have — offline, where no id
+	 * route can run at all, it is the normal outcome. The row is now filed
+	 * without a link, so a scenario that once asserted "and the user is shown
+	 * nothing" asserts the shape of what they are shown instead. Nothing here
+	 * relaxes the broadcast rule: an unlinked refusal is still never published.
+	 */
+	val unlinkedRefusalKinds: List<RefusalKind>
+		get() = refusals.filter { it.videoId == null }.map { it.kind }
+
 	/** Refusals as decisions, including ones deliberately withheld from Not logged. */
 	val terminalRefusalReasons: List<String>
 		get() = outcomes.mapNotNull { (it.outcome as? FinalizationOutcome.Refused)?.reason }

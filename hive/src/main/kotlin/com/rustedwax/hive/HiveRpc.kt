@@ -65,6 +65,16 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 		val timeEpochSec: Long,
 	)
 
+	/** Durable-queue reconciliation result for a transaction prepared earlier. */
+	enum class TransactionEvidence {
+		BLOCK,
+		MEMPOOL,
+		/** Independent nodes proved the transaction expired beyond irreversibility without inclusion. */
+		ABSENT,
+		/** Too little independent evidence to decide safely. */
+		UNAVAILABLE,
+	}
+
 	/**
 	 * Head block and chain time, **from a node that is actually current**.
 	 *
@@ -212,6 +222,40 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 
 	private enum class TransactionObservation { BLOCK, MEMPOOL, UNKNOWN, UNAVAILABLE }
 
+	/**
+	 * Reconcile a transaction that may already have crossed the network boundary.
+	 *
+	 * Absence is deliberately stricter than ordinary post-broadcast confirmation:
+	 * replacing an expired prepared transaction creates a new transaction id, so
+	 * bare `unknown` is not evidence: it can also mean status tracking has not
+	 * started or the node lacks the relevant history. Inclusion or mempool
+	 * evidence from any healthy node wins; absence requires independent
+	 * `expired_irreversible` answers obtained with the persisted expiration.
+	 */
+	fun observeTransaction(txId: String, expirationEpochSec: Long): TransactionEvidence =
+		evidenceFromStatuses(
+			transactionStatuses(
+				txId,
+				acceptingNode = null,
+				expirationEpochSec = expirationEpochSec,
+			),
+		)
+
+	internal fun evidenceFromStatuses(statuses: List<String>): TransactionEvidence {
+		return when (strongestTransactionStatus(statuses)) {
+			in INCLUDED_STATUSES -> TransactionEvidence.BLOCK
+			MEMPOOL_STATUS -> TransactionEvidence.MEMPOOL
+			else -> if (
+				statuses.size >= MIN_ABSENCE_CONFIRMATIONS &&
+				statuses.all { it == EXPIRED_IRREVERSIBLE_STATUS }
+			) {
+				TransactionEvidence.ABSENT
+			} else {
+				TransactionEvidence.UNAVAILABLE
+			}
+		}
+	}
+
 	private fun confirm(
 		txId: String,
 		acceptingNode: String,
@@ -249,27 +293,48 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 		txId: String,
 		acceptingNode: String,
 	): TransactionObservation {
-		val params = JSONObject().put("transaction_id", txId)
-		val statuses = mutableListOf<String>()
-		for (node in nodes) {
-			if (node == acceptingNode) continue
-			val age = chainLagSeconds(node)
-			if (age == null || age > MAX_NODE_LAG_SEC) continue
-			runCatching {
-				val response = post(node, "transaction_status_api.find_transaction", params)
-				if (response.optJSONObject("error") != null) return@runCatching
-				response.optJSONObject("result")
-					?.optString("status")
-					?.takeIf { it.isNotBlank() }
-					?.let(statuses::add)
-			}
-		}
+		val statuses = transactionStatuses(txId, acceptingNode)
 		return when (strongestTransactionStatus(statuses)) {
 			null -> TransactionObservation.UNAVAILABLE
 			in INCLUDED_STATUSES -> TransactionObservation.BLOCK
 			MEMPOOL_STATUS -> TransactionObservation.MEMPOOL
 			else -> TransactionObservation.UNKNOWN
 		}
+	}
+
+	private fun transactionStatuses(
+		txId: String,
+		acceptingNode: String?,
+		expirationEpochSec: Long? = null,
+	): List<String> {
+		val params = JSONObject().put("transaction_id", txId)
+		expirationEpochSec?.let {
+			params.put("expiration", HiveBroadcaster.formatExpiration(it))
+		}
+		val statuses = mutableListOf<String>()
+		for (node in nodes) {
+			if (acceptingNode != null && node == acceptingNode) continue
+			val age = chainLagSeconds(node)
+			if (age == null || age > MAX_NODE_LAG_SEC) {
+				if (expirationEpochSec != null) statuses += UNAVAILABLE_STATUS
+				continue
+			}
+			val status = runCatching {
+				val response = post(node, "transaction_status_api.find_transaction", params)
+				if (response.optJSONObject("error") != null) return@runCatching null
+				response.optJSONObject("result")
+					?.optString("status")
+					?.takeIf { it.isNotBlank() }
+			}.getOrNull()
+			if (status != null) {
+				statuses += status
+			} else if (expirationEpochSec != null) {
+				// Reconciliation is fail-closed across the full queried node set:
+				// one transport/RPC/malformed answer makes absence mixed evidence.
+				statuses += UNAVAILABLE_STATUS
+			}
+		}
+		return statuses
 	}
 
 	/**
@@ -393,6 +458,9 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 		 * on the final attempt — see [confirm] for why that's the safer error.
 		 */
 		private const val MEMPOOL_STATUS = "within_mempool"
+		private const val EXPIRED_IRREVERSIBLE_STATUS = "expired_irreversible"
+		private const val UNAVAILABLE_STATUS = "__unavailable__"
+		private const val MIN_ABSENCE_CONFIRMATIONS = 2
 
 		private val PLACEHOLDER = Regex("""\$\{\w+\}""")
 

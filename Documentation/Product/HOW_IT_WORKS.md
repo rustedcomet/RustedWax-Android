@@ -35,9 +35,25 @@ The detection pipeline, end to end.
    independent healthy node's mempool is reported separately and is not retried, to avoid creating
    a permanent duplicate. Acceptance with no available confirmation is also reported separately; see
    [Scrobble rules](SCROBBLE_RULES.md#retry).
-   Definite failures and offline sends are queued.
+   Definite failures and offline sends are queued. A queued send is retried when its
+   backoff has elapsed and usable connectivity returns, so a listen finished offline
+   does not sit waiting for you to open the app. That retry is an *observation* of the
+   network, not a background scheduler: it happens while RustedWax is running, or once
+   Android lets a suspended RustedWax run again, and a backoff deadline that passes
+   while the connection never changes waits for the next connectivity or startup event
+   rather than being woken on its own timer. Before an automatic attempt reaches a node,
+   its exact signed transaction and expiration are persisted. A later retry either
+   rebroadcasts those same bytes and transaction id or first obtains independent
+   `expired_irreversible` status for the saved expiration. Bare `unknown`, old,
+   reversible-expiration, malformed, or unavailable status remains fail-closed.
+   A storage failure while settling or clearing the operation therefore cannot
+   produce a newly signed duplicate.
 5. When it *doesn't* broadcast, the reason lands in the **Not logged** tab. A scrobbler that
-   silently declines things is indistinguishable from a broken one. One exception, added in
+   silently declines things is indistinguishable from a broken one. That includes a listen whose
+   exact video was never identified — offline, the identification routes that need the network are
+   unavailable, though a browser listen whose exact address RustedWax already read stays
+   identified — which is listed with its reason but without a link, because nothing is guessed to
+   make one. One exception, added in
    v0.10.0: a session never proven to be YouTube is not listed there either. "Why wasn't this
    scrobbled" does not need answering about a site the app never scrobbles, and listing its title
    would rebuild the browsing record the event log stopped keeping.

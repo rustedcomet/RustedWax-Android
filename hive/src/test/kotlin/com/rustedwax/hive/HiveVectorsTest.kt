@@ -6,6 +6,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.json.JSONObject
 
 class HiveVectorsTest {
 
@@ -272,6 +273,27 @@ class HiveVectorsTest {
 	@Test
 	fun `formats expiration as chain-style UTC`() {
 		assertEquals("2026-07-23T05:47:34", HiveBroadcaster.formatExpiration(1784785654L))
+	}
+
+	@Test
+	fun `prepares the exact signed transaction without broadcasting`() {
+		val prepared = HiveBroadcaster().prepareJson(
+			username = "rustedwaxtest",
+			key = HiveKey.fromWif(WIF)!!,
+			payloadJson = PAYLOAD_JSON,
+			props = HiveRpc.GlobalProperties(
+				headBlockNumber = 12345,
+				headBlockId = "00003039872300c0aabbccddeeff00112233445566778899",
+				timeEpochSec = 1784785594L,
+			),
+		).transaction
+
+		assertEquals("03ebcc7b34a985c8a3650c67ab160deba77af7f1", prepared.txId)
+		assertEquals(1784785654L, prepared.expirationEpochSec)
+		val signed = JSONObject(prepared.signedTransactionJson)
+		assertEquals(SIGNATURE_HEX, signed.getJSONArray("signatures").getString(0))
+		assertEquals(PAYLOAD_JSON, signed.getJSONArray("operations").getJSONArray(0)
+			.getJSONObject(1).getString("json"))
 	}
 
 	@Test

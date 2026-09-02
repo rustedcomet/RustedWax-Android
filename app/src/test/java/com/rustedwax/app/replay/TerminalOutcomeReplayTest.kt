@@ -304,7 +304,10 @@ class TerminalOutcomeReplayTest : ReplayScenarioTest() {
 			listOf(ReplayHarness.RefusalKind.PAYLOAD_NOT_BUILDABLE),
 			harness.terminalRefusalKinds,
 		)
-		assertEquals(emptyList<ReplayHarness.Refusal>(), harness.refusals)
+		assertEquals(
+			listOf(ReplayHarness.RefusalKind.PAYLOAD_NOT_BUILDABLE),
+			harness.unlinkedRefusalKinds,
+		)
 		assertEquals(emptyList<ReplayHarness.BroadcastPayload>(), harness.broadcasts)
 	}
 

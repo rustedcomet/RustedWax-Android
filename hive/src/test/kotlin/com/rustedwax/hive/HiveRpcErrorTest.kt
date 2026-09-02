@@ -34,6 +34,96 @@ class HiveRpcErrorTest {
 		assertNull(HiveRpc().strongestTransactionStatus(emptyList()))
 	}
 
+	@Test
+	fun `one unknown node is not authoritative absence`() {
+		assertEquals(
+			HiveRpc.TransactionEvidence.UNAVAILABLE,
+			HiveRpc().evidenceFromStatuses(listOf("unknown")),
+		)
+	}
+
+	@Test
+	fun `two unknown answers remain unavailable`() {
+		assertEquals(
+			HiveRpc.TransactionEvidence.UNAVAILABLE,
+			HiveRpc().evidenceFromStatuses(listOf("unknown", "unknown")),
+		)
+	}
+
+	@Test
+	fun `tracking not started unknown shape remains unavailable`() {
+		assertEquals(
+			HiveRpc.TransactionEvidence.UNAVAILABLE,
+			HiveRpc().evidenceFromStatuses(listOf("unknown")),
+		)
+	}
+
+	@Test
+	fun `too old never authorizes replacement`() {
+		assertEquals(
+			HiveRpc.TransactionEvidence.UNAVAILABLE,
+			HiveRpc().evidenceFromStatuses(listOf("too_old", "too_old")),
+		)
+	}
+
+	@Test
+	fun `expired reversible never authorizes replacement`() {
+		assertEquals(
+			HiveRpc.TransactionEvidence.UNAVAILABLE,
+			HiveRpc().evidenceFromStatuses(listOf("expired_reversible", "expired_reversible")),
+		)
+	}
+
+	@Test
+	fun `independent expired irreversible answers establish absence`() {
+		assertEquals(
+			HiveRpc.TransactionEvidence.ABSENT,
+			HiveRpc().evidenceFromStatuses(
+				listOf("expired_irreversible", "expired_irreversible"),
+			),
+		)
+	}
+
+	@Test
+	fun `mixed authoritative and unknown evidence remains unavailable`() {
+		assertEquals(
+			HiveRpc.TransactionEvidence.UNAVAILABLE,
+			HiveRpc().evidenceFromStatuses(
+				listOf("expired_irreversible", "expired_irreversible", "unknown"),
+			),
+		)
+	}
+
+	@Test
+	fun `malformed or unrecognized status mixed with absence remains unavailable`() {
+		assertEquals(
+			HiveRpc.TransactionEvidence.UNAVAILABLE,
+			HiveRpc().evidenceFromStatuses(
+				listOf("expired_irreversible", "expired_irreversible", "not_a_hive_status"),
+			),
+		)
+	}
+
+	@Test
+	fun `positive block evidence outranks authoritative absence answers`() {
+		assertEquals(
+			HiveRpc.TransactionEvidence.BLOCK,
+			HiveRpc().evidenceFromStatuses(
+				listOf("expired_irreversible", "expired_irreversible", "within_irreversible_block"),
+			),
+		)
+	}
+
+	@Test
+	fun `positive mempool evidence outranks authoritative absence answers`() {
+		assertEquals(
+			HiveRpc.TransactionEvidence.MEMPOOL,
+			HiveRpc().evidenceFromStatuses(
+				listOf("expired_irreversible", "expired_irreversible", "within_mempool"),
+			),
+		)
+	}
+
 	private val rpc = HiveRpc()
 
 	// region error extraction

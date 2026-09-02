@@ -7,6 +7,7 @@ import com.rustedwax.app.scrobble.FinalizationRuntime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -161,7 +162,7 @@ class LifecycleReplayTest : ReplayScenarioTest() {
 
 		assertEquals(2, harness.broadcasts.size)
 		assertEquals(listOf(RefusalKind.NO_VERIFIED_VIDEO_ID), harness.terminalRefusalKinds)
-		assertEquals(emptyList<ReplayHarness.Refusal>(), harness.refusals)
+		assertEquals(listOf(RefusalKind.NO_VERIFIED_VIDEO_ID), harness.unlinkedRefusalKinds)
 	}
 
 	@Test
@@ -263,10 +264,13 @@ class LifecycleReplayTest : ReplayScenarioTest() {
 		)
 
 		assertEquals(emptyList<ReplayHarness.BroadcastPayload>(), harness.broadcasts)
-		// It is refused *and explained* in the terminal outcome. The disproved id
-		// cannot authorize a hyperlink, so no dead Not-logged row is created.
+		// It is refused *and explained*, in the terminal outcome and in the row
+		// the user can read. The disproved id cannot authorize a hyperlink — so
+		// nothing is broadcast and the row carries no link — but the listen was
+		// long enough to be worth accounting for, and silence is not an answer.
 		assertEquals(listOf(RefusalKind.NO_VERIFIED_VIDEO_ID), harness.terminalRefusalKinds)
-		assertEquals(emptyList<ReplayHarness.Refusal>(), harness.refusals)
+		assertEquals(listOf(RefusalKind.NO_VERIFIED_VIDEO_ID), harness.refusalKinds)
+		assertNull(harness.refusals.single().videoId)
 	}
 
 	// ---- dispatch outcomes ----------------------------------------------------

@@ -7,6 +7,18 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
+/** Exact signed transaction persisted before a queued network attempt. */
+data class PreparedHiveTransaction(
+	val signedTransactionJson: String,
+	val txId: String,
+	val expirationEpochSec: Long,
+)
+
+sealed interface HivePreparationResult {
+	data class Ready(val transaction: PreparedHiveTransaction) : HivePreparationResult
+	data class Failed(val result: HiveRpc.BroadcastResult) : HivePreparationResult
+}
+
 /**
  * Builds, signs and broadcasts a scrobble — the local-signing replacement for
  * the extension's `requestCustomJson` Keychain call.
@@ -32,26 +44,50 @@ class HiveBroadcaster(private val rpc: HiveRpc = HiveRpc()) {
 		username: String,
 		key: HiveKey,
 		payloadJson: String,
-	): HiveRpc.BroadcastResult {
+	): HiveRpc.BroadcastResult = when (val prepared = prepareJson(username, key, payloadJson)) {
+		is HivePreparationResult.Ready -> broadcastPrepared(prepared.transaction)
+		is HivePreparationResult.Failed -> prepared.result
+	}
+
+	/** Build and sign without crossing the broadcast boundary. */
+	fun prepareJson(
+		username: String,
+		key: HiveKey,
+		payloadJson: String,
+	): HivePreparationResult {
 		if (!HiveScrobblePayload.serializedHasRequiredYouTubeUrl(payloadJson)) {
-			return HiveRpc.BroadcastResult.Rejected(
-				"refusing YouTube scrobble without a canonical video hyperlink",
+			return HivePreparationResult.Failed(
+				HiveRpc.BroadcastResult.Rejected(
+					"refusing YouTube scrobble without a canonical video hyperlink",
+				),
 			)
 		}
 		val props = try {
 			rpc.getDynamicGlobalProperties()
 		} catch (e: Exception) {
-			return HiveRpc.BroadcastResult.NetworkFailure(
-				"couldn't read chain head: ${e.message}",
+			return HivePreparationResult.Failed(
+				HiveRpc.BroadcastResult.NetworkFailure(
+					"couldn't read chain head: ${e.message}",
+				),
 			)
 		}
+		return prepareJson(username, key, payloadJson, props)
+	}
+
+	internal fun prepareJson(
+		username: String,
+		key: HiveKey,
+		payloadJson: String,
+		props: HiveRpc.GlobalProperties,
+	): HivePreparationResult.Ready {
+		val expirationEpochSec = props.timeEpochSec + EXPIRY_SECONDS
 
 		val tx = TxSerializer.Transaction(
 			refBlockNum = refBlockNum(props.headBlockNumber),
 			refBlockPrefix = refBlockPrefix(props.headBlockId),
 			// Relative to *chain* time: a phone with a skewed clock would
 			// otherwise produce an already-expired or too-distant expiration.
-			expirationEpochSec = props.timeEpochSec + EXPIRY_SECONDS,
+			expirationEpochSec = expirationEpochSec,
 			operation = TxSerializer.CustomJsonOp(
 				requiredPostingAuths = listOf(username),
 				id = HiveScrobblePayload.CUSTOM_JSON_ID,
@@ -65,11 +101,26 @@ class HiveBroadcaster(private val rpc: HiveRpc = HiveRpc()) {
 		// it's what the confirmation step looks the transaction up by. Before
 		// v0.8.4 this was stitched on after the fact, which is how five
 		// transactions that never existed got reported with ids.
-		return rpc.broadcast(
-			signedTx = toJson(tx, signature),
-			expectedTxId = TxSerializer.transactionId(tx),
+		return HivePreparationResult.Ready(
+			PreparedHiveTransaction(
+				signedTransactionJson = toJson(tx, signature).toString(),
+				txId = TxSerializer.transactionId(tx),
+				expirationEpochSec = expirationEpochSec,
+			),
 		)
 	}
+
+	/** Broadcast exactly the transaction prepared and persisted earlier. */
+	fun broadcastPrepared(prepared: PreparedHiveTransaction): HiveRpc.BroadcastResult =
+		rpc.broadcast(
+			signedTx = JSONObject(prepared.signedTransactionJson),
+			expectedTxId = prepared.txId,
+		)
+
+	fun observeTransaction(
+		txId: String,
+		expirationEpochSec: Long,
+	): HiveRpc.TransactionEvidence = rpc.observeTransaction(txId, expirationEpochSec)
 
 	/** JSON form of the signed transaction, as `broadcast_transaction` expects. */
 	private fun toJson(tx: TxSerializer.Transaction, signature: String): JSONObject {

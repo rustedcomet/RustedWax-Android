@@ -98,19 +98,25 @@ deduplication rules.
   eligibility, finalization, or payload construction.
 - Permanent chain rejection is not retried.
 - An accepted transaction that cannot be independently queried is not retried
-  merely because confirmation is unavailable.
+  merely because confirmation is unavailable. Before any automatic network
+  attempt, the exact signed transaction and its id enter durable `IN_FLIGHT`
+  state. A storage failure while settling or clearing it therefore cannot turn
+  the payload back into an operation that may be signed again.
 - A successful result records the returned transaction identifier and the
   strongest available block or mempool evidence.
 
-The rare accepted-but-independently-not-found state remains a known transport
-limitation described in [SECURITY.md](../../SECURITY.md).
+If independent status is unavailable, an automatic in-flight operation waits
+fail-closed. This can delay delivery, but does not authorize a replacement
+transaction.
 
 ## UI outcomes
 
 - **Now** describes the currently observed logical listen.
 - **History** contains successful or accepted operations with a verified link.
 - **Not logged** contains one understandable terminal refusal for an eligible
-  user-facing target.
+  user-facing target. A verified link is a requirement of broadcasting, not of
+  recording a refusal: a refused target whose exact item was never proven is
+  still listed, without a link, and no identifier is inferred to supply one.
 - Diagnostic prose explains a typed decision but never controls it.
 
 ## Evidence

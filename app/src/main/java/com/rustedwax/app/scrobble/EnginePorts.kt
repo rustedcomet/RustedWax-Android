@@ -11,7 +11,9 @@ import com.rustedwax.youtube.identity.VideoResolutionFailure
 import com.rustedwax.app.enrich.WatchHistoryResolver
 import com.rustedwax.hive.HiveBroadcaster
 import com.rustedwax.hive.HiveKey
+import com.rustedwax.hive.HivePreparationResult
 import com.rustedwax.hive.HiveRpc
+import com.rustedwax.hive.PreparedHiveTransaction
 import com.rustedwax.hive.PrivateScrobble
 import com.rustedwax.app.storage.KeyVault
 import com.rustedwax.app.storage.MutedVideos
@@ -99,16 +101,27 @@ internal class ShadowClaims(private val live: DedupClaims) : DedupClaims {
 internal interface RetryQueue {
 	fun size(): Int
 	fun due(): List<BroadcastQueue.Entry>
-	fun add(
+	fun enqueue(
 		username: String,
 		json: String,
 		label: String,
 		percentPlayed: Int?,
 		videoId: String?,
-	): Boolean
+	): BroadcastQueue.Entry?
 
-	fun remove(id: Long): Boolean
-	fun recordFailure(id: Long, error: String): BroadcastQueue.FailureOutcome
+	fun markInFlight(
+		entry: BroadcastQueue.Entry,
+		prepared: PreparedHiveTransaction,
+	): BroadcastQueue.PrepareOutcome
+
+	/**
+	 * Retire an entry the chain has accepted, failing closed if it cannot be
+	 * removed. See [BroadcastQueue.settle]; the outcome identifies which durable
+	 * non-sendable state remains.
+	 */
+	fun settle(entry: BroadcastQueue.Entry): BroadcastQueue.SettleOutcome
+
+	fun recordFailure(entry: BroadcastQueue.Entry, error: String): BroadcastQueue.FailureOutcome
 }
 
 /** The posting account and the keys derived from it. Never logs, never leaks. */
@@ -127,6 +140,9 @@ internal interface PostingIdentity {
  * check that against a seam like this one.
  */
 internal interface PayloadBroadcaster {
+	fun prepareJson(username: String, key: HiveKey, payloadJson: String): HivePreparationResult
+	fun broadcastPrepared(prepared: PreparedHiveTransaction): HiveRpc.BroadcastResult
+	fun observeTransaction(txId: String, expirationEpochSec: Long): HiveRpc.TransactionEvidence
 	fun broadcastJson(username: String, key: HiveKey, payloadJson: String): HiveRpc.BroadcastResult
 }
 
@@ -377,17 +393,25 @@ internal class LedgerClaims(private val ledger: DedupLedger) : DedupClaims {
 internal class StoredRetryQueue(private val queue: BroadcastQueue) : RetryQueue {
 	override fun size(): Int = queue.size()
 	override fun due(): List<BroadcastQueue.Entry> = queue.due()
-	override fun add(
+	override fun enqueue(
 		username: String,
 		json: String,
 		label: String,
 		percentPlayed: Int?,
 		videoId: String?,
-	): Boolean = queue.add(username, json, label, percentPlayed, videoId)
+	): BroadcastQueue.Entry? = queue.enqueue(username, json, label, percentPlayed, videoId)
 
-	override fun remove(id: Long): Boolean = queue.remove(id)
-	override fun recordFailure(id: Long, error: String): BroadcastQueue.FailureOutcome =
-		queue.recordFailure(id, error)
+	override fun markInFlight(
+		entry: BroadcastQueue.Entry,
+		prepared: PreparedHiveTransaction,
+	): BroadcastQueue.PrepareOutcome = queue.markInFlight(entry, prepared)
+	override fun settle(entry: BroadcastQueue.Entry): BroadcastQueue.SettleOutcome =
+		queue.settle(entry)
+
+	override fun recordFailure(
+		entry: BroadcastQueue.Entry,
+		error: String,
+	): BroadcastQueue.FailureOutcome = queue.recordFailure(entry, error)
 }
 
 internal class VaultPostingIdentity(private val vault: KeyVault) : PostingIdentity {
@@ -399,6 +423,20 @@ internal class VaultPostingIdentity(private val vault: KeyVault) : PostingIdenti
 internal class HivePayloadBroadcaster(
 	private val broadcaster: HiveBroadcaster = HiveBroadcaster(),
 ) : PayloadBroadcaster {
+	override fun prepareJson(
+		username: String,
+		key: HiveKey,
+		payloadJson: String,
+	): HivePreparationResult = broadcaster.prepareJson(username, key, payloadJson)
+
+	override fun broadcastPrepared(prepared: PreparedHiveTransaction): HiveRpc.BroadcastResult =
+		broadcaster.broadcastPrepared(prepared)
+
+	override fun observeTransaction(
+		txId: String,
+		expirationEpochSec: Long,
+	): HiveRpc.TransactionEvidence = broadcaster.observeTransaction(txId, expirationEpochSec)
+
 	override fun broadcastJson(
 		username: String,
 		key: HiveKey,

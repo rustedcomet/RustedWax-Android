@@ -45,10 +45,10 @@ session and refuses when the URL and media metadata cannot be reconciled.
 ## Hive transport
 
 Public Hive RPC nodes can be stale, unavailable, or disagree temporarily.
-RustedWax checks node freshness and seeks independent confirmation, but a rare
-accepted-then-not-observed state can enter retry handling and may create a
-duplicate immutable entry if the original transaction later propagates. See
-[SECURITY.md](../../SECURITY.md).
+RustedWax checks node freshness and seeks independent confirmation. If an
+automatic transaction may have been accepted but independent status remains
+unavailable, it waits fail-closed; delivery can be delayed indefinitely rather
+than risk a newly signed duplicate.
 
 ## Local security
 
