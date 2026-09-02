@@ -15,6 +15,7 @@ import com.rustedwax.app.replay.reference.phase01.ProbeControl
 import com.rustedwax.app.replay.reference.phase01.SystemClock
 import com.rustedwax.app.replay.reference.phase01.UrlWatcherService
 import com.rustedwax.app.replay.reference.phase01.VirtualTime
+import com.rustedwax.app.replay.reference.phase01.VirtualSystem
 import com.rustedwax.app.replay.reference.phase01.resetSharedState
 
 object CurrentRun {
@@ -30,9 +31,12 @@ object CurrentRun {
 	fun snapshots(
 		script: List<ParityStep>,
 		packageName: String = PARITY_PACKAGE,
+		virtualWallClock: Boolean = false,
 	): List<SessionSnapshot> {
 		resetSharedState()
+		TrackProgressCarry.clear()
 		val stage = ParityStage(packageName)
+		if (virtualWallClock) VirtualSystem.use(stage.time) else VirtualSystem.useRealTime()
 		UrlWatcherService.enabled = false
 
 		val probe = SessionProbe(stage.context)
@@ -59,6 +63,8 @@ object CurrentRun {
 		script.forEach { stage.perform(it, control) }
 
 		probe.stop()
+		TrackProgressCarry.clear()
+		VirtualSystem.useRealTime()
 		LegacyEvidenceCallbacks.nativeShortEvent = null
 		stage.time.drain()
 		SystemClock.current = VirtualTime()

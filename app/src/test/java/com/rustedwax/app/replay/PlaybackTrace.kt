@@ -22,6 +22,7 @@ import com.rustedwax.app.detect.SourceRegistry
 import com.rustedwax.app.detect.SourceExactIdRequest
 import com.rustedwax.app.detect.SourceProfile
 import com.rustedwax.app.detect.SourceProof
+import com.rustedwax.app.detect.StoppedInterruption
 import com.rustedwax.core.TrackIdentity
 import com.rustedwax.app.detect.TrackProgressCarry
 import com.rustedwax.core.TransportState
@@ -205,6 +206,17 @@ class PlaybackTrace(
 	var stoppedGracePending: Boolean = false
 		private set
 
+	/** When that delayed finalize was armed, so its cap is measured from the STOPPED. */
+	private var stoppedGraceArmedAtMillis: Long? = null
+	private var stoppedInterruptionStartedAtMillis: Long? = null
+	private var stoppedInterruptionDeadlineMillis: Long? = null
+	private var stoppedResetFromPositionMs: Long? = null
+	private var stoppedSurfaceDisappearanceConfirmed = false
+
+	/** Set once a display-off STOPPED held this listen open rather than ending it. */
+	var stoppedInterruptionHeld: Boolean = false
+		private set
+
 	private var hint: NotificationHints.Hint? = null
 	private var url: UrlEvidence.Evidence? = null
 	private var urlGeneration = 0L
@@ -295,14 +307,26 @@ class PlaybackTrace(
 				evidence = Evidence()
 				lastStableIdentity = null
 				invalidateCarryAuthority()
+				clearStoppedInterruption()
 			}
 			PlaybackEffect.RestoreCarriedProgress -> restoreCarriedProgress()
 			PlaybackEffect.CancelContinuation -> cancelContinuation()
 			is PlaybackEffect.OpenContinuation -> openContinuation()
 			// No `Handler` exists here, so the delayed finalize is recorded rather
 			// than scheduled. A scenario that wants it to fire says so explicitly.
-			PlaybackEffect.ScheduleStoppedFinalizationGrace -> stoppedGracePending = true
-			PlaybackEffect.CancelStoppedFinalizationGrace -> stoppedGracePending = false
+			PlaybackEffect.ScheduleStoppedFinalizationGrace -> {
+				stoppedGracePending = true
+				stoppedGraceArmedAtMillis = clock.nowMillis()
+				stoppedInterruptionStartedAtMillis = clock.nowMillis()
+				stoppedInterruptionDeadlineMillis =
+					clock.nowMillis() + StoppedInterruption.SCREEN_OFF_HOLD_CAP_MS
+				stoppedResetFromPositionMs = null
+				stoppedSurfaceDisappearanceConfirmed = false
+			}
+			PlaybackEffect.CancelStoppedFinalizationGrace -> {
+				stoppedGracePending = false
+				stoppedGraceArmedAtMillis = null
+			}
 			PlaybackEffect.ClearPreResolvedNativeIdentity -> {
 				evidence.resolverContext = evidence.resolverContext.copy(
 					preResolvedNativeVideoId = null,
@@ -421,13 +445,14 @@ class PlaybackTrace(
 			is PlaybackEvent.PlaybackStateChanged -> {
 				val previous = positionMs
 				event.positionMs?.let { positionMs = it }
+				val transport = when {
+					event.playing -> TransportState.PLAYING
+					event.stopped -> TransportState.STOPPED
+					else -> TransportState.PAUSED
+				}
 				dispatch(
 					PlaybackInput.TransportChanged(
-						transport = when {
-							event.playing -> TransportState.PLAYING
-							event.stopped -> TransportState.STOPPED
-							else -> TransportState.PAUSED
-						},
+						transport = transport,
 						speed = event.speed,
 						previousPositionMs = previous,
 						newPositionMs = positionMs,
@@ -439,6 +464,7 @@ class PlaybackTrace(
 						nextInstanceToken = MediaSessionAdEvidence.nextTrackToken(),
 					),
 				)
+				noteStoppedInterruptionEvidence(previous, positionMs, transport)
 			}
 
 			// An ordinary MediaSession publishes no callback at all when its window
@@ -653,6 +679,32 @@ class PlaybackTrace(
 			// the outgoing transport parks its progress through the production
 			// `TrackProgressCarry`, and the replacement claims it back.
 			PlaybackEvent.SessionRecreated -> recreateSession()
+
+			is PlaybackEvent.SessionRecreatedAtPosition -> recreateSession(event.positionMs)
+
+			// The production check, run against the production policy: the probe
+			// polls this every grace period while the transport is still STOPPED,
+			// and only a display that is on turns the wait into a finalization.
+			is PlaybackEvent.StoppedGraceExpired -> if (stoppedGracePending) {
+				val stoppedForMs = clock.nowMillis() - (stoppedGraceArmedAtMillis ?: clock.nowMillis())
+				if (StoppedInterruption.holdsListenOpen(
+						displayInteractive = event.displayInteractive,
+						stoppedForMs = stoppedForMs,
+						surfaceDisappearanceConfirmed = stoppedSurfaceDisappearanceConfirmed,
+						stoppedAtMs = positionMs,
+						durationMs = bundle.durationMs,
+					)
+				) {
+					stoppedInterruptionHeld = true
+				} else {
+					dispatch(
+						PlaybackInput.FinalizeRequested(
+							"stopped replacement grace expired",
+							clock.nowMillis(),
+						),
+					)
+				}
+			}
 
 			PlaybackEvent.NativeSessionRecreatedAwaitingCarryAuthority ->
 				recreateNativeSessionAwaitingCarryAuthority()
@@ -934,7 +986,7 @@ class PlaybackTrace(
 	 * banked play time and the instance token all have to survive, and if they
 	 * do not the dedup key moves and the scenario fails.
 	 */
-	private fun recreateSession() {
+	private fun recreateSession(resumePositionMs: Long? = null) {
 		dispatch(
 			PlaybackInput.SessionDestroyed(
 				elapsedRealtimeMs = clock.nowMillis(),
@@ -946,7 +998,10 @@ class PlaybackTrace(
 		// `Watch` is, which is why it can claim a continuation immediately.
 		listen = freshListen(alreadyNaming = bundle != Bundle())
 			.copy(trackIdentity = carriedIdentity)
-		positionMs = null
+		// A rebuild under a live listen has published nothing yet; one that
+		// follows an interruption arrives holding the controller's own
+		// `PlaybackState`, which is what `restoreCarriedProgress` reads.
+		positionMs = resumePositionMs
 		restoreCarriedProgress()
 	}
 
@@ -989,6 +1044,12 @@ class PlaybackTrace(
 
 	private fun openContinuation() {
 		val identityKey = listen.trackIdentity
+		val interruptedStoppedTransport =
+			listen.transport == TransportState.STOPPED && stoppedSurfaceDisappearanceConfirmed
+		val interruptionStartedAt = stoppedInterruptionStartedAtMillis
+			.takeIf { interruptedStoppedTransport }
+		val interruptionDeadline = stoppedInterruptionDeadlineMillis
+			.takeIf { interruptedStoppedTransport }
 		val verdict = lastStableIdentity ?: YouTubeProbe.Identity.Unconfirmed(
 			"identity was not established before the session ended",
 		)
@@ -1004,13 +1065,64 @@ class PlaybackTrace(
 				loopDetected = listen.loopDetected,
 				identity = verdict,
 				explicitAdSignal = evidence.explicitAdSignal,
-				accessibilityCoverage = evidence.accessibilityCoverage,
-				trackInstanceToken = listen.instanceToken,
-			),
-		) ?: return
+					accessibilityCoverage = evidence.accessibilityCoverage,
+					trackInstanceToken = listen.instanceToken,
+					interruptionStartedAtMillis = interruptionStartedAt,
+					interruptionDeadlineMillis = interruptionDeadline,
+				),
+			)
+		if (token == null) {
+			val originalInterruptionExpired =
+				interruptionDeadline?.let { clock.nowMillis() >= it } == true
+			clearStoppedInterruption()
+			if (originalInterruptionExpired) {
+				dispatch(
+					PlaybackInput.FinalizeRequested(
+						"screen-off interruption expired before session continuation",
+						clock.nowMillis(),
+					),
+				)
+			}
+			return
+		}
 		continuationToken = token
 		continuationIdentity = identityKey
 		continuationVerdict = verdict
+		clearStoppedInterruption()
+	}
+
+	private fun noteStoppedInterruptionEvidence(
+		previousPositionMs: Long?,
+		newPositionMs: Long?,
+		transport: TransportState,
+	) {
+		if (transport != TransportState.STOPPED) {
+			clearStoppedInterruption()
+			return
+		}
+		if (stoppedInterruptionStartedAtMillis == null) return
+		if (stoppedResetFromPositionMs == null) {
+			stoppedResetFromPositionMs = StoppedInterruption.resetCandidate(
+				previousPositionMs,
+				newPositionMs,
+			)
+		}
+		if (StoppedInterruption.confirmsSurfaceDisappearance(
+				stoppedResetFromPositionMs,
+				newPositionMs,
+			)
+		) {
+			stoppedSurfaceDisappearanceConfirmed = true
+		}
+	}
+
+	private fun clearStoppedInterruption() {
+		stoppedGracePending = false
+		stoppedGraceArmedAtMillis = null
+		stoppedInterruptionStartedAtMillis = null
+		stoppedInterruptionDeadlineMillis = null
+		stoppedResetFromPositionMs = null
+		stoppedSurfaceDisappearanceConfirmed = false
 	}
 
 	private fun cancelContinuation() {
@@ -1259,6 +1371,7 @@ class PlaybackTrace(
 
 	private fun freeze() {
 		finalized += snapshot()
+		clearStoppedInterruption()
 		// The next listen inherits the source and the browser's evidence, and
 		// nothing else. Carrying anything further is the bug class the frozen
 		// snapshot exists to prevent. The reducer has already latched `finalized`,

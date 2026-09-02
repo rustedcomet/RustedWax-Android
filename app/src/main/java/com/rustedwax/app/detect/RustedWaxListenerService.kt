@@ -1,6 +1,7 @@
 package com.rustedwax.app.detect
 
 import android.app.Notification
+import android.os.PowerManager
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -130,6 +131,23 @@ class RustedWaxListenerService : NotificationListenerService() {
 	}
 
 	/**
+	 * Whether the display is on, as of right now.
+	 *
+	 * Read at the moment it is asked rather than tracked from `ACTION_SCREEN_OFF`
+	 * broadcasts: the only caller is `StoppedInterruption`, which asks once per
+	 * grace period on a transport that is already stopped, and a receiver would
+	 * have to survive this service being torn down and rebuilt to be worth its
+	 * wiring. The same read, for the same reason, as the one
+	 * `NativeShortsAccessibilityService` makes.
+	 *
+	 * Defaults to interactive when the service cannot be reached, so a failure
+	 * here can only preserve the old finalization, never extend a hold.
+	 */
+	private fun displayInteractive(): Boolean = runCatching {
+		getSystemService(PowerManager::class.java)?.isInteractive ?: true
+	}.getOrDefault(true)
+
+	/**
 	 * Rebuilt from scratch every time: the system can tear this service down
 	 * and bring it back at will, and a stale probe would hold dead controllers.
 	 */
@@ -150,6 +168,7 @@ class RustedWaxListenerService : NotificationListenerService() {
 				SharedPreferencesFinalizedPlaybackTombstones(applicationContext),
 			automaticWriteAuthorization =
 				FinalizationRuntime::automaticWriteAuthorization,
+			displayInteractive = ::displayInteractive,
 		).also { p ->
 			p.onTrackFinalized = { snapshot ->
 				if (FinalizationRuntime.isReady) {

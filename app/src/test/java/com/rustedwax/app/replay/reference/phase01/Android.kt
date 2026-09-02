@@ -34,14 +34,14 @@ import com.rustedwax.core.MetadataFields
  */
 
 /**
- * Virtual time, shared by [SystemClock] and [Handler].
+ * Virtual time, shared by [VirtualSystem], [SystemClock] and [Handler].
  *
- * The Phase 0/1 machine reads `SystemClock.elapsedRealtime()` directly and posts
- * its continuation and stopped-grace timers to a `Handler`. Both are driven from
- * here so that a replay advancing the clock also fires the timers that were due
- * — the continuation window and the STOPPED replacement grace are lifecycle
- * decisions under comparison, and a reference whose timers never fired would
- * disagree with production for a reason that has nothing to do with either.
+ * The machines read both `System.currentTimeMillis()` and
+ * `SystemClock.elapsedRealtime()` directly and post their continuation and
+ * stopped-grace timers to a `Handler`. All three are driven from here so that a
+ * replay advancing the clock also reaches wall-clock carry deadlines and fires
+ * the timers that were due. Only elapsed differences matter to these tests; the
+ * virtual epoch deliberately shares the same numeric value.
  */
 class VirtualTime(private var elapsedRealtimeMs: Long = 10_000L) {
 
@@ -105,6 +105,24 @@ object SystemClock {
 
 	@JvmStatic
 	fun elapsedRealtime(): Long = current.elapsedRealtime()
+}
+
+/** Test-only wall clock imported under the name `System` by generated mirrors. */
+object VirtualSystem {
+	@Volatile
+	private var virtualTime: VirtualTime? = null
+
+	fun use(time: VirtualTime) {
+		virtualTime = time
+	}
+
+	fun useRealTime() {
+		virtualTime = null
+	}
+
+	@JvmStatic
+	fun currentTimeMillis(): Long =
+		virtualTime?.elapsedRealtime() ?: java.lang.System.currentTimeMillis()
 }
 
 object Looper {

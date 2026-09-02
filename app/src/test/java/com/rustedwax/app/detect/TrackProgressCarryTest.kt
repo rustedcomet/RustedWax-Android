@@ -609,6 +609,238 @@ class TrackProgressCarryTest {
 		)
 	}
 
+
+	// region interrupted continuity (Bug 2)
+
+	/**
+	 * A screen lock is not the end of a viewing.
+	 *
+	 * The physical case, to the millisecond: Gangnam Style at 71 065 ms with
+	 * 71 286 ms measured, the screen locked, and the same video back four minutes
+	 * later at 110 591 ms. The forty seconds in between played to nobody, so the
+	 * position moved without the clock — which is precisely the shape the
+	 * in-place resume window cannot describe, and precisely why the whole listen
+	 * used to be thrown away and restarted at zero.
+	 */
+	@Test
+	fun `an interrupted listen resumes at the position it kept playing to`() {
+		val native = YouTubeProbe.YOUTUBE_PACKAGE
+		val gangnamStyle = TrackIdentity(
+			title = "PSY - GANGNAM STYLE(강남스타일) M/V",
+			artist = "officialpsy",
+			album = null,
+			durationMs = 252_000,
+			sourceItemId = "9bZkp7q19f0",
+		)
+		val interrupted = progress(71_286, at = 1_000_000, lastPositionMs = 71_065)
+		// The long window is what makes the claim reachable at all.
+		assertTrue(TrackProgressCarry.holdsResumeWindow(gangnamStyle, interrupted))
+		TrackProgressCarry.remember(native, gangnamStyle, interrupted)
+
+		assertEquals(
+			71_286,
+			TrackProgressCarry.claim(
+				native,
+				gangnamStyle,
+				now = 1_000_000 + 244_000,
+				resumePositionMs = 110_591,
+			)!!.playedMs,
+		)
+	}
+
+	/**
+	 * The gap is a bound, not a credit.
+	 *
+	 * What comes back is the play time that was measured, unchanged. The forty
+	 * seconds the position advanced by while nothing was watching are not in it,
+	 * and this is the assertion that says so out loud: the claim is worth exactly
+	 * what the transport had earned before the interruption.
+	 */
+	@Test
+	fun `resuming further in credits none of the interval nobody watched`() {
+		val native = YouTubeProbe.YOUTUBE_PACKAGE
+		val track = canYouFeelMyHeart()
+		TrackProgressCarry.remember(
+			native, track, progress(71_286, at = 1_000_000, lastPositionMs = 71_065),
+		)
+		val claimed = TrackProgressCarry.claim(
+			native, track, now = 1_000_000 + 244_000, resumePositionMs = 110_591,
+		)!!
+		assertEquals(71_286, claimed.playedMs)
+		assertEquals(71_065L, claimed.lastPositionMs)
+	}
+
+	/**
+	 * How far ahead the item may come back is the wall clock, and nothing else.
+	 *
+	 * Eighty seconds after the carry, the most of the item that can possibly have
+	 * gone by is eighty seconds. A position two minutes further in is a seek or a
+	 * later viewing; either way it is not the continuation of this one, and it
+	 * inherits nothing.
+	 */
+	@Test
+	fun `a jump the clock cannot account for is not a continuation`() {
+		val native = YouTubeProbe.YOUTUBE_PACKAGE
+		val track = canYouFeelMyHeart()
+		val at = 1_000_000L
+		val soonAfter = at + TrackProgressCarry.TTL_MS + 20_000
+
+		TrackProgressCarry.remember(
+			native, track, progress(71_286, at = at, lastPositionMs = 71_065),
+		)
+		assertNull(
+			TrackProgressCarry.claim(
+				native, track, now = soonAfter, resumePositionMs = 190_000,
+			),
+		)
+		// The same carry, the same instant, a position the elapsed time can
+		// account for: claimed. Only the size of the jump differed.
+		assertEquals(
+			71_286,
+			TrackProgressCarry.claim(
+				native, track, now = soonAfter, resumePositionMs = 145_000,
+			)!!.playedMs,
+		)
+	}
+
+	/**
+	 * Forward only. An item that comes back *earlier* than it stopped was
+	 * restarted or seeked backwards, and neither continues this viewing — the
+	 * ordinary window around the carried position remains the whole allowance in
+	 * that direction.
+	 */
+	@Test
+	fun `an interruption never lets a rewind inherit the listen`() {
+		val native = YouTubeProbe.YOUTUBE_PACKAGE
+		val track = canYouFeelMyHeart()
+		TrackProgressCarry.remember(
+			native, track, progress(105_000, at = 1_000_000, lastPositionMs = 105_000),
+		)
+		assertNull(
+			TrackProgressCarry.claim(
+				native, track, now = 1_000_000 + 244_000, resumePositionMs = 45_000,
+			),
+		)
+	}
+
+	/**
+	 * A different video is a different listen, however well its position lines up
+	 * with the interruption.
+	 */
+	@Test
+	fun `another video may not inherit an interrupted listen`() {
+		val native = YouTubeProbe.YOUTUBE_PACKAGE
+		val track = canYouFeelMyHeart()
+		TrackProgressCarry.remember(
+			native, track, progress(71_286, at = 1_000_000, lastPositionMs = 71_065),
+		)
+		val later = 1_000_000L + 244_000L
+		assertNull(
+			TrackProgressCarry.claim(
+				native,
+				track.copy(sourceItemId = "lmnopqrstuv"),
+				now = later,
+				resumePositionMs = 110_591,
+			),
+		)
+		assertNull(
+			TrackProgressCarry.claim(
+				native,
+				track.copy(sourceItemId = null),
+				now = later,
+				resumePositionMs = 110_591,
+			),
+		)
+		// Untouched: the listen is still owed to the video that earned it.
+		assertEquals(
+			71_286,
+			TrackProgressCarry.claim(
+				native, track, now = later, resumePositionMs = 110_591,
+			)!!.playedMs,
+		)
+	}
+
+	/**
+	 * An already-earned automatic listen still takes the ordinary deadline, so
+	 * the interruption allowance can never reach it. Bug 5's sibling rule, held
+	 * here because this is where a wider position rule would have quietly
+	 * undone it.
+	 */
+	@Test
+	fun `the interruption allowance does not extend an earned listen`() {
+		val native = YouTubeProbe.YOUTUBE_MUSIC_PACKAGE
+		val track = canYouFeelMyHeart()
+		val earned = progress(
+			playedMs = 199_165,
+			at = 1_000_000,
+			lastPositionMs = 199_817,
+			promptFinalization = true,
+		)
+		TrackProgressCarry.remember(native, track, earned)
+		assertNull(
+			TrackProgressCarry.claim(
+				native, track, now = 1_000_000 + 244_000, resumePositionMs = 220_000,
+			),
+		)
+	}
+
+	@Test
+	fun `carry inherits the original interruption deadline instead of restarting it`() {
+		val native = YouTubeProbe.YOUTUBE_PACKAGE
+		val track = canYouFeelMyHeart()
+		val interruptedAt = 1_000_000L
+		val deadline = interruptedAt + TrackProgressCarry.RESUMED_TTL_MS
+		val teardownAt = deadline - 20_000
+		val progress = progress(
+			playedMs = 71_286,
+			at = teardownAt,
+			lastPositionMs = 71_065,
+		).copy(
+			interruptionStartedAtMillis = interruptedAt,
+			interruptionDeadlineMillis = deadline,
+		)
+
+		assertEquals(deadline, TrackProgressCarry.continuationDeadlineMillis(track, progress))
+		TrackProgressCarry.remember(native, track, progress)
+		assertNull(
+			TrackProgressCarry.claim(
+				native,
+				track,
+				now = deadline,
+				resumePositionMs = 110_591,
+			),
+		)
+	}
+
+	@Test
+	fun `carry remains claimable immediately before the original interruption deadline`() {
+		val native = YouTubeProbe.YOUTUBE_PACKAGE
+		val track = canYouFeelMyHeart()
+		val interruptedAt = 1_000_000L
+		val deadline = interruptedAt + TrackProgressCarry.RESUMED_TTL_MS
+		val progress = progress(
+			playedMs = 71_286,
+			at = deadline - 20_000,
+			lastPositionMs = 71_065,
+		).copy(
+			interruptionStartedAtMillis = interruptedAt,
+			interruptionDeadlineMillis = deadline,
+		)
+		TrackProgressCarry.remember(native, track, progress)
+
+		assertEquals(
+			71_286,
+			TrackProgressCarry.claim(
+				native,
+				track,
+				now = deadline - 1,
+				resumePositionMs = 110_591,
+			)!!.playedMs,
+		)
+	}
+
+	// endregion
+
 	// endregion
 
 	/**

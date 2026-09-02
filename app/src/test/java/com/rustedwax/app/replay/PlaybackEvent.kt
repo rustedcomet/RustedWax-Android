@@ -151,6 +151,31 @@ sealed interface PlaybackEvent {
 	data object ProcessRestarted : PlaybackEvent
 
 	/**
+	 * The native STOPPED replacement grace ran out.
+	 *
+	 * A trace has no `Handler`, so the deadline `SessionProbe` arms from
+	 * `PlaybackEffect.ScheduleStoppedFinalizationGrace` is expressed as an
+	 * explicit event. Whether it ends the listen is still
+	 * `StoppedInterruption`'s decision, made against the same display state the
+	 * probe reads on a device.
+	 */
+	data class StoppedGraceExpired(
+		/** The screen was on, so this STOPPED is the user's own. */
+		val displayInteractive: Boolean = true,
+	) : PlaybackEvent
+
+	/**
+	 * The transport is rebuilt already knowing where the item came back.
+	 *
+	 * [SessionRecreated] models the rebuild that happens under a live listen,
+	 * where the replacement has published no position yet. A session that
+	 * reappears after an interruption has one — Android hands the fresh
+	 * controller a `PlaybackState` — and past the metadata window that position
+	 * is the whole evidence the claim runs on.
+	 */
+	data class SessionRecreatedAtPosition(val positionMs: Long) : PlaybackEvent
+
+	/**
 	 * The probe's idle timer fired.
 	 *
 	 * A trace has no `Handler`, so the deadline `SessionProbe` arms from

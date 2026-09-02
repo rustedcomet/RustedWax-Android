@@ -32,6 +32,12 @@ class CurrentMirrorProvenanceTest {
 	private fun mirror() =
 		read("src/test/java/com/rustedwax/app/replay/reference/current/SessionProbe.kt")
 
+	private fun carryProduction() =
+		read("src/main/java/com/rustedwax/app/detect/TrackProgressCarry.kt")
+
+	private fun carryMirror() =
+		read("src/test/java/com/rustedwax/app/replay/reference/current/TrackProgressCarry.kt")
+
 	/**
 	 * Both sides are cut at the same landmark — the file's first KDoc block,
 	 * which is the first line of its body in each case. Anchoring on a line number
@@ -55,6 +61,21 @@ class CurrentMirrorProvenanceTest {
 	}
 
 	@Test
+	fun `carry mirror body is byte-identical to shipping TrackProgressCarry`() {
+		fun body(text: String): List<String> {
+			val lines = text.lines()
+			val start = lines.indexOfFirst { it.startsWith("object TrackProgressCarry") }
+			assertTrue("TrackProgressCarry declaration not found", start > 0)
+			return lines.drop(start)
+		}
+		assertEquals(
+			"the current mirror's carry implementation drifted from production",
+			body(carryProduction()),
+			body(carryMirror()),
+		)
+	}
+
+	@Test
 	fun `mirror header only moves the package and swaps the android imports`() {
 		val header = mirror().lines().takeWhile { !it.startsWith("/**") }
 		assertEquals(
@@ -69,8 +90,8 @@ class CurrentMirrorProvenanceTest {
 			it.startsWith("import com.rustedwax.app.replay.reference.phase01.")
 		}
 		assertEquals(
-			"expected the nine platform stand-ins plus the two shadowed helpers",
-			11,
+			"expected the nine platform stand-ins, virtual wall clock and two shadowed helpers",
+			12,
 			standIns.size,
 		)
 	}
