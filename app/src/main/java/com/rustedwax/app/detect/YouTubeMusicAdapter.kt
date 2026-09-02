@@ -23,6 +23,18 @@ class YouTubeMusicAdapter(
 	override val profile: SourceProfile = SourceProfile.YOUTUBE_MUSIC
 
 	/**
+	 * Every positive-duration Music presentation is eligible for the existing
+	 * bounded, contradiction-checked identity lookup. Native YouTube retains its
+	 * 60-second continuity optimization; Music also needs this proof to establish
+	 * genuine short works without treating their duration as ad evidence.
+	 */
+	override fun mayPreResolveExactItemId(request: SourceExactIdRequest): Boolean {
+		if (presentedTitle(request.fields)?.isNotBlank() != true) return false
+		if (presentedArtist(request.fields)?.isNotBlank() != true) return false
+		return (request.durationMs ?: 0) > 0
+	}
+
+	/**
 	 * YouTube Music's Video mode publishes a YouTube upload title while Song
 	 * mode publishes the separated work title. Declare their shared work without
 	 * replacing either raw presentation: exact-id resolution and the final payload

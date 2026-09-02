@@ -19,6 +19,7 @@ import com.rustedwax.app.detect.RunScopedEvidence
 import com.rustedwax.app.detect.SessionProbe
 import com.rustedwax.app.detect.SessionSnapshot
 import com.rustedwax.app.detect.SourceRegistry
+import com.rustedwax.app.detect.SourceExactIdRequest
 import com.rustedwax.app.detect.SourceProfile
 import com.rustedwax.app.detect.SourceProof
 import com.rustedwax.core.TrackIdentity
@@ -64,7 +65,36 @@ class PlaybackTrace(
 		val mediaId: String? = null,
 		val mediaUri: String? = null,
 		val artUri: String? = null,
-	) {
+	) : MetadataFields {
+		override fun getString(key: String): String? = when (key) {
+			"android.media.metadata.TITLE" -> title
+			"android.media.metadata.ARTIST" -> artist
+			"android.media.metadata.ALBUM" -> album
+			"android.media.metadata.GENRE" -> genre
+			"android.media.metadata.MEDIA_ID" -> mediaId
+			"android.media.metadata.MEDIA_URI" -> mediaUri
+			"android.media.metadata.ART_URI" -> artUri
+			else -> null
+		}
+
+		override fun getLong(key: String): Long = when (key) {
+			"android.media.metadata.DURATION" -> durationMs ?: 0
+			else -> 0
+		}
+
+		override fun bitmapDimensions(key: String): Pair<Int, Int>? = null
+
+		override fun keySet(): Set<String> = buildSet {
+			if (title != null) add("android.media.metadata.TITLE")
+			if (artist != null) add("android.media.metadata.ARTIST")
+			if (album != null) add("android.media.metadata.ALBUM")
+			if (durationMs != null) add("android.media.metadata.DURATION")
+			if (genre != null) add("android.media.metadata.GENRE")
+			if (mediaId != null) add("android.media.metadata.MEDIA_ID")
+			if (mediaUri != null) add("android.media.metadata.MEDIA_URI")
+			if (artUri != null) add("android.media.metadata.ART_URI")
+		}
+
 		fun mergedWith(event: PlaybackEvent.SessionMetadata) = Bundle(
 			title = event.title ?: title,
 			artist = event.artist ?: artist,
@@ -181,6 +211,40 @@ class PlaybackTrace(
 
 	/** The last verdict reached while this listen was active. */
 	private var lastStableIdentity: YouTubeProbe.Identity? = null
+	private val sourceAdapter = SourceRegistry.forPackage(source.packageName, source.label)
+	private var carryResolutionSignature: String? = null
+	private var carryResolutionGeneration = 0L
+
+	/** Production carry requests actually executed by this trace. */
+	var carryAuthorityRequests: Int = 0
+		private set
+
+	/** Successful production carry results delivered back to the reducer. */
+	var carryAuthorityResolutions: Int = 0
+		private set
+
+	/** Production-equivalent `restoreCarriedProgress` retries after resolution. */
+	var carryRestoreAttemptsAfterResolution: Int = 0
+		private set
+
+	/** Post-resolution carry retries that reclaimed positive played time. */
+	var carryProgressRestorationsAfterResolution: Int = 0
+		private set
+
+	/** Positive played time reclaimed by those post-resolution retries. */
+	var carriedPlayedMsAfterResolution: Long = 0
+		private set
+
+	/** Current reducer measurement, exposed only for an in-flight replay assertion. */
+	val currentPlayedMs: Long get() = listen.playedMsAt(clock.nowMillis())
+
+	/** Identity resolution must leave this true until independent playback evidence. */
+	val presentationAttributionAmbiguous: Boolean
+		get() = listen.presentationUnprovenForNamedWork
+
+	/** Wired by [ReplayHarness] to the same runtime entry point production uses. */
+	var onCarryAuthorityRequested:
+		((SessionSnapshot, (SessionProbe.NativeResolvedIdentity?) -> Unit) -> Unit)? = null
 
 	/** Snapshots this trace froze, oldest first. */
 	val finalized = mutableListOf<SessionSnapshot>()
@@ -230,6 +294,7 @@ class PlaybackTrace(
 			PlaybackEffect.ClearTrackScopedEvidence -> {
 				evidence = Evidence()
 				lastStableIdentity = null
+				invalidateCarryAuthority()
 			}
 			PlaybackEffect.RestoreCarriedProgress -> restoreCarriedProgress()
 			PlaybackEffect.CancelContinuation -> cancelContinuation()
@@ -256,12 +321,66 @@ class PlaybackTrace(
 			// decision: the in-flight identity request, the carry-authority request
 			// and the evidence-store rebinding are all supplied by explicit events
 			// in a trace, and the remaining log effects write to `EventLog`.
-			PlaybackEffect.InvalidateInFlightIdentityRequest,
-			PlaybackEffect.RequestCarryAuthority,
+			PlaybackEffect.InvalidateInFlightIdentityRequest -> invalidateCarryAuthority()
+			PlaybackEffect.RequestCarryAuthority -> requestCarryAuthority()
 			PlaybackEffect.RebindTrackInstanceEvidence,
 			is PlaybackEffect.Note,
 			is PlaybackEffect.LogMetadata,
 			-> Unit
+		}
+	}
+
+	private fun invalidateCarryAuthority() {
+		carryResolutionGeneration++
+		carryResolutionSignature = null
+	}
+
+	/**
+	 * Replay the production `requestNativeCarryAuthority` path, including adapter
+	 * eligibility, one request per stable semantic-key/duration signature, and a
+	 * stale-callback check. A successful result establishes immutable carry
+	 * identity only; presentation attribution remains a separate reducer fact.
+	 */
+	private fun requestCarryAuthority() {
+		if (listen.suppressedByForegroundShort || listen.finalized ||
+			listen.trackIdentity.hasExactSourceItemId ||
+			listen.transport != TransportState.PLAYING
+		) return
+		val duration = bundle.durationMs ?: return
+		val adapter = sourceAdapter ?: return
+		if (!adapter.mayPreResolveExactItemId(SourceExactIdRequest(bundle, duration))) return
+		val requester = onCarryAuthorityRequested ?: return
+		val signature = "${listen.trackIdentity.semanticKey}|$duration"
+		if (carryResolutionSignature == signature) return
+		carryResolutionSignature = signature
+		val generation = ++carryResolutionGeneration
+		carryAuthorityRequests++
+		requester(snapshot()) { proof ->
+			val currentDuration = bundle.durationMs ?: return@requester
+			val currentSignature = "${listen.trackIdentity.semanticKey}|$currentDuration"
+			if (generation != carryResolutionGeneration || listen.finalized ||
+				currentSignature != signature || proof == null
+			) return@requester
+			carryAuthorityResolutions++
+			dispatch(PlaybackInput.ExactIdEstablished(proof.videoId))
+			evidence.resolverContext = evidence.resolverContext.copy(
+				preResolvedNativeVideoId = proof.videoId,
+				preResolvedNativeRoute = proof.route,
+			)
+			// Production retries the same real claim only after the immutable id is
+			// installed. The claim dispatches ProgressCarried; no replay-only progress
+			// value is injected here.
+			val playedBeforeRestore = listen.playedMs
+			carryRestoreAttemptsAfterResolution++
+			restoreCarriedProgress()
+			val restoredPlayedMs = (listen.playedMs - playedBeforeRestore).coerceAtLeast(0)
+			if (restoredPlayedMs > 0) {
+				carryProgressRestorationsAfterResolution++
+				carriedPlayedMsAfterResolution += restoredPlayedMs
+			}
+			// Match the next production side effect: anything this exact item could
+			// not claim is an incompatible pending continuation.
+			TrackProgressCarry.abandon(source.packageName, listen.trackIdentity)
 		}
 	}
 
@@ -438,6 +557,20 @@ class PlaybackTrace(
 				dispatch(PlaybackInput.ExactIdEstablished(event.videoId))
 			}
 
+			is PlaybackEvent.PresentationAttributionEstablished -> {
+				evidence.resolverContext = evidence.resolverContext.copy(
+					preResolvedNativeVideoId = event.videoId,
+					preResolvedNativeRoute = NativePreResolvedRoute.RAW_TITLE_CHANNEL,
+				)
+				dispatch(PlaybackInput.ExactIdEstablished(event.videoId))
+				dispatch(
+					PlaybackInput.PresentationAttributionEstablished(
+						sourceItemId = event.videoId,
+						presentationDurationMs = event.durationMs,
+					),
+				)
+			}
+
 			// The accessibility tree named a Short. Straight into the production
 			// `ForegroundShortTracker`, exactly as `SessionProbe` does with a parsed
 			// observer event — the tracker owns the measurement, the caps, the
@@ -520,6 +653,18 @@ class PlaybackTrace(
 			// the outgoing transport parks its progress through the production
 			// `TrackProgressCarry`, and the replacement claims it back.
 			PlaybackEvent.SessionRecreated -> recreateSession()
+
+			PlaybackEvent.NativeSessionRecreatedAwaitingCarryAuthority ->
+				recreateNativeSessionAwaitingCarryAuthority()
+
+			is PlaybackEvent.ProbeDisposed -> dispatch(
+				PlaybackInput.Disposed(
+					finalize = event.finalize,
+					allowContinuation = event.allowContinuation,
+					elapsedRealtimeMs = clock.nowMillis(),
+					continuationOpen = continuationToken != null,
+				),
+			)
 
 			// Memory dies, disk does not. *Which* stores are memory is
 			// [RunScopedEvidence]'s answer, and it is the same call the listener
@@ -805,6 +950,43 @@ class PlaybackTrace(
 		restoreCarriedProgress()
 	}
 
+	/**
+	 * Rebuild a native binding from its still-current metadata bundle without
+	 * copying the outgoing binding's resolver-derived id. This is the production
+	 * shape that makes the first constructor-time claim fail closed and requires
+	 * `RequestCarryAuthority` to resolve the id before retrying the real claim.
+	 */
+	private fun recreateNativeSessionAwaitingCarryAuthority() {
+		check(source.isNative) { "only a native replacement loses resolver-derived carry identity" }
+		dispatch(
+			PlaybackInput.SessionDestroyed(
+				elapsedRealtimeMs = clock.nowMillis(),
+				continuationOpen = continuationToken != null,
+			),
+		)
+		listen = freshListen()
+		positionMs = null
+		// These are fields of the production binding, not package-global evidence.
+		// A replacement begins with a fresh request generation and no inherited
+		// resolver result even though the MediaSession bundle is still current.
+		evidence = Evidence()
+		lastStableIdentity = null
+		invalidateCarryAuthority()
+		pendingBundle = bundle
+		dispatch(
+			PlaybackInput.MetadataPublished(
+				identity = identityOf(pendingBundle),
+				namesTabOnly = false,
+				outgoingTransportHasExactId = false,
+				hasPreResolvedNativeId = false,
+				outgoingTitle = null,
+				nowMillis = clock.nowMillis(),
+				elapsedRealtimeMs = clock.nowMillis(),
+				nextInstanceToken = MediaSessionAdEvidence.nextTrackToken(),
+			),
+		)
+	}
+
 	private fun openContinuation() {
 		val identityKey = listen.trackIdentity
 		val verdict = lastStableIdentity ?: YouTubeProbe.Identity.Unconfirmed(
@@ -1020,7 +1202,7 @@ class PlaybackTrace(
 
 	// ---- the freeze ------------------------------------------------------------
 
-	private fun freeze() {
+	private fun snapshot(): SessionSnapshot {
 		val durationMs = listen.establishedDurationMs(bundle.durationMs)
 		val identity = continuationVerdict ?: lastStableIdentity ?: selectedIdentity()
 		val confirmed = identity as? YouTubeProbe.Identity.Confirmed
@@ -1030,7 +1212,7 @@ class PlaybackTrace(
 		// `playedMsAt` is zero by construction, which is the production guarantee
 		// that the same seconds are never counted on both surfaces.
 		val playedMs = listen.playedMsAt(clock.nowMillis())
-		finalized += SessionSnapshot(
+		return SessionSnapshot(
 			packageName = source.packageName,
 			appLabel = source.label,
 			isTarget = NativeSourceSwitches.acceptsPackage(source.packageName),
@@ -1073,6 +1255,10 @@ class PlaybackTrace(
 			sourceProof = SourceProof.MEDIA_SESSION,
 			ownerHandle = evidence.ownerHandle,
 		)
+	}
+
+	private fun freeze() {
+		finalized += snapshot()
 		// The next listen inherits the source and the browser's evidence, and
 		// nothing else. Carrying anything further is the bug class the frozen
 		// snapshot exists to prevent. The reducer has already latched `finalized`,
@@ -1085,6 +1271,7 @@ class PlaybackTrace(
 		// erasing it here made replay-only track changes lose their title.
 		evidence = Evidence()
 		lastStableIdentity = null
+		invalidateCarryAuthority()
 		positionMs = null
 		listen = freshListen()
 	}

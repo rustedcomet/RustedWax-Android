@@ -695,6 +695,30 @@ class SourceAdapterContractTest {
 		assertFalse("a browser trusted a channel as an artist", browser.profile.trustsMetadataArtist)
 	}
 
+	@Test
+	fun `YouTube Music can prove a genuine short presentation without changing native YouTube`() {
+		val shortTrack = SourceExactIdRequest(
+			fields = fields(title to "Skit", artist to "Someone", duration to 30_000L),
+			durationMs = 30_000,
+		)
+
+		assertTrue("Music needs positive attribution for genuine short works", music.mayPreResolveExactItemId(shortTrack))
+		assertFalse(
+			"native YouTube keeps its existing 60-second continuity policy",
+			native.mayPreResolveExactItemId(shortTrack),
+		)
+		assertFalse(
+			"missing artist is not positive Music attribution evidence",
+			music.mayPreResolveExactItemId(
+				shortTrack.copy(fields = fields(title to "Skit", duration to 30_000L)),
+			),
+		)
+		assertFalse(
+			"a non-positive duration cannot identify the current presentation",
+			music.mayPreResolveExactItemId(shortTrack.copy(durationMs = 0)),
+		)
+	}
+
 	/** YouTube Music must not read, or clear, the YouTube app's playlist bar. */
 	@Test
 	fun `YouTube Music neither reads nor clears the other app's playlist evidence`() {

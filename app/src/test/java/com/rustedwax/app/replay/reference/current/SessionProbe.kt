@@ -1556,9 +1556,9 @@ class SessionProbe(
 		}
 
 		/**
-		 * Ask once per stable native presentation for a unique immutable id. Short
-		 * transition phases are excluded by duration; foreground Shorts have their
-		 * own exact owner-handle route and never enter here.
+		 * Ask once per source-eligible native presentation for a unique immutable id.
+		 * Foreground Shorts have their own exact owner-handle route and never enter
+		 * here. This establishes carry identity, not ownership of measured playback.
 		 */
 		private fun requestNativeCarryAuthority() {
 			if (suppressedByForegroundShort || finalized ||
