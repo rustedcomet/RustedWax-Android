@@ -207,4 +207,25 @@ enum class NativePreResolvedRoute {
 	 * history has since re-described refuses instead of carrying a stale answer.
 	 */
 	HISTORY,
+
+	;
+
+	/**
+	 * Whether this route also proved the *currently published length* is the
+	 * named work's own, and not an interstitial's borrowing its metadata.
+	 *
+	 * Only [STRUCTURED_MUSIC] does. Its matcher requires the player's published
+	 * duration to agree with a fetched catalog row's own length before it will
+	 * name an id at all — see [com.rustedwax.app.enrich.NativeStructuredMusicMatcher.matches]
+	 * and the duration checks around `structuredNativeMusic = true` in
+	 * [com.rustedwax.app.enrich.VideoIdResolver]. A pre-roll publishes the song's
+	 * title and artist with its own short length, so it cannot satisfy that
+	 * agreement, and the resolver refuses while one is on screen.
+	 *
+	 * The other three name the work from a feed, a history entry or a title and
+	 * channel. Each can be right about *which song* while an interstitial is
+	 * still what is playing, so none of them may attribute measured time.
+	 */
+	val corroboratesPresentationDuration: Boolean
+		get() = this == STRUCTURED_MUSIC
 }
