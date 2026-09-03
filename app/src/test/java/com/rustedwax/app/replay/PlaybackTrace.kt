@@ -363,7 +363,9 @@ class PlaybackTrace(
 	 * Replay the production `requestNativeCarryAuthority` path, including adapter
 	 * eligibility, one request per stable semantic-key/duration signature, and a
 	 * stale-callback check. A successful result establishes immutable carry
-	 * identity only; presentation attribution remains a separate reducer fact.
+	 * identity; it additionally attributes the presentation exactly when the route
+	 * that proved the id also had to agree with the published length, which is
+	 * production's rule and not a replay convenience.
 	 */
 	private fun requestCarryAuthority() {
 		if (listen.suppressedByForegroundShort || listen.finalized ||
@@ -379,7 +381,12 @@ class PlaybackTrace(
 		carryResolutionSignature = signature
 		val generation = ++carryResolutionGeneration
 		carryAuthorityRequests++
-		requester(snapshot()) { proof ->
+		val requestSnapshot = snapshot()
+		// Read exactly as `resolveVideoId` reads it, from the same snapshot: this
+		// is the length the resolver is about to corroborate against catalog rows.
+		val attributedPresentationMs = requestSnapshot.resolverContext.presentationDurationMs
+			?: requestSnapshot.durationMs
+		requester(requestSnapshot) { proof ->
 			val currentDuration = bundle.durationMs ?: return@requester
 			val currentSignature = "${listen.trackIdentity.semanticKey}|$currentDuration"
 			if (generation != carryResolutionGeneration || listen.finalized ||
@@ -387,6 +394,14 @@ class PlaybackTrace(
 			) return@requester
 			carryAuthorityResolutions++
 			dispatch(PlaybackInput.ExactIdEstablished(proof.videoId))
+			if (proof.route.corroboratesPresentationDuration && attributedPresentationMs != null) {
+				dispatch(
+					PlaybackInput.PresentationAttributionEstablished(
+						sourceItemId = proof.videoId,
+						presentationDurationMs = attributedPresentationMs,
+					),
+				)
+			}
 			evidence.resolverContext = evidence.resolverContext.copy(
 				preResolvedNativeVideoId = proof.videoId,
 				preResolvedNativeRoute = proof.route,
@@ -586,7 +601,11 @@ class PlaybackTrace(
 			is PlaybackEvent.PresentationAttributionEstablished -> {
 				evidence.resolverContext = evidence.resolverContext.copy(
 					preResolvedNativeVideoId = event.videoId,
-					preResolvedNativeRoute = NativePreResolvedRoute.RAW_TITLE_CHANNEL,
+					// The route that actually produces this input in production. It
+					// used to say RAW_TITLE_CHANNEL, which is the one thing this
+					// event cannot have come from: that route never checks the
+					// published length, so it may not attribute a surface.
+					preResolvedNativeRoute = NativePreResolvedRoute.STRUCTURED_MUSIC,
 				)
 				dispatch(PlaybackInput.ExactIdEstablished(event.videoId))
 				dispatch(

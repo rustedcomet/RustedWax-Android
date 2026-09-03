@@ -1631,6 +1631,12 @@ class SessionProbe(
 			nativeResolutionSignature = signature
 			val generation = ++nativeResolutionGeneration
 			val requestSnapshot = snapshot()
+			// The exact length the resolver is about to corroborate against real
+			// catalog rows. Read from the request, not from the callback: only this
+			// number was actually proven, and the reducer refuses the attribution if
+			// the presentation has moved on by the time the answer lands.
+			val attributedPresentationMs = requestSnapshot.resolverContext.presentationDurationMs
+				?: requestSnapshot.durationMs
 			EventLog.append(
 				"native-carry",
 				"$packageName pre-resolving stable exact-ID-less track \"$title\" for controller continuity",
@@ -1645,6 +1651,26 @@ class SessionProbe(
 					val currentSignature = "${trackIdentity.semanticKey}|$currentDuration"
 					if (currentSignature != signature || proof == null) return@post
 					dispatch(PlaybackInput.ExactIdEstablished(proof.videoId))
+					// The id alone proves the work, never the surface — an interstitial
+					// borrows the song's title and artist field-for-field, so a route
+					// that matched on those may have named the right song while the
+					// wrong thing was playing. STRUCTURED_MUSIC is the one route that
+					// also required the *currently published* length to agree with the
+					// catalog row's own length (NativeStructuredMusicMatcher.matches),
+					// and a 6/15/30s pre-roll cannot satisfy that — which is why the
+					// resolver refuses outright while one is on screen. So this route,
+					// and only this route, is live proof that the duration surface
+					// being measured is the named work's.
+					if (proof.route.corroboratesPresentationDuration &&
+						attributedPresentationMs != null
+					) {
+						dispatch(
+							PlaybackInput.PresentationAttributionEstablished(
+								sourceItemId = proof.videoId,
+								presentationDurationMs = attributedPresentationMs,
+							),
+						)
+					}
 					resolverContext = resolverContext.copy(
 						preResolvedNativeVideoId = proof.videoId,
 						preResolvedNativeRoute = proof.route,

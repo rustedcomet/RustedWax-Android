@@ -101,6 +101,17 @@ class YouTubeMusicInterstitialProgressTest {
 	private fun finalizes(transition: PlaybackReducer.Transition): Boolean =
 		(transition.before + transition.effects).any { it is PlaybackEffect.Finalize }
 
+	/**
+	 * The two inputs production emits together when a duration-corroborated route
+	 * names the item — see `SessionProbe.requestNativeCarryAuthority` and
+	 * `NativePreResolvedRoute.corroboratesPresentationDuration`.
+	 *
+	 * Kept as a pair on purpose: the id and the attribution are separate facts,
+	 * and the tests below turn on exactly that separation. If this ever stops
+	 * describing something production does, the end-to-end scenarios in
+	 * `YouTubeMusicPresentationAttributionReplayTest` fail rather than these —
+	 * that suite drives the real carry-authority path and injects nothing.
+	 */
 	private fun establishPresentation(
 		reducer: PlaybackReducer,
 		state: ListenState,
