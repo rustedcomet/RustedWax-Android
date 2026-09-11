@@ -3,6 +3,7 @@ package com.rustedwax.app.enrich
 import com.rustedwax.youtube.identity.VideoResolution
 import com.rustedwax.youtube.identity.VideoResolutionAttempt
 import com.rustedwax.youtube.identity.VideoResolutionFailure
+import com.rustedwax.youtube.identity.PerformerCreditEvidence
 
 import com.rustedwax.app.detect.TitleParser
 import kotlin.math.abs
@@ -13,11 +14,74 @@ import kotlin.math.abs
  *
  * This is deliberately not a fuzzy title matcher. The canonical page title is
 	 * parsed with the existing credit grammar, its work must equal the separated
-	 * MediaSession work, the native artist must be one complete parsed or canonical
-	 * author credit, and duration must agree. The resolver still requires exactly
+	 * MediaSession work, the published artist metadata must agree with the candidate,
+	 * and duration must agree. The resolver still requires exactly
 	 * one fully fetched public page before this evidence can become authority.
  */
 object NativeStructuredMusicMatcher {
+
+	/**
+	 * Attach descriptive artist-credit provenance at the resolver boundary.
+	 *
+	 * The work and complete credit must agree, and the canonical/listing owner
+	 * must itself belong to that credit. This last condition is what distinguishes
+	 * a credited artist's upload from a distributor page whose title merely names
+	 * the artist. A collaboration may sit on one member's channel only when the
+	 * title independently states the complete collaboration. This grade does not
+	 * authorize or veto the verified identity or its eventual scrobble.
+	 */
+	fun withPerformerCreditEvidence(
+		candidate: VideoResolution,
+		nativeTitle: String,
+		nativeArtist: String,
+		durationSec: Long?,
+		evidence: PerformerCreditEvidence,
+	): VideoResolution {
+		require(evidence != PerformerCreditEvidence.NONE) {
+			"a resolver cannot positively attach NONE performer evidence"
+		}
+		return candidate.copy(
+			performerCreditEvidence = if (
+				completePerformerCreditAgrees(candidate, nativeTitle, nativeArtist, durationSec)
+			) evidence else PerformerCreditEvidence.NONE,
+		)
+	}
+
+	private fun completePerformerCreditAgrees(
+		candidate: VideoResolution,
+		nativeTitle: String,
+		nativeArtist: String,
+		durationSec: Long?,
+	): Boolean {
+		val candidateTitle = candidate.title?.takeIf(String::isNotBlank) ?: return false
+		if (durationSec != null) {
+			val candidateDuration = candidate.lengthSeconds ?: return false
+			if (abs(candidateDuration - durationSec) > VideoIdResolver.DURATION_TOLERANCE_SEC) {
+				return false
+			}
+		}
+		val parsed = parse(candidateTitle, candidate.channel)
+		val titleNamesCompleteArtist = SearchResultsParser.titleNamesArtistThenSession(
+			nativeTitle, nativeArtist, candidateTitle,
+		)
+		if (titleKey(parsed.track) != titleKey(work(nativeTitle)) &&
+			!worksAgree(candidateTitle, nativeTitle) && !titleNamesCompleteArtist
+		) return false
+
+		val exactOrParsedCompleteCredit = creditsAgree(parsed.credits, nativeArtist)
+		val managedSpellingCredit = SearchResultsParser.shortTitleMatches(
+			nativeTitle, candidateTitle,
+		) && SearchResultsParser.ownerIsAuthoritativeArtistChannel(candidate.channel) &&
+			SearchResultsParser.artistNameIsOneSpellingApart(nativeArtist, candidate.channel)
+		if (!exactOrParsedCompleteCredit && !managedSpellingCredit) return false
+
+		val owner = SearchResultsParser.channelKey(candidate.channel) ?: return false
+		val credited = creditSet(nativeArtist)
+		return owner in credited ||
+			(titleNamesCompleteArtist && SearchResultsParser.channelIsSameArtistNamedDifferently(
+				nativeArtist, candidate.channel,
+			)) || managedSpellingCredit
+	}
 
 	fun couldDescribeTrack(
 		candidateTitle: String?,
@@ -146,21 +210,134 @@ object NativeStructuredMusicMatcher {
 		}.distinctBy(VideoResolution::videoId)
 		return when (matches.size) {
 			1 -> VideoResolutionAttempt(
-				resolution = matches.single().copy(
-					source = "structured native music title+artist+duration",
-					uniquelyResolved = true,
-					structuredNativeMusic = true,
+				resolution = withPerformerCreditEvidence(
+					candidate = matches.single().copy(
+						source = "structured native music title+artist+duration",
+						uniquelyResolved = true,
+						structuredNativeMusic = true,
+						// [matches] required this row's own length to agree with the
+						// length the player was publishing, so the surface is pinned.
+						presentationDurationCorroborated = true,
+					),
+					nativeTitle = nativeTitle,
+					nativeArtist = nativeArtist,
+					durationSec = durationSec,
+					evidence = PerformerCreditEvidence.CANONICAL_PAGE_COMPLETE_CREDIT,
 				),
 			)
 			0 -> VideoResolutionAttempt(
 				refusalReason = "no fully fetched candidate matched structured native " +
 					"music title+artist+duration",
 			)
-			else -> VideoResolutionAttempt(
+			else -> soleAuthoritativeOwner(matches, nativeArtist)?.let { authoritative ->
+				VideoResolutionAttempt(
+					resolution = withPerformerCreditEvidence(
+						candidate = authoritative.copy(
+						source = "structured native music title+artist+duration on the " +
+							"artist's own channel",
+						uniquelyResolved = true,
+						structuredNativeMusic = true,
+						// Every member of this set passed [matches], so the chosen
+						// one's length is the length the player published.
+						presentationDurationCorroborated = true,
+					),
+						nativeTitle = nativeTitle,
+						nativeArtist = nativeArtist,
+						durationSec = durationSec,
+						evidence = PerformerCreditEvidence.CANONICAL_PAGE_COMPLETE_CREDIT,
+					),
+				)
+			} ?: VideoResolutionAttempt(
 				refusalReason = "ambiguous identity — ${matches.size} uploads match structured " +
 					"native music title+artist+duration " +
 					"(${matches.joinToString { it.videoId }}); refusing every id",
 				failure = VideoResolutionFailure.AMBIGUOUS,
+			)
+		}
+	}
+
+	/**
+	 * Choose one identity candidate among otherwise equal uploads.
+	 *
+	 * Regression: work, published credit and length can leave two pages standing
+	 * for one recording—an artist-managed upload and a separate repost. The
+	 * duplicate-family rules decline this set and are
+	 * right to: they answer "is this one upload ingested twice", and a different
+	 * uploader means it is not. That question simply is not the one this set poses.
+	 *
+	 * The question it does pose has an answer YouTube itself supplies.
+	 * [SearchResultsParser.ownerIsAuthoritativeArtistChannel] already reads the two
+	 * channel forms YouTube generates for a rights holder — `… - Topic` and
+	 * `…VEVO` — and deliberately refuses the ones anyone can claim (`Official`,
+	 * `Music`, `TV`, `Records`). When exactly one survivor sits on such a channel,
+	 * the ambiguity is not between two candidate works; it is between the artist's
+	 * publication and someone else's copy of it, and the artist's own is the
+	 * recording this listen played.
+	 *
+	 * Deliberately narrow. Every candidate has already passed [matches], so nothing
+	 * about the work, the credit or the length is being relaxed. Uniqueness carries
+	 * the whole licence: none authoritative and several authoritative both leave the
+	 * ambiguity exactly as it was. Nothing here reads views, categories, upload
+	 * dates, descriptions, result order or any similarity score.
+	 */
+	private fun soleAuthoritativeOwner(
+		matches: List<VideoResolution>,
+		nativeArtist: String,
+	): VideoResolution? {
+		val authoritative = matches
+			.filter { SearchResultsParser.ownerIsAuthoritativeArtistChannel(it.channel) }
+			.singleOrNull() ?: return null
+		val credited = creditSet(nativeArtist)
+		// The suffix proves only that YouTube manages this channel on behalf of
+		// *some* artist. It does not prove that artist is the one this session
+		// credited: a foreign VEVO/Topic page can still carry a title whose parsed
+		// byline names the listened artist. The winner itself must therefore belong
+		// to the complete session credit before its marker can break any tie.
+		if (SearchResultsParser.channelKey(authoritative.channel) !in credited) return null
+		// Everyone else must be a stranger. Two of the artist's *own* publications
+		// are a different question with a different answer: `Ella Y Yo` leaves an
+		// official audio on `Aventura` beside a `- Topic` live take, both of them
+		// the rights holder's, and preferring the marked one would be choosing a
+		// live recording over a studio one on the strength of a channel suffix.
+		// This tie-break is only ever about the artist's upload against somebody
+		// else's copy of it, so an upload sitting on the credited act's own name —
+		// compared exactly, by the same [SearchResultsParser.channelKey] every
+		// route uses — leaves the ambiguity exactly as it was.
+		return authoritative.takeIf {
+			matches.none { candidate ->
+				candidate.videoId != authoritative.videoId &&
+					SearchResultsParser.channelKey(candidate.channel) in credited
+			}
+		}
+	}
+
+	/**
+	 * Whether a page has the player's length and an owner matching one listed act.
+	 *
+	 * The half of [matches] that survives a title the two catalogues spell
+	 * differently. Nothing is loosened in the comparison itself: the length is the
+	 * same tolerance every route uses, and the owner must reduce to one credit
+	 * under the same [SearchResultsParser.channelKey] — which is what makes
+	 * `Kabaka Pyramid Music` and `Kabaka Pyramid` one name, and `KSKZik` not.
+	 *
+	 * Never an identity route or a write gate of its own. This retained predicate
+	 * grades descriptive credit provenance only; a false result cannot refuse or
+	 * degrade a verified listen.
+	 */
+	fun ownedByOneCreditedArtist(
+		candidate: VideoResolution,
+		nativeArtist: String,
+		durationSec: Long,
+	): Boolean {
+		val length = candidate.lengthSeconds ?: return false
+		if (abs(length - durationSec) > VideoIdResolver.DURATION_TOLERANCE_SEC) return false
+		val owner = SearchResultsParser.channelKey(candidate.channel) ?: return false
+		val credited = creditSet(nativeArtist)
+		if (credited.isEmpty()) return false
+		if (owner in credited) return true
+		return splitCredits(nativeArtist).any { creditedArtist ->
+			SearchResultsParser.channelIsSameArtistNamedDifferently(
+				creditedArtist, candidate.channel,
 			)
 		}
 	}
@@ -180,6 +357,31 @@ object NativeStructuredMusicMatcher {
 		return candidates.minByOrNull(VideoResolution::videoId)
 	}
 
+	/**
+	 * The page names the player's work, at the player's length.
+	 *
+	 * Reads the candidate title with the credit grammar [matches] already uses,
+	 * then falls back to the whole-title comparison. Both readings, in that order,
+	 * because a canonical page ordinarily publishes `<Artist> - <Work>` while the
+	 * player publishes the bare work: `El Preso` against
+	 * `Fruko Y Sus Tesos - El Preso` is one work under the parse and two strings
+	 * under [worksAgree]. Asking only the second made this — the *weaker*
+	 * corroboration, reached after [matches] has already declined — stricter about
+	 * titles than [matches] itself, so a row whose work and complete credit the
+	 * player matched exactly could not be corroborated by its own page and the
+	 * listen resolved to nothing at all.
+	 *
+	 * Only the work is read this way. Who performed it is not decided here and
+	 * never was: the caller grades that separately, and a page title naming an
+	 * artist on a different channel still carries no additional credit provenance.
+	 *
+	 * Three readings, in order of how much they assume: the whole title, the
+	 * oriented parse, and — last — the title's own opening run
+	 * ([SearchResultsParser.titleLeadsWithSessionWork]). The third exists because
+	 * the parser deliberately declines to orient a title it cannot prove, keeping
+	 * the whole string as the track; a page that plainly opens with the work then
+	 * corroborated nothing, and the listen it belonged to resolved to no id at all.
+	 */
 	fun corroboratesWorkAndLength(
 		candidate: VideoResolution,
 		nativeTitle: String,
@@ -190,7 +392,12 @@ object NativeStructuredMusicMatcher {
 		if (abs(candidateDuration - durationSec) > VideoIdResolver.DURATION_TOLERANCE_SEC) {
 			return false
 		}
-		return worksAgree(candidateTitle, nativeTitle)
+		if (worksAgree(candidateTitle, nativeTitle)) return true
+		val nativeWork = work(nativeTitle)
+		if (titleKey(parse(candidateTitle, candidate.channel).track) == titleKey(nativeWork)) {
+			return true
+		}
+		return SearchResultsParser.titleLeadsWithSessionWork(candidateTitle, nativeWork)
 	}
 
 	/**

@@ -9,6 +9,7 @@ import com.rustedwax.app.detect.YouTubeProbe
 import com.rustedwax.app.enrich.FinalizedVideoIdentityContract
 import com.rustedwax.app.enrich.MusicBrainzVerifier
 import com.rustedwax.app.enrich.VideoFacts
+import com.rustedwax.app.enrich.VideoIdResolver
 import com.rustedwax.youtube.identity.VideoResolution
 import com.rustedwax.youtube.identity.VideoResolutionAttempt
 import com.rustedwax.hive.HiveScrobblePayload
@@ -408,54 +409,65 @@ internal class ProductionFinalizationOrchestrator(
 
 	@Suppress("LongMethod")
 	private suspend fun resolveAndFinalizeOrThrow(
-		session: SessionSnapshot,
+		finalizedSession: SessionSnapshot,
 		report: FinalizationReport,
 		prefilterReason: String?,
 		trigger: FinalizationTrigger,
 		onFeedback: ((String, Boolean) -> Unit)?,
 	) {
 		if (trigger != FinalizationTrigger.MANUAL &&
-			!settings.authorizesAutomaticWrite(session.automaticWriteAuthorization)
+			!settings.authorizesAutomaticWrite(finalizedSession.automaticWriteAuthorization)
 		) {
-			report.ignored(automaticAuthorizationRefusal(session.automaticWriteAuthorization))
+			report.ignored(automaticAuthorizationRefusal(finalizedSession.automaticWriteAuthorization))
 			return
 		}
-		if (!NativeSourceSwitches.isSnapshotCurrent(session.packageName, session.sourceEpoch)) {
-			EventLog.append("native", "${session.packageName} stale finalization refused")
+		if (!NativeSourceSwitches.isSnapshotCurrent(
+				finalizedSession.packageName, finalizedSession.sourceEpoch,
+			)
+		) {
+			EventLog.append("native", "${finalizedSession.packageName} stale finalization refused")
 			report.ignored("source generation changed before resolution")
 			return
 		}
-		val attempt = identity.resolve(session, report.sequence, report.history)
+		val attempt = identity.resolve(finalizedSession, report.sequence, report.history)
 		if (trigger != FinalizationTrigger.MANUAL &&
-			!settings.authorizesAutomaticWrite(session.automaticWriteAuthorization)
+			!settings.authorizesAutomaticWrite(finalizedSession.automaticWriteAuthorization)
 		) {
-			report.ignored(automaticAuthorizationRefusal(session.automaticWriteAuthorization))
+			report.ignored(automaticAuthorizationRefusal(finalizedSession.automaticWriteAuthorization))
 			return
 		}
-		if (!NativeSourceSwitches.isSnapshotCurrent(session.packageName, session.sourceEpoch)) {
+		if (!NativeSourceSwitches.isSnapshotCurrent(
+				finalizedSession.packageName, finalizedSession.sourceEpoch,
+			)
+		) {
 			EventLog.append(
 				"native",
-				"${session.packageName} stale finalization refused after resolution",
+				"${finalizedSession.packageName} stale finalization refused after resolution",
 			)
 			report.ignored("source generation changed during resolution")
 			return
 		}
 		val resolution = attempt.resolution
 		if (resolution == null) {
-			effects.noteIdentity(session, null, report.shadow)
+			effects.noteIdentity(finalizedSession, null, report.shadow)
 			val reason = "video id could not be verified — " +
 				(attempt.refusalReason ?: "no unique candidate corroborated") +
 				"; no scrobble was broadcast because every YouTube entry requires a hyperlink"
-			effects.skip(report, session, reason)
+			effects.skip(report, finalizedSession, reason)
 			onFeedback?.invoke(reason, true)
 			return
 		}
-		if (FinalizedVideoIdentityContract.authority(session.confirmed?.videoId, resolution) == null) {
-			effects.noteIdentity(session, null, report.shadow)
+		if (FinalizedVideoIdentityContract.authority(
+				finalizedSession.confirmed?.videoId, resolution,
+			) == null
+		) {
+			effects.noteIdentity(finalizedSession, null, report.shadow)
 			val reason = "video id could not be verified — " +
-				FinalizedVideoIdentityContract.refusalReason(session.confirmed?.videoId, resolution) +
+				FinalizedVideoIdentityContract.refusalReason(
+					finalizedSession.confirmed?.videoId, resolution,
+				) +
 				"; no scrobble was broadcast because every YouTube entry requires a hyperlink"
-			effects.skip(report, session, reason)
+			effects.skip(report, finalizedSession, reason)
 			onFeedback?.invoke(reason, true)
 			return
 		}
@@ -463,12 +475,27 @@ internal class ProductionFinalizationOrchestrator(
 		val videoId = resolution.videoId
 		val facts = enrichment.facts(videoId)
 		val resolvedTitle = resolution.title ?: facts?.title
-		classification.contradiction(session, resolution, facts)?.let { mismatch ->
-			effects.noteIdentity(session, null, report.shadow)
+		classification.contradiction(finalizedSession, resolution, facts)?.let { mismatch ->
+			effects.noteIdentity(finalizedSession, null, report.shadow)
 			val reason = "video id could not be verified against the finalized snapshot — $mismatch"
-			effects.skip(report, session, reason)
+			effects.skip(report, finalizedSession, reason)
 			onFeedback?.invoke(reason, true)
 			return
+		}
+		// The last thing this finalization learned is the one thing the reducer was
+		// missing when it refused the measured interval. Spend it here, before any
+		// of the decisions below read progress.
+		val session = presentationProvenAfterRefusal(finalizedSession, resolution)
+		// The prefilter ran on the snapshot as it was handed over, whose progress
+		// had been provisionally zeroed. If that zero has just been corrected, its
+		// verdict was about a listen that no longer exists — `played 0%` over 331 s
+		// of real playback — so it is asked again of the corrected one. It is a
+		// pure function of the snapshot, and progress only ever rises here, so
+		// re-asking can withdraw a complaint and never invent one.
+		val prefilter = if (session === finalizedSession) {
+			prefilterReason
+		} else {
+			eligibility.prefilter(session)
 		}
 		classification.rememberVerified(session, resolution, facts, report.shadow)
 		effects.noteIdentity(session, videoId, report.shadow)
@@ -483,7 +510,7 @@ internal class ProductionFinalizationOrchestrator(
 			"${session.packageName} verified start=${session.trackStartedAtEpochSec} → $videoId; " +
 				report.sequence.describe(session.packageName),
 		)
-		if (session.profile.packageProvesSource) {
+			if (session.profile.packageProvesSource) {
 			val route = session.confirmed?.exactIdRoute
 			EventLog.append(
 				"native-id",
@@ -493,10 +520,17 @@ internal class ProductionFinalizationOrchestrator(
 					"${session.packageName} verified $videoId via corroborated resolver (${resolution.source})"
 				},
 			)
-		}
-		if (prefilterReason != null) {
-			effects.skip(report, session, prefilterReason, videoId = videoId, resolvedTitle = resolvedTitle)
-			onFeedback?.invoke(prefilterReason, true)
+			}
+			if (session.profile.publishesDedicatedMusicMetadata) {
+				EventLog.append(
+					"performer",
+					"$videoId resolver performer evidence=" +
+						resolution.performerCreditEvidence,
+				)
+			}
+			if (prefilter != null) {
+			effects.skip(report, session, prefilter, videoId = videoId, resolvedTitle = resolvedTitle)
+			onFeedback?.invoke(prefilter, true)
 			return
 		}
 		if (classification.isMuted(videoId)) {
@@ -636,6 +670,70 @@ internal class ProductionFinalizationOrchestrator(
 				)
 			}
 		}
+	}
+
+	/**
+	 * The proof arrived, a few seconds after the listen ended.
+	 *
+	 * A native source that republishes alternate lengths for one work cannot say
+	 * which of them is the work, so the reducer refuses to report the interval it
+	 * measured until a resolver pins the *currently published* presentation to the
+	 * named work. While the track is playing that proof clears the refusal
+	 * outright. It does not always arrive in time: the pre-resolution is one
+	 * bounded lookup against live listings, and on the device the very same
+	 * resolver answered five seconds *after* finalization —
+	 * `resolved "Oiga, mire, vea" → 97iYm3Y4eKM` against a 331 s page — for a
+	 * listen that had already been zeroed and skipped at `played 0%`. 331 s of
+	 * real listening scored nothing because of when the answer landed.
+	 *
+	 * So the same question is asked once more, here, of the answer this
+	 * finalization itself produced. Nothing weaker is accepted than the live path
+	 * accepts, and the two spend the same evidence:
+	 *
+	 *  * [VideoResolution.presentationDurationCorroborated] — set only by matching
+	 *    code that required the length the player was publishing to be the
+	 *    resolved work's own, which is exactly what
+	 *    `PlaybackInput.PresentationAttributionEstablished` spends;
+	 *  * the resolved work's own length must still be the presentation this
+	 *    listen finalized on, so an interstitial that borrowed the song's title
+	 *    and artist cannot collect the song's seconds;
+	 *  * [SessionSnapshot.refusedFinalPresentationMs], never the running
+	 *    [SessionSnapshot.unattributedMeasuredMs] total — a 26 s pre-roll followed
+	 *    by a 331 s song reaches finalization as 357 s, and only the second half
+	 *    of it was measured on the presentation being proven here.
+	 *
+	 * Nothing is invented. The interval is one the reducer measured and set aside,
+	 * and if any leg is missing it stays set aside.
+	 */
+	private fun presentationProvenAfterRefusal(
+		session: SessionSnapshot,
+		resolution: VideoResolution,
+	): SessionSnapshot {
+		if (session.playedMs > 0) return session
+		val refused = session.refusedFinalPresentationMs.takeIf { it > 0 } ?: return session
+		if (!resolution.presentationDurationCorroborated) return session
+		val presentationMs = session.durationMs?.takeIf { it > 0 } ?: return session
+		val provenSec = resolution.lengthSeconds?.takeIf { it > 0 } ?: return session
+		val presentationSec = Math.round(presentationMs / 1000.0)
+		if (Math.abs(provenSec - presentationSec) > VideoIdResolver.DURATION_TOLERANCE_SEC) {
+			return session
+		}
+		EventLog.append(
+			"native-identity",
+			"${session.packageName} ${resolution.videoId} proved the ${presentationSec}s " +
+				"presentation after the listen was finalized; the ${refused / 1000}s measured " +
+				"on it is credited to the named work rather than lost to the order the " +
+				"answer arrived in",
+		)
+		return session.copy(
+			playedMs = refused,
+			// Spent, not duplicated: what is now progress may not also be reported
+			// as measured-and-refused.
+			unattributedMeasuredMs = (session.unattributedMeasuredMs - refused)
+				.coerceAtLeast(0),
+			refusedFinalPresentationMs = 0,
+			percentPlayed = refused.toDouble() / presentationMs,
+		)
 	}
 
 	private fun automaticAuthorizationRefusal(

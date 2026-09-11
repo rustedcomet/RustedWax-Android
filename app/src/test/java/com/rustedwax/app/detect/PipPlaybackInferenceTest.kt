@@ -167,8 +167,7 @@ class PipPlaybackInferenceTest {
 		assertEquals(first.next, again.next)
 	}
 	/**
-	 * Why picture-in-picture looks like it works "half the time" — measured on the
-	 * a reduced test-device observation, and it is not a defect.
+	 * Why picture-in-picture may credit no additional time after a completed loop.
 	 *
 	 * Shorts auto-loop and [ForegroundShortTracker] keeps crediting each loop, so
 	 * `playedSeconds` grows without bound. `proofMissing` builds this inference
@@ -178,9 +177,8 @@ class PipPlaybackInferenceTest {
 	 *
 	 * That is the intended cap, not a loss: the tracker banks a full listen the
 	 * moment measured reaches the Short's length, so anything with
-	 * `measuredMs >= durationMs` has already been scored and scrobbled. Device
-	 * evidence for both arms is in
-	 * a reduced field-derived continuity sequence.
+	 * `measuredMs >= durationMs` has already been scored and scrobbled. Both arms
+	 * are represented by the synthetic continuity sequence below.
 	 */
 	@Test
 	fun `a Short that already looped past its length arrives with nothing left to credit`() {

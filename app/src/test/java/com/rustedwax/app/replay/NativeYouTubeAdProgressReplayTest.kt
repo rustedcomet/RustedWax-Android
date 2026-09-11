@@ -217,7 +217,7 @@ class NativeYouTubeAdProgressReplayTest : ReplayScenarioTest() {
 			PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 0),
 			PlaybackEvent.Advance(20_000),
 			PlaybackEvent.PlaybackStateChanged(playing = false, stopped = true, positionMs = 20_000),
-			// Device order at 21:24:09: long metadata first sees the ad position;
+			// Synthetic callback order: long metadata first sees the ad position;
 			// PLAYING repeats it, then publishes the organic position 7 ms later.
 			PlaybackEvent.SessionMetadata(
 				title = primaryTitle,

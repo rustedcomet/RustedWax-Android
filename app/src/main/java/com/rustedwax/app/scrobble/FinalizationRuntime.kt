@@ -396,6 +396,7 @@ object FinalizationRuntime {
 					identity.videoId,
 					durationMs,
 					resolvedTitle = identity.title,
+					identityEvidence = identity,
 				)
 
 				override fun cap(
@@ -582,11 +583,16 @@ object FinalizationRuntime {
 					route = when {
 						resolution.playlistVerified -> NativePreResolvedRoute.PLAYLIST
 						resolution.historyVerified -> NativePreResolvedRoute.HISTORY
+						resolution.musicVideoRow -> NativePreResolvedRoute.MUSIC_VIDEO_ROW
 						resolution.structuredNativeMusic ->
 							NativePreResolvedRoute.STRUCTURED_MUSIC
 
 						else -> NativePreResolvedRoute.RAW_TITLE_CHANNEL
 					},
+					// Passed through from the proof, never re-derived from the route
+					// above. The route says which listing named the work; only the
+					// matcher knows whether it also pinned the length.
+					presentationDurationCorroborated = resolution.presentationDurationCorroborated,
 				),
 			)
 		}
@@ -1040,6 +1046,10 @@ object FinalizationRuntime {
 					idResolver.revalidatePreResolvedNativeMusic(
 						preResolvedNativeId, title, artist, duration,
 					)
+				NativePreResolvedRoute.MUSIC_VIDEO_ROW ->
+					idResolver.revalidateMusicVideoRow(
+						preResolvedNativeId, title, artist, duration,
+					)
 				NativePreResolvedRoute.RAW_TITLE_CHANNEL ->
 					idResolver.resolveVerifiedCandidates(
 						listOf(preResolvedNativeId), title, artist, duration,
@@ -1385,6 +1395,10 @@ object FinalizationRuntime {
 				when (preResolvedRoute) {
 					NativePreResolvedRoute.STRUCTURED_MUSIC ->
 						idResolver.revalidatePreResolvedNativeMusic(
+							preResolvedNativeId, title, artist, duration,
+						)
+					NativePreResolvedRoute.MUSIC_VIDEO_ROW ->
+						idResolver.revalidateMusicVideoRow(
 							preResolvedNativeId, title, artist, duration,
 						)
 					NativePreResolvedRoute.RAW_TITLE_CHANNEL ->
@@ -2190,7 +2204,15 @@ object FinalizationRuntime {
 		// A shadow run has decided; what it must not do is write the decision
 		// down. The Not-logged list is a durable, user-visible record.
 		if (report.shadow) return
-		if (session.playedMs < MIN_NOTABLE_PLAYED_MS) return
+		// A listen the reducer refused to attribute arrives here with `playedMs`
+		// cleared, and that zero is the same zero as "nothing was measured". The
+		// floor exists for the second one — a metadata swap inside three seconds.
+		// Applying it to the first is how a 228s song played end to end left no
+		// trace in History *or* Not logged: the refusal was correct, the silence
+		// was not. The measured interval is used to decide the row is worth
+		// showing and is never scored, which is the one thing it may not become.
+		val notableMs = maxOf(session.playedMs, session.unattributedMeasuredMs)
+		if (notableMs < MIN_NOTABLE_PLAYED_MS) return
 		// §4.1. The Not-logged tab is a durable record too, and a session that was
 		// never proven to be YouTube is a page the user watched somewhere else —
 		// listing its title there is the same disclosure the event log stopped
@@ -2206,10 +2228,24 @@ object FinalizationRuntime {
 		// one, while the user is owed the record of a listen this app measured
 		// and declined. Nothing is invented to fill the gap.
 		val linkedVideoId = videoId?.takeIf { YouTubeProbe.canonicalWatchUrl(it) != null }
+		// The prefilter reason for an unattributed listen is "played 0%", which is
+		// arithmetically true of the cleared counter and false about the evening:
+		// the app measured this time and declined to credit it. Say that instead.
+		// Only the row is reworded — the outcome and the log keep the engine's own
+		// reason, so nothing that classifies refusals changes meaning.
+		val rowReason = if (session.playedMs < MIN_NOTABLE_PLAYED_MS &&
+			session.unattributedMeasuredMs >= MIN_NOTABLE_PLAYED_MS
+		) {
+			"${session.unattributedMeasuredMs / 1000}s played here, but the source never " +
+				"established which presentation was the named work, so none of it could be " +
+				"credited to this track"
+		} else {
+			reason
+		}
 		val record = SkipRecord(
 			title = title,
 			artist = session.artist,
-			reason = reason,
+			reason = rowReason,
 			atEpochSec = clock.nowEpochSeconds(),
 			playedSeconds = session.playedMs / 1000,
 			durationSeconds = durationMs?.takeIf { it > 0 }?.div(1000),
@@ -2222,9 +2258,16 @@ object FinalizationRuntime {
 		_skipped.update { (listOf(record) + it).take(50) }
 	}
 
-	/** Whether a prefiltered refusal is substantial enough to resolve for the UI. */
+	/**
+	 * Whether a prefiltered refusal is substantial enough to resolve for the UI.
+	 *
+	 * Reads the same measure [skip] does, including the interval that was refused
+	 * attribution. The two must agree: this decides whether a title is worth
+	 * resolving for a row, and a listen [skip] will now write would otherwise
+	 * reach it without one.
+	 */
 	private fun couldBecomeUserFacingSkip(session: SessionSnapshot): Boolean =
-		session.playedMs >= MIN_NOTABLE_PLAYED_MS && (
+		maxOf(session.playedMs, session.unattributedMeasuredMs) >= MIN_NOTABLE_PLAYED_MS && (
 			!session.title.isNullOrBlank() ||
 				(session.hasShortSourceProof && !session.ownerHandle.isNullOrBlank())
 		)

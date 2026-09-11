@@ -32,6 +32,65 @@ class PlaybackReducer(
 	)
 
 	fun reduce(state: ListenState, input: PlaybackInput): Transition =
+		withEstablishedTimeline(reduceCore(state, input), input)
+
+	/**
+	 * Nothing is measured until the transport says where in the item it is.
+	 *
+	 * Asked of every reduction rather than of the branches that start the clock,
+	 * because a listen that must not be measured must not be measured by any
+	 * route — and there are several that set [ListenState.playingSinceElapsedMs].
+	 *
+	 * A timeline is established by the first position the transport publishes at
+	 * or after zero, or by the first length it names. Either alone is enough:
+	 * both are statements about a real item, and a source that publishes one
+	 * before the other must not be held back for the second. Once established it
+	 * stays established for the life of the listen — a mid-playback callback that
+	 * happens to carry no position is an ordinary gap, not a return to the
+	 * unknown — and [startNewTrack] clears it, because the next item has to say
+	 * where it is for itself.
+	 *
+	 * While it is not established the clock is simply never started, so the wall
+	 * time spent in that state is not banked and cannot be credited later. When
+	 * it is established the ordinary machinery starts the clock at that moment,
+	 * which is the first instant this listen is known to be an item at a position.
+	 */
+	private fun withEstablishedTimeline(
+		transition: Transition,
+		input: PlaybackInput,
+	): Transition {
+		if (!source.requiresEstablishedTimeline) return transition
+		val state = transition.state
+		val established = state.timelineEstablished ||
+			// The page named the item itself, which is how a page-backed listen
+			// says what it is. Such a session may legitimately publish neither
+			// number for a while, and its length can arrive later from the item's
+			// own page. Never required, only sufficient: the feed tile this gate
+			// exists for names nothing at all.
+			input is PlaybackInput.PageNamedItem ||
+			positionOf(input)?.let { it >= 0 } == true ||
+			(durationOf(input) ?: 0) > 0 ||
+			(state.trackIdentity.durationMs ?: 0) > 0
+		if (!established) {
+			return transition.copy(state = state.copy(playingSinceElapsedMs = null))
+		}
+		if (state.timelineEstablished) return transition
+		return transition.copy(state = state.copy(timelineEstablished = true))
+	}
+
+	private fun positionOf(input: PlaybackInput): Long? = when (input) {
+		is PlaybackInput.TransportChanged -> input.newPositionMs
+		is PlaybackInput.PositionSeen -> input.positionMs
+		else -> null
+	}
+
+	private fun durationOf(input: PlaybackInput): Long? = when (input) {
+		is PlaybackInput.TransportChanged -> input.durationMs
+		is PlaybackInput.MetadataPublished -> input.identity.durationMs
+		else -> null
+	}
+
+	private fun reduceCore(state: ListenState, input: PlaybackInput): Transition =
 		dispatch(state, input).let { transition ->
 			// "Has this transport ever named anything" is exactly "has a bundle
 			// been installed", so it is derived from the effect rather than
@@ -69,6 +128,8 @@ class PlaybackReducer(
 				return@let transition.copy(
 					state = transition.state.copy(
 						organicPresentationDurationMs = exactPublishedPresentation.durationMs,
+						// The transport published the exact item itself.
+						organicAnchorProvenByExactItem = true,
 						presentationUnprovenForNamedWork = false,
 					),
 				)
@@ -93,9 +154,7 @@ class PlaybackReducer(
 	private fun dispatch(state: ListenState, input: PlaybackInput): Transition = when (input) {
 		is PlaybackInput.MetadataPublished -> onMetadata(state, input)
 		is PlaybackInput.TransportChanged -> onTransport(state, input)
-		is PlaybackInput.PositionSeen -> Transition(
-			state.notePosition(input.positionMs, input.establishFirst),
-		)
+		is PlaybackInput.PositionSeen -> onPositionSeen(state, input)
 		is PlaybackInput.SessionDestroyed -> onSessionDestroyed(state, input)
 		is PlaybackInput.Disposed -> onDisposed(state, input)
 		is PlaybackInput.FinalizeRequested -> onFinalizeRequested(state, input)
@@ -106,6 +165,7 @@ class PlaybackReducer(
 			onFreshPlaybackAfterRestartTombstone(state, input)
 		is PlaybackInput.ProgressCarried -> onProgressCarried(state, input)
 		is PlaybackInput.VerifiedLeadIn -> onVerifiedLeadIn(state, input)
+		PlaybackInput.PageNamedItem -> Transition(state)
 		is PlaybackInput.ExactIdEstablished -> Transition(
 			state.copy(trackIdentity = state.trackIdentity.copy(sourceItemId = input.sourceItemId)),
 		)
@@ -132,6 +192,7 @@ class PlaybackReducer(
 		return Transition(
 			state.copy(
 				organicPresentationDurationMs = currentDurationMs,
+				organicAnchorProvenByExactItem = true,
 				presentationUnprovenForNamedWork = false,
 			),
 		)
@@ -242,9 +303,65 @@ class PlaybackReducer(
 		if (leadInSkipsNextPosition) {
 			return copy(leadInSkipsNextPosition = false, lastObservedPositionMs = observed)
 		}
+		// A source restoring a saved position publishes a bare zero — or the tail of
+		// what it was showing a moment ago — *before* it seeks to where the viewer
+		// left off. That reading arrives first, so it becomes the listen's starting
+		// point and the real one never can.
+		//
+		// Regression: a resumed item can publish a near-zero placeholder before a
+		// materially later restored position. Treating the placeholder as the start
+		// would let `restoreCarriedProgress` claim against an unplayed position.
+		//
+		// Nothing has been measured when that happens, which is what makes the
+		// earlier reading discardable: it cannot have been watched. Bounded three
+		// ways — no banked progress, a forward jump too large for any callback gap
+		// to be playback, and only where this reading may establish a start at all.
+		// A seek *after* real playback banks time first and so never reaches here,
+		// which leaves seek protection exactly as it was, and the measured clock is
+		// not touched either way: this decides only where the listen is recorded as
+		// having begun.
+		val restoredAfterPlaceholder = establishFirst &&
+			firstSeenPositionMs != null &&
+			playedMs <= UNMEASURED_START_MS &&
+			pipInferredMs == 0L &&
+			observed - firstSeenPositionMs >= RESTORED_POSITION_JUMP_MS
 		return copy(
-			firstSeenPositionMs = firstSeenPositionMs ?: observed.takeIf { establishFirst },
+			firstSeenPositionMs = if (restoredAfterPlaceholder) {
+				observed
+			} else {
+				firstSeenPositionMs ?: observed.takeIf { establishFirst }
+			},
 			lastObservedPositionMs = observed,
+		)
+	}
+
+	/**
+	 * Record a position and retry a parked native continuation exactly when the
+	 * source replaces its constructor-time placeholder with the credible restored
+	 * position. [notePosition] makes that transition one-shot; requiring an exact
+	 * item id preserves the native carry boundary, and [TrackProgressCarry]'s
+	 * existing contradiction check still decides whether the stored fragment fits.
+	 */
+	private fun onPositionSeen(
+		state: ListenState,
+		input: PlaybackInput.PositionSeen,
+	): Transition {
+		val updated = state.notePosition(input.positionMs, input.establishFirst)
+		val replacedConstructorPlaceholder = input.establishFirst &&
+			state.firstSeenPositionMs != null &&
+			state.firstSeenPositionMs < RESTORED_POSITION_JUMP_MS &&
+			updated.firstSeenPositionMs != state.firstSeenPositionMs
+		return Transition(
+			updated,
+			effects = if (
+				replacedConstructorPlaceholder &&
+				source.requiresExactIdToCarryProgress &&
+				updated.trackIdentity.hasExactSourceItemId
+			) {
+				listOf(PlaybackEffect.RestoreCarriedProgress)
+			} else {
+				emptyList()
+			},
 		)
 	}
 
@@ -492,33 +609,149 @@ class PlaybackReducer(
 				spentPlayedMs >= priorDuration ||
 					(state.lastObservedPositionMs ?: 0) >= priorDuration
 				)
-		val spentSurfaceSuperseded = source.republishesAlternateMediaDurations &&
-			state.presentationUnprovenForNamedWork &&
+		// Whether the outgoing surface was ever shown to be a particular item.
+		//
+		// A source that republishes alternate media lengths answers this with the
+		// proof flags its own attribution writes. A source without that capability
+		// never writes them — both writers are gated on it — so there
+		// `presentationUnprovenForNamedWork` is permanently false and cannot be
+		// asked. What can be asked is whether anything ever named this surface:
+		// the transport publishes no item id for an interstitial, and no resolver
+		// answer has been installed against it either. Once one has, the surface
+		// keeps its seconds exactly as a proven alternate-media presentation does.
+		val outgoingSurfaceUnproven = if (source.republishesAlternateMediaDurations) {
+			state.presentationUnprovenForNamedWork
+		} else {
+			state.trackIdentity.sourceItemId.isNullOrBlank()
+		}
+		// Regression: a source can publish the upcoming item's title over a pre-roll
+		// pod whose duration belongs to neither the interstitial nor the work. If the
+		// unidentified pod runs nearly to its reported end before the genuine
+		// presentation replaces it, the pod interval must remain quarantined. Held by
+		// a capability gate, this rule could not read that shape, so
+		// the interval was banked instead: the listen carried the pod's seconds
+		// across that boundary and every later one, the anchor stayed at the pod's
+		// 127 s, and the work's own seconds were never measured at all.
+		val spentSurfaceSuperseded = outgoingSurfaceUnproven &&
 			priorDuration != null &&
 			newDuration > priorDuration &&
 			outgoingWasSpent
 		if (source.republishesAlternateMediaDurations && !spentSurfaceSuperseded) {
 			val longest = maxOf(priorDuration ?: 0, new.durationMs ?: 0).takeIf { it > 0 }
+			// Whether the presentation being left had been proven to *be* the named
+			// work, which is the only thing that makes the time measured on it that
+			// work's progress.
+			//
+			// This boundary is the last moment the two can be told apart. Carried
+			// across, an unattributed interval becomes indistinguishable from the
+			// next presentation's own, and whichever surface is proven later spends
+			// it: 91 s and 39 s published under one song's title scored that song
+			// 100 % after 110 s of it had actually played, and a 30 s pre-roll did
+			// the same to a 223 s song. Both wrote to the chain.
+			//
+			// A presentation that *was* proven keeps its progress untouched here —
+			// a Song↔Video switch is one listen continuing, and this branch does not
+			// change it.
+			// Proven means *this* surface was proven, not that some earlier one was.
+			//
+			// `presentationUnprovenForNamedWork` cannot answer that on its own:
+			// nothing clears `organicPresentationDurationMs` at a boundary, so the
+			// re-arm in `reduce` is gated shut and every presentation after the
+			// first attribution inherits a proof it never earned. That inheritance
+			// is what carried a 57 s interstitial into a 214 s song on the device
+			// and finalized it at 244 s.
+			//
+			// The organic duration *is* the identity of the proven surface — both
+			// writers set it to that presentation's own published length — so the
+			// outgoing presentation is the proven one exactly when the two agree.
+			// A presentation that really was attributed still keeps its progress,
+			// which is the Song↔Video contract; one that merely followed it does not.
+			// A surface that ran to its own end, wrapped end-to-start, and was then
+			// replaced by a *longer* presentation handed over. It did not continue,
+			// and its seconds stay with it however well it was identified.
+			//
+			// Being proven is not the same as being the item that follows. The
+			// structured route names a real short upload whenever one exists inside
+			// the duration tolerance of the pod slot — `Ets811a2uyQ` at 57 s and
+			// `NxfN16Jtdrk` at 30 s and again at 37 s, one id that cannot be two
+			// lengths — so a pod can hold a genuine exact-item proof and still not
+			// be the song.
+			//
+			// All three conditions are needed, and the third is what the first
+			// attempt at this rule got wrong. Spent-and-wrapped alone fires
+			// symmetrically, and on the device it destroyed a complete 216 s listen
+			// that had merely finished before a pod rather than after one. Requiring
+			// the replacement to be *longer* separates the two orders: short filler
+			// completing into a longer item is the pod shape, and a long item
+			// completing into a shorter one is content followed by filler, whose
+			// earned seconds are its own. `spentSurfaceSuperseded` above already
+			// reads the same shape for the unproven case.
+			//
+			// A Song↔Video switch is untouched: it replaces the rendering mid-item,
+			// so it is neither spent nor wrapped.
+			val outgoingHandedOver = outgoingWasSpent &&
+				state.loopDetected &&
+				priorDuration != null &&
+				newDuration > priorDuration
+			val outgoingWasProven = state.organicAnchorProvenByExactItem &&
+				!outgoingHandedOver &&
+				state.organicPresentationDurationMs != null &&
+				state.trackIdentity.durationMs != null &&
+				kotlin.math.abs(
+					state.trackIdentity.durationMs - state.organicPresentationDurationMs,
+				) <= TrackIdentity.DURATION_REFINEMENT_TOLERANCE_MS
+			val banked = if (outgoingWasProven) state else state.accumulate(input.elapsedRealtimeMs)
+			val refusedMs = if (outgoingWasProven) 0 else banked.playedMs + banked.pipInferredMs
+			val continuing = if (outgoingWasProven) {
+				banked
+			} else {
+				banked.copy(
+					playedMs = 0,
+					pipInferredMs = 0,
+					pipInference = null,
+					// Not progress and never added to any; kept only so the outcome
+					// path can say what was measured and refused rather than report a
+					// zero that also means "nothing played".
+					unattributedMeasuredMs = banked.unattributedMeasuredMs + refusedMs,
+					// The clock restarts against this presentation, so the window that
+					// was still running on the refused one cannot be banked into it.
+					playingSinceElapsedMs = input.elapsedRealtimeMs
+						.takeIf { banked.transport == TransportState.PLAYING },
+				)
+			}
 			return Transition(
-				state.copy(
+				continuing.copy(
 					longestDurationMs = longest,
 					// The current representation owns payload and resolver fields. Song
 					// and Video are different exact catalog items, so only progress and
 					// the logical listen token survive the presentation boundary.
 					trackIdentity = new.copy(sourceItemId = null),
 				),
-				before = listOf(
-					PlaybackEffect.CancelStoppedFinalizationGrace,
-					PlaybackEffect.CancelContinuation,
-					PlaybackEffect.InvalidateInFlightIdentityRequest,
-					PlaybackEffect.ClearPreResolvedNativeIdentity,
-					PlaybackEffect.Note(
-						"native-identity",
-						"reported an alternate media length " +
-							"(${state.trackIdentity.durationMs?.div(1000)}s → " +
-							"${new.durationMs?.div(1000)}s) for the same work; keeping one listen",
-					),
-				),
+				before = buildList {
+					add(PlaybackEffect.CancelStoppedFinalizationGrace)
+					add(PlaybackEffect.CancelContinuation)
+					add(PlaybackEffect.InvalidateInFlightIdentityRequest)
+					add(PlaybackEffect.ClearPreResolvedNativeIdentity)
+					add(
+						PlaybackEffect.Note(
+							"native-identity",
+							"reported an alternate media length " +
+								"(${state.trackIdentity.durationMs?.div(1000)}s → " +
+								"${new.durationMs?.div(1000)}s) for the same work; keeping one listen",
+						),
+					)
+					if (refusedMs > 0) {
+						add(
+							PlaybackEffect.Note(
+								"native-identity",
+								"the ${refusedMs / 1000}s measured on the " +
+									"${state.trackIdentity.durationMs?.div(1000)}s presentation was " +
+									"never attributed to the named work, so it is not carried into " +
+									"the ${new.durationMs?.div(1000)}s one; measurement restarts here",
+							),
+						)
+					}
+				},
 				effects = listOf(
 					PlaybackEffect.InstallMetadata,
 					PlaybackEffect.RequestCarryAuthority,
@@ -652,12 +885,38 @@ class PlaybackReducer(
 			)
 		if (provisionalAnchorSuperseded) {
 			val provisionalPlayedMs = state.playedMsAt(input.elapsedRealtimeMs)
+			// The identity this listen holds was resolved *for the surface being
+			// discarded*. Where one work is published as several presentations,
+			// that answer describes the surface it was asked about and not the one
+			// replacing it: the interval is thrown away here precisely because it
+			// belonged to something else, and the id proved alongside it belonged
+			// to the same something else.
+			//
+			// Inheriting it is how a legitimate song lost its only chance to be
+			// identified. A 91 s surface wearing "Solid As A Rock" resolved to a
+			// real 91 s upload; when the 213 s song replaced it the listen still
+			// held that id and had just been marked unambiguous, so
+			// `listenNeedsPresentationProof` saw an identified, attributed listen
+			// and never asked again. The song played to the end without one lookup
+			// of its own, and the interstitial's id was the first thing
+			// finalization tried to re-verify. The alternate-media boundary above
+			// already drops the id and re-asks for exactly this reason; this branch
+			// is the same boundary reached by the other route.
+			//
+			// Only the *inherited* id is dropped. One the transport published on
+			// this bundle is this presentation's own. And a source that publishes a
+			// single presentation per work never reaches this: it has no second
+			// presentation to confuse the first with, and its id is often the only
+			// evidence a backgrounded tab has left.
+			val discardsProvisionalIdentity = source.republishesAlternateMediaDurations
 			return Transition(
 				state.copy(
 					trackIdentity = new.copy(
 						artist = new.artist ?: state.trackIdentity.artist,
 						album = new.album ?: state.trackIdentity.album,
-						sourceItemId = new.sourceItemId ?: state.trackIdentity.sourceItemId,
+						sourceItemId = new.sourceItemId
+							?: state.trackIdentity.sourceItemId
+								.takeUnless { discardsProvisionalIdentity },
 						durationMs = newDuration,
 					),
 					// The discarded interval belonged to the surface being
@@ -673,6 +932,20 @@ class PlaybackReducer(
 					loopDetected = false,
 					longestDurationMs = newDuration,
 					organicPresentationDurationMs = newDuration,
+					// The anchor this branch establishes is presentation evidence, not
+					// an exact-item proof: a surface ran to its own end and a longer one
+					// began under the same title. That is enough to measure this
+					// presentation — which is the whole of Bug 5 — and it is *not*
+					// enough to spend this presentation's seconds on whatever replaces
+					// it later.
+					//
+					// Leaving them indistinguishable is what inflated the device: a 19 s
+					// pod, spent, superseded by a 45 s pod that took this anchor for
+					// free, then a 214 s song that read the anchor back as
+					// `outgoingWasProven` and inherited the 45 s, finalizing at
+					// `244s of 214s`. Nothing in that chain had been identified as the
+					// song.
+					organicAnchorProvenByExactItem = false,
 					organicPresentationRebased = false,
 					durationReplacementMs = null,
 					durationReplacementOrganicPositionMs = null,
@@ -684,24 +957,53 @@ class PlaybackReducer(
 					playingSinceElapsedMs = input.elapsedRealtimeMs
 						.takeIf { state.transport == TransportState.PLAYING },
 				),
-				before = listOf(
-					PlaybackEffect.CancelStoppedFinalizationGrace,
-					PlaybackEffect.CancelContinuation,
-					PlaybackEffect.Note(
-						"native-identity",
-						"a ${priorDuration / 1000}s presentation held this listen for " +
-							"${provisionalPlayedMs / 1000}s before a ${newDuration / 1000}s " +
-							"presentation replaced it under the same title; the shorter surface " +
-							"never established an organic anchor, so its interval is discarded " +
-							"and organic measurement starts here",
-					),
-				),
-				effects = listOf(
-					PlaybackEffect.InstallMetadata,
-					PlaybackEffect.LogMetadata(
-						"organic presentation established after a provisional surface",
-					),
-				),
+				before = buildList {
+					add(PlaybackEffect.CancelStoppedFinalizationGrace)
+					add(PlaybackEffect.CancelContinuation)
+					if (discardsProvisionalIdentity) {
+						// An answer still in flight for the discarded surface must not
+						// land on this one, and the carried pre-resolution must not be
+						// what finalization re-verifies first.
+						add(PlaybackEffect.InvalidateInFlightIdentityRequest)
+						add(PlaybackEffect.ClearPreResolvedNativeIdentity)
+					}
+					add(
+						PlaybackEffect.Note(
+							"native-identity",
+							"a ${priorDuration / 1000}s presentation held this listen for " +
+								"${provisionalPlayedMs / 1000}s before a ${newDuration / 1000}s " +
+								"presentation replaced it under the same title; the shorter surface " +
+								"never established an organic anchor, so its interval is discarded " +
+								"and organic measurement starts here",
+						),
+					)
+					if (discardsProvisionalIdentity) {
+						add(
+							PlaybackEffect.Note(
+								"native-identity",
+								"the id proved against the ${priorDuration / 1000}s surface is " +
+									"discarded with it; the ${newDuration / 1000}s presentation is " +
+									"asked for its own",
+							),
+						)
+					}
+				},
+				effects = buildList {
+					add(PlaybackEffect.InstallMetadata)
+					// After the install, so the lookup is made against the
+					// presentation that replaced the discarded one. Bounded by the
+					// same semantic-key/duration signature every other request is:
+					// this asks once for this presentation, not once per callback.
+					// Requesting here rather than waiting for the next PLAYING
+					// callback matters — this source can publish a new presentation
+					// with no transport callback behind it for many seconds.
+					if (discardsProvisionalIdentity) add(PlaybackEffect.RequestCarryAuthority)
+					add(
+						PlaybackEffect.LogMetadata(
+							"organic presentation established after a provisional surface",
+						),
+					)
+				},
 			)
 		}
 		// The source has replaced the established presentation with a materially
@@ -957,6 +1259,33 @@ class PlaybackReducer(
 				),
 			)
 		}
+		// An item that never said where it was, and that the page never named, is
+		// not a listen to file. The clock was never started for it, so this is a
+		// row with nothing in it: the feed tile the viewer scrolled past, arriving
+		// as a track change when the next one begins. Suppressed rather than
+		// reported at zero — the same answer a foreground Short already gets — and
+		// that is also what keeps watch history, the watch page's length and the
+		// threshold from ever being asked about it.
+		if (source.requiresEstablishedTimeline && !state.timelineEstablished) {
+			return Transition(
+				state.copy(
+					playedMs = 0,
+					pipInferredMs = 0,
+					playingSinceElapsedMs = null,
+					finalized = true,
+				),
+				before = listOf(
+					PlaybackEffect.CancelStoppedFinalizationGrace,
+					PlaybackEffect.CancelContinuation,
+					PlaybackEffect.Note(
+						"playback",
+						"[${input.reason}] the page never published a position or a length for " +
+							"this item and never named it, so nothing was measured and there is " +
+							"no listen to file",
+					),
+				),
+			)
+		}
 		// Every terminal event in the app arrives here — STOPPED, the next track,
 		// session teardown, disposal, the idle deadline — so this is the one place
 		// that has to refuse. While the source has published lengths this reducer
@@ -972,6 +1301,20 @@ class PlaybackReducer(
 			return Transition(
 				state.copy(
 					playedMs = 0,
+					// Not progress, and never added to any. Recorded so the outcome
+					// path can say "228s were measured and none of them could be
+					// credited" instead of vanishing on a zero that also means
+					// "nothing happened".
+					//
+					// Added to rather than assigned: a presentation boundary may
+					// already have refused an earlier surface's interval, and the
+					// explanation owes the user both.
+					unattributedMeasuredMs = state.unattributedMeasuredMs +
+						state.playedMsAt(input.elapsedRealtimeMs),
+					// The same interval, kept apart from the earlier surfaces' so a
+					// consumer that later proves *this* presentation can tell which
+					// part of the refusal it just answered for.
+					refusedFinalPresentationMs = state.playedMsAt(input.elapsedRealtimeMs),
 					pipInferredMs = 0,
 					pipInference = null,
 					playingSinceElapsedMs = null,
@@ -1472,6 +1815,8 @@ class PlaybackReducer(
 	): ListenState = copy(
 		describingTabOnly = false,
 		playedMs = 0,
+		unattributedMeasuredMs = 0,
+		refusedFinalPresentationMs = 0,
 		longestDurationMs = null,
 		durationReplacementMs = null,
 		durationReplacementOrganicPositionMs = null,
@@ -1480,6 +1825,7 @@ class PlaybackReducer(
 		durationReplacementReturnGraceScheduled = false,
 		durationReplacementCandidatePositionMs = null,
 		organicPresentationDurationMs = null,
+		organicAnchorProvenByExactItem = false,
 		organicPresentationRebased = false,
 		presentationUnprovenForNamedWork = false,
 		lastObservedPositionMs = null,
@@ -1488,6 +1834,7 @@ class PlaybackReducer(
 		fastestSpeedSeen = 1.0,
 		firstSeenPositionMs = null,
 		loopDetected = false,
+		timelineEstablished = false,
 		playingSinceElapsedMs = elapsedRealtimeMs.takeIf { transport == TransportState.PLAYING },
 		startedAtEpochSec = nowMillis / 1000,
 		finalized = false,
@@ -1544,6 +1891,22 @@ class PlaybackReducer(
 		const val DURATION_REBASE_MAX_TOLERANCE_MS = 180_000L
 
 		const val ORGANIC_ANCHOR_SUPERSEDE_FACTOR = 10L
+
+		/**
+		 * Banked progress below which a listen has not yet measured anything.
+		 *
+		 * A couple of transport callbacks' worth, so the placeholder a restoring
+		 * source publishes is still inside it and any real viewing is not.
+		 */
+		const val UNMEASURED_START_MS = 3_000L
+
+		/**
+		 * A forward position jump no callback gap can explain as playback.
+		 *
+		 * The same distance [com.rustedwax.app.detect.SessionSnapshot.UNOBSERVED_LEAD_IN_MS]
+		 * uses to decide a mid-item start is a resume rather than ordinary timing.
+		 */
+		const val RESTORED_POSITION_JUMP_MS = 10_000L
 
 		/** Fractions of the item that make a position reset a wrap and not a seek. */
 		const val LOOP_END_FRACTION = 0.8
@@ -1609,6 +1972,34 @@ data class ListenState(
 	/** Content milliseconds banked so far. The running window is not included. */
 	val playedMs: Long = 0,
 	/**
+	 * What was measured under this title and then refused attribution, in ms.
+	 *
+	 * Written only where [playedMs] is cleared because the source never
+	 * established which presentation was the named work. It is deliberately not
+	 * progress and may never be added to anything: the whole point of clearing
+	 * [playedMs] is that this interval may belong to an interstitial. It exists so
+	 * the outcome path can tell "nothing was measured" apart from "something was
+	 * measured and could not be credited", which are the same zero and owe the
+	 * user very different explanations.
+	 */
+	val unattributedMeasuredMs: Long = 0,
+	/**
+	 * Of [unattributedMeasuredMs], the part measured on the presentation this
+	 * listen finalized on, in ms.
+	 *
+	 * [unattributedMeasuredMs] is a running total across presentation boundaries,
+	 * so it cannot say how much of itself belongs to the surface that is still
+	 * published at the end — a 26 s interstitial and the 331 s song after it reach
+	 * finalization as one 357 s number, and crediting that to the song would score
+	 * it 107 %. This names the second half of that alone.
+	 *
+	 * Still not progress. Written only where [playedMs] is cleared, exactly like
+	 * [unattributedMeasuredMs], and readable only by a consumer that has since
+	 * obtained the very proof whose absence cleared it. Nothing in this reducer
+	 * ever adds it back.
+	 */
+	val refusedFinalPresentationMs: Long = 0,
+	/**
 	 * The elapsed-realtime reading when the played clock started running, or
 	 * null when it is not running.
 	 *
@@ -1619,6 +2010,14 @@ data class ListenState(
 	 * else's device.
 	 */
 	val playingSinceElapsedMs: Long? = null,
+	/**
+	 * The transport has said where in the item it is, at least once.
+	 *
+	 * Only consulted where [PlaybackSourceCapabilities.requiresEstablishedTimeline]
+	 * says the source can play something that never will. See
+	 * `PlaybackReducer.withEstablishedTimeline`.
+	 */
+	val timelineEstablished: Boolean = false,
 	val transport: TransportState = TransportState.OTHER,
 	val speed: Double = 1.0,
 	/** Highest rate scored for this track, for the finalize line only. */
@@ -1647,6 +2046,23 @@ data class ListenState(
 	val durationReplacementCandidatePositionMs: Long? = null,
 	/** Current organic duration surface when the source rebased from total to remaining time. */
 	val organicPresentationDurationMs: Long? = null,
+	/**
+	 * Whether [organicPresentationDurationMs] was set by a *live exact-item
+	 * proof*, rather than by presentation evidence alone.
+	 *
+	 * Two very different things write that anchor. A proof — the source's own
+	 * exact id, or a resolver answer whose length had to be this presentation's —
+	 * says *which item is playing*. The spent-surface supersede says only that
+	 * something short ended and something longer began under the same title,
+	 * which is enough to start measuring and is not enough to say what is
+	 * playing.
+	 *
+	 * Only the first may authorize carrying a presentation's seconds across a
+	 * later boundary into whatever replaces it. Reading the anchor without asking
+	 * which of the two wrote it is how an unidentified pod surface's time reached
+	 * a song's `percent_played`.
+	 */
+	val organicAnchorProvenByExactItem: Boolean = false,
 	/** True only after the bounded total-minus-played arithmetic established that rebase. */
 	val organicPresentationRebased: Boolean = false,
 	/**
@@ -1901,6 +2317,14 @@ sealed interface PlaybackInput {
 	 * to use it, because the field used to carry a source-specific identifier and that is how a shared
 	 * reducer quietly acquires a platform.
 	 */
+	/**
+	 * The page named the item it is playing, latched for this track.
+	 *
+	 * Carries nothing: it is a statement that this session is a chosen item
+	 * rather than a feed tile, consumed only by the established-timeline gate.
+	 */
+	data object PageNamedItem : PlaybackInput
+
 	data class ExactIdEstablished(val sourceItemId: String) : PlaybackInput
 
 	/**

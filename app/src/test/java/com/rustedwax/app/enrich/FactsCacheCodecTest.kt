@@ -1,6 +1,7 @@
 package com.rustedwax.app.enrich
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -13,6 +14,7 @@ class FactsCacheCodecTest {
 			title = "The Mask",
 			author = "Sona Darus",
 			ownerHandle = "@sonadarus",
+			watchPageArtistCredit = "Sona Darus",
 			lengthSeconds = 158,
 			watchPageResolved = true,
 		)
@@ -26,7 +28,7 @@ class FactsCacheCodecTest {
 	}
 
 	@Test
-	fun `legacy cache cannot silently become owner-handle proof`() {
+	fun `legacy cache cannot silently acquire owner-handle provenance`() {
 		assertNull(
 			FactsCache.decode(
 				"s8ZQSxuKPb0",
@@ -34,5 +36,16 @@ class FactsCacheCodecTest {
 			),
 		)
 		assertNull(FactsCache.decode("s8ZQSxuKPb0", """{"title":"The Mask"}"""))
+	}
+
+	@Test
+	fun `legacy cache without artist-credit provenance remains descriptively unknown`() {
+		val facts = FactsCache.decode(
+			"s8ZQSxuKPb0",
+			"""{"title":"The Mask","watchPageResolved":true,"ownerHandle":null,"originalArtist":"Someone"}""",
+		)
+		assertNotNull(facts)
+		assertEquals("Someone", facts?.originalArtist)
+		assertNull(facts?.watchPageArtistCredit)
 	}
 }

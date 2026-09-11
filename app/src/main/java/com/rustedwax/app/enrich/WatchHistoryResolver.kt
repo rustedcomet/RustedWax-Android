@@ -3,6 +3,7 @@ package com.rustedwax.app.enrich
 import com.rustedwax.youtube.identity.VideoResolution
 import com.rustedwax.youtube.identity.VideoResolutionAttempt
 import com.rustedwax.youtube.identity.VideoResolutionFailure
+import com.rustedwax.youtube.identity.PerformerCreditEvidence
 
 import com.rustedwax.app.detect.EventLog
 import com.rustedwax.app.storage.YouTubeSessionVault
@@ -171,14 +172,20 @@ class WatchHistoryResolver private constructor(
 						"0 = newest)",
 				)
 				VideoResolutionAttempt(
-					resolution = VideoResolution(
-						videoId = entry.videoId,
-						source = "watch history",
-						title = entry.title,
-						channel = entry.channel,
-						lengthSeconds = entry.lengthSeconds,
-						uniquelyResolved = true,
-						historyVerified = true,
+					resolution = NativeStructuredMusicMatcher.withPerformerCreditEvidence(
+						candidate = VideoResolution(
+							videoId = entry.videoId,
+							source = "watch history",
+							title = entry.title,
+							channel = entry.channel,
+							lengthSeconds = entry.lengthSeconds,
+							uniquelyResolved = true,
+							historyVerified = true,
+						),
+						nativeTitle = title ?: entry.title.orEmpty(),
+						nativeArtist = channel.orEmpty(),
+						durationSec = durationSec,
+						evidence = PerformerCreditEvidence.YOUTUBE_LISTING_COMPLETE_CREDIT,
 					),
 				)
 			}

@@ -9,7 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Interstitials published under the named work's own metadata, from captured traces.
+ * Interstitials published under the named work's own metadata, reduced to synthetic traces.
  *
  * YouTube Music publishes the upcoming song's title and artist while a pre-roll
  * owns the transport's duration and position. The captured interstitial bundle is
@@ -622,7 +622,16 @@ class YouTubeMusicInterstitialProgressTest {
 	}
 
 	@Test
-	fun `native YouTube still quarantines rather than supersedes below its own factor`() {
+	fun `a spent unproven native surface supersedes below the factor`() {
+		// Regression: a pre-roll pod wearing the *upcoming*
+		// item's title held 124963 ms of `Sponsored · 1 of 2`, ran past its own end,
+		// and handed every one of those seconds to the 213 s presentation that
+		// replaced it — while the real item's own seconds were never measured at all.
+		//
+		// Nothing had named the 30 s surface, and a surface nothing has named cannot
+		// spend its seconds on the one that replaced it. That is the same standard
+		// this file already applies to an alternate-media source; only the gate that
+		// kept it from being asked here has moved.
 		val title = "Nobody Is Buying Jordans Anymore"
 		val reducer = PlaybackReducer(nativeYouTube)
 
@@ -630,16 +639,37 @@ class YouTubeMusicInterstitialProgressTest {
 			listen(identity(title, "Ballinonabudget", 30_000)),
 			transport(elapsedRealtimeMs = 0, positionMs = 0, durationMs = 30_000),
 		).state
-		// Spent by its own length, which for a source without alternate media
-		// presentations must change nothing at all.
 		val replaced = reducer.reduce(state, metadata(identity(title, "Ballinonabudget", 213_000), 40_000))
 		state = replaced.state
+		assertEquals("the spent surface's interval is not the replacement's", 0L, state.playedMs)
+		assertEquals(213_000L, state.longestDurationMs)
+		assertTrue(
+			notes(replaced),
+			notes(replaced).contains("its interval is discarded and organic measurement starts here"),
+		)
+	}
+
+	@Test
+	fun `an unspent native surface still quarantines below its own factor`() {
+		// The other shape, and the one the rule must not touch: a presentation left
+		// *before* its own end has not handed over, so a materially different length
+		// below the supersede factor is still a quarantine and its measured seconds
+		// are still its own.
+		val title = "Nobody Is Buying Jordans Anymore"
+		val reducer = PlaybackReducer(nativeYouTube)
+
+		var state = reducer.reduce(
+			listen(identity(title, "Ballinonabudget", 30_000)),
+			transport(elapsedRealtimeMs = 0, positionMs = 0, durationMs = 30_000),
+		).state
+		val replaced = reducer.reduce(state, metadata(identity(title, "Ballinonabudget", 213_000), 20_000))
+		state = replaced.state
 		assertEquals(
-			"a 7.1x native replacement is still a quarantine, not a supersede",
+			"a 7.1x native replacement of an unspent surface is still a quarantine",
 			213_000L,
 			state.durationReplacementMs,
 		)
-		assertEquals(40_000L, state.playedMs)
+		assertEquals(20_000L, state.playedMs)
 		assertTrue(notes(replaced), notes(replaced).contains("quarantining replacement measurement"))
 	}
 

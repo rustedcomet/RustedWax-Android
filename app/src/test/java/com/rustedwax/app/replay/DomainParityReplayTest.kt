@@ -198,6 +198,8 @@ class DomainParityReplayTest : ReplayScenarioTest() {
 						videoId = "dQw4w9WgXcQ",
 						title = "Never Gonna Give You Up",
 						author = "Rick Astley",
+						originalArtist = "Rick Astley",
+						watchPageArtistCredit = "Rick Astley",
 						lengthSeconds = 213,
 						category = "Music",
 						watchPageResolved = true,

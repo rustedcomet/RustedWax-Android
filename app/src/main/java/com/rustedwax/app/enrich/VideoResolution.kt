@@ -128,7 +128,7 @@ object VideoIdentityCorroborator {
 					"contradicts foreground handle $wantedHandle"
 			}
 		}
-		val structuredNativeCompatible = if (resolution.structuredNativeMusic) {
+		val structuredNativeCompatible = if (resolution.structuredNativeMusic) run {
 			val frozenTitle = session.title
 			val frozenArtist = session.artist
 			val frozenDuration = identityDurationMs(session)?.div(1000)
@@ -138,15 +138,35 @@ object VideoIdentityCorroborator {
 			) {
 				return "structured native music proof was incomplete at finalization"
 			}
-			val resolutionMatches = NativeStructuredMusicMatcher.matches(
-				resolution, frozenTitle, frozenArtist, frozenDuration,
-			)
 			val finalWatchFacts = VideoResolution(
 				videoId = facts.videoId,
 				source = "final watch facts",
 				title = facts.title,
 				channel = facts.author,
 				lengthSeconds = facts.lengthSeconds,
+			)
+			// The video-shelf route proved the work against the catalog row, whose
+			// exact id is re-fetched here. YouTube may spell the page title
+			// differently, and its uploader is best-effort metadata rather than a
+			// performer gate. Keep the row's work and both duration checks, but do
+			// not let the uploader authorize or veto the verified id.
+			if (resolution.musicVideoRow) {
+				if (facts.videoId != resolution.videoId ||
+					!NativeStructuredMusicMatcher.corroboratesWorkAndLength(
+						resolution, frozenTitle, frozenDuration,
+					) ||
+					!NativeStructuredMusicMatcher.corroboratesWorkAndLength(
+						resolution.copy(lengthSeconds = facts.lengthSeconds),
+						frozenTitle,
+						frozenDuration,
+					)
+				) {
+					return "the music video row no longer corroborates this exact id, work, and length"
+				}
+				return@run true
+			}
+			val resolutionMatches = NativeStructuredMusicMatcher.matches(
+				resolution, frozenTitle, frozenArtist, frozenDuration,
 			)
 			val factsMatch = NativeStructuredMusicMatcher.matches(
 				finalWatchFacts,
@@ -166,7 +186,33 @@ object VideoIdentityCorroborator {
 					frozenTitle,
 					resolution.creditedArtists,
 					frozenDuration,
-				)
+				) ||
+				// The row-backed route's own question, re-asked as it was answered.
+				// [VideoIdResolver.cardBackedYouTubeMusicResolution] resolves an id
+				// from a catalog row whose work *and complete credit* the player
+				// matched exactly, at the player's own length, and requires of the
+				// page only that it be that length and name that work — precisely
+				// because the page cannot always restate the credit: it is a
+				// distributor's upload, or it spells the upload differently. Asking
+				// it here to restate the credit anyway discarded ids that route had
+				// correctly produced, and with them every second measured against
+				// them.
+				//
+				// Reachable only for a resolution carrying the row's own credit, so
+				// a search-listing route — which carries none — is unaffected. It
+				// asserts nothing about the performer: `performerCreditEvidence` is
+				// descriptive metadata only, so a distributor-hosted upload remains
+				// eligible once id, work and length are verified.
+				//
+				// The page's owner is not asked. A `- Topic` or `VEVO` name, like a label's,
+				// says only who hosts the file; the uploader neither authorizes nor vetoes
+				// the id this route verified.
+				(
+					resolution.creditedArtists.isNotEmpty() &&
+						NativeStructuredMusicMatcher.corroboratesWorkAndLength(
+							finalWatchFacts, frozenTitle, frozenDuration,
+						)
+					)
 
 			val sameIdMusicClientMatch =
 				session.packageName == YouTubeProbe.YOUTUBE_MUSIC_PACKAGE &&
@@ -331,8 +377,29 @@ object VideoIdentityCorroborator {
 				alternateTitle?.takeIf { it != title }?.let { " (displayed \"$it\")" }.orEmpty() +
 				" contradicts ended title \"$frozenTitle\""
 		}
+		// The candidate's own title is "<the artist this session named> - <the
+		// exact title this session named>", and the length agrees.
+		//
+		// The whole of the difference between this and an ordinary weak title is
+		// that the candidate adds *nothing* of its own: not a version, not a
+		// venue, not a featured act — only the artist's name the session had
+		// already published. `"Doomed (Live At Wembley)"` and `"Bring Me The
+		// Horizon - Doomed (MAPHRA Vocal Cover)"` both fail it, because their
+		// remainder is not the session's title.
+		//
+		// Computed here rather than beside the owner comparison below because both
+		// predicates need it. Regression: an artist-prefixed exact work must not be
+		// reduced to weak title evidence merely because owner spelling differs.
+		val artistPrefixedTitle = title != null &&
+			SearchResultsParser.titleNamesArtistThenSession(
+				sessionTitle = frozenTitle.orEmpty(),
+				sessionArtist = session.artist,
+				candidateTitle = title,
+			) &&
+			SessionProbe.durationsCorroborate(frozenDurationMs, lengthSeconds)
 		if (!allowStructuredNativeMusic &&
 			titleEvidence == VideoTitleMatcher.Evidence.WEAK_SHORT_CANONICAL_CORE &&
+			!artistPrefixedTitle &&
 			!(
 				allowWeakTitleAlias &&
 					(SessionProbe.durationsCorroborate(frozenDurationMs, lengthSeconds) ||
@@ -356,27 +423,10 @@ object VideoIdentityCorroborator {
 				"video id $videoId for the ended track"
 		}
 
-		val frozenChannel = session.artist
-		if (session.ownerHandle == null && !channel.isNullOrBlank() && !frozenChannel.isNullOrBlank()) {
-			val wanted = SearchResultsParser.channelKey(frozenChannel)
-			val actual = SearchResultsParser.channelKey(channel)
-			val titleAndDurationCorroborate = titleEvidence != null &&
-				titleEvidence != VideoTitleMatcher.Evidence.CONTRADICTION &&
-				SessionProbe.durationsCorroborate(frozenDurationMs, lengthSeconds)
-
-			val bylineLeaderMatches = wanted != null && titleAndDurationCorroborate &&
-				SearchResultsParser.collaboratorLeader(channel)
-					?.let { SearchResultsParser.channelKey(it) } == wanted
-			if (wanted != null && actual != null && wanted != actual &&
-				!bylineLeaderMatches &&
-				!(sameObservedGeneration && titleAndDurationCorroborate) &&
-				!allowCollaborativeByline && !allowStructuredNativeMusic &&
-				!(allowChannelAlias &&
-					(titleAndDurationCorroborate || allowFinalizedTwoFieldIdentity))
-			) {
-				return "$label channel \"$channel\" contradicts ended channel \"$frozenChannel\""
-			}
-		}
+		// The uploader is best-effort metadata. A label, a distributor, a fan channel
+		// and the artist's own page can all host the same video, so the channel name
+		// neither authorizes nor vetoes an id: the title above and the length below
+		// are what bind it.
 
 		if (SessionProbe.durationsDisagree(frozenDurationMs, lengthSeconds)) {
 			return "$label duration ${lengthSeconds}s contradicts ended duration " +

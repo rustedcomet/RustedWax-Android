@@ -3,6 +3,7 @@ package com.rustedwax.app.enrich
 import com.rustedwax.youtube.identity.VideoResolution
 import com.rustedwax.youtube.identity.VideoResolutionAttempt
 import com.rustedwax.youtube.identity.VideoResolutionFailure
+import com.rustedwax.youtube.identity.PerformerCreditEvidence
 
 import com.rustedwax.app.detect.EventLog
 import com.rustedwax.app.detect.TitleParser
@@ -182,17 +183,7 @@ class VideoIdResolver {
 				refusalReason = "predecessor playlist discovery returned no public lists",
 			)
 		}
-		if (candidates.size > MAX_PREDECESSOR_PLAYLIST_CANDIDATES) {
-			EventLog.append(
-				"resolve",
-				"predecessor playlist search returned ${candidates.size} lists, above the bounded " +
-					"$MAX_PREDECESSOR_PLAYLIST_CANDIDATES-list verification budget; refusing inference",
-			)
-			return VideoResolutionAttempt(
-				refusalReason = "predecessor playlist candidate set exceeded the bounded verification budget",
-				failure = VideoResolutionFailure.AMBIGUOUS,
-			)
-		}
+		predecessorPlaylistBudgetRefusal(candidates.size)?.let { return it }
 
 		// A playlist page temporarily holds the HTML, extracted JSON and parsed
 		// candidates together. Fetching every discovery result at once drove the
@@ -238,7 +229,12 @@ class VideoIdResolver {
 				"adjacent predecessors $firstVideoId → $secondVideoId identified " +
 					"${containing.size} public playlists, but the immediate next rows left " +
 					"${matchingFollowers.size} ids matching \"$title\" (${durationSec}s); " +
-					"${if (matchingFollowers.isEmpty()) "none qualify" else "ambiguous, refusing inference"}",
+					if (matchingFollowers.isEmpty()) {
+						"none qualify"
+					} else {
+						"ambiguous identity — candidates were evaluated and disagree, " +
+							"refusing inference and stopping the identity chain"
+					},
 			)
 			return VideoResolutionAttempt(
 				refusalReason = if (matchingFollowers.isEmpty()) {
@@ -262,16 +258,56 @@ class VideoIdResolver {
 				"resolved current upload ${hit.videoId}",
 		)
 		return VideoResolutionAttempt(
-			resolution = VideoResolution(
-				videoId = hit.videoId,
-				source = "adjacent verified predecessors",
-				title = hit.title,
-				channel = hit.channel,
-				lengthSeconds = hit.lengthSeconds,
-				uniquelyResolved = true,
-				collaborativeChannel = hit.collaborativeChannel,
-				playlistVerified = true,
+			resolution = NativeStructuredMusicMatcher.withPerformerCreditEvidence(
+				candidate = VideoResolution(
+					videoId = hit.videoId,
+					source = "adjacent verified predecessors",
+					title = hit.title,
+					channel = hit.channel,
+					lengthSeconds = hit.lengthSeconds,
+					uniquelyResolved = true,
+					collaborativeChannel = hit.collaborativeChannel,
+					playlistVerified = true,
+				),
+				nativeTitle = title,
+				nativeArtist = channel.orEmpty(),
+				durationSec = durationSec,
+				evidence = PerformerCreditEvidence.YOUTUBE_LISTING_COMPLETE_CREDIT,
 			),
+		)
+	}
+
+	/**
+	 * The bounded predecessor-playlist budget, as a typed refusal.
+	 *
+	 * Returns null while the candidate set is inspectable, and otherwise the
+	 * refusal that skips this route. Budget exhaustion happens *before* any
+	 * candidate playlist is fetched, so no id has been compared to any other:
+	 * it is a statement about this phone's memory, never about the identity.
+	 * Typing it AMBIGUOUS made [com.rustedwax.identity.api.IdentityChainPolicy]
+	 * stop the whole chain, which silently vetoed the later exact routes — a
+	 * full listen whose id search had already resolved twice during playback
+	 * was refused for want of a route that was never asked. NOT_APPLICABLE is
+	 * the classification that means "this strategy cannot run safely here",
+	 * and it continues to the later strategies, which is what the budget's own
+	 * contract above already promised. True ambiguity — candidates fetched and
+	 * disagreeing — is decided further down and still stops the chain.
+	 */
+	internal fun predecessorPlaylistBudgetRefusal(
+		candidateCount: Int,
+	): VideoResolutionAttempt? {
+		if (candidateCount <= MAX_PREDECESSOR_PLAYLIST_CANDIDATES) return null
+		EventLog.append(
+			"resolve",
+			"predecessor playlist search returned $candidateCount lists, above the bounded " +
+				"$MAX_PREDECESSOR_PLAYLIST_CANDIDATES-list verification budget; no candidate was " +
+				"evaluated, so this is a resource refusal rather than an ambiguous identity — " +
+				"skipping the consecutive-playlist route and continuing to the later routes",
+		)
+		return VideoResolutionAttempt(
+			refusalReason = "predecessor playlist candidate set exceeded the bounded verification " +
+				"budget before any candidate was evaluated",
+			failure = VideoResolutionFailure.NOT_APPLICABLE,
 		)
 	}
 
@@ -401,15 +437,21 @@ class VideoIdResolver {
 		}
 		EventLog.append("resolve", "resolved \"$title\" → ${hit.videoId} from playlist $playlistId")
 		return VideoResolutionAttempt(
-			resolution = VideoResolution(
-				videoId = hit.videoId,
-				source = "playlist $playlistId",
-				title = hit.title,
-				channel = hit.channel,
-				lengthSeconds = hit.lengthSeconds,
-				uniquelyResolved = true,
-				collaborativeChannel = hit.collaborativeChannel,
-				playlistVerified = true,
+			resolution = NativeStructuredMusicMatcher.withPerformerCreditEvidence(
+				candidate = VideoResolution(
+					videoId = hit.videoId,
+					source = "playlist $playlistId",
+					title = hit.title,
+					channel = hit.channel,
+					lengthSeconds = hit.lengthSeconds,
+					uniquelyResolved = true,
+					collaborativeChannel = hit.collaborativeChannel,
+					playlistVerified = true,
+				),
+				nativeTitle = title,
+				nativeArtist = channel.orEmpty(),
+				durationSec = durationSec,
+				evidence = PerformerCreditEvidence.YOUTUBE_LISTING_COMPLETE_CREDIT,
 			),
 		)
 	}
@@ -462,14 +504,20 @@ class VideoIdResolver {
 				"resolved \"$title\" → ${hit.videoId} from Mix queue $playlistId",
 			)
 			return VideoResolutionAttempt(
-				resolution = VideoResolution(
-					videoId = hit.videoId,
-					source = "Mix queue $playlistId",
-					title = hit.title,
-					channel = hit.channel,
-					lengthSeconds = hit.lengthSeconds,
-					uniquelyResolved = true,
-					playlistVerified = true,
+				resolution = NativeStructuredMusicMatcher.withPerformerCreditEvidence(
+					candidate = VideoResolution(
+						videoId = hit.videoId,
+						source = "Mix queue $playlistId",
+						title = hit.title,
+						channel = hit.channel,
+						lengthSeconds = hit.lengthSeconds,
+						uniquelyResolved = true,
+						playlistVerified = true,
+					),
+					nativeTitle = title,
+					nativeArtist = channel.orEmpty(),
+					durationSec = durationSec,
+					evidence = PerformerCreditEvidence.YOUTUBE_LISTING_COMPLETE_CREDIT,
 				),
 			)
 		}
@@ -650,7 +698,14 @@ class VideoIdResolver {
 			SearchResultsParser.hasNoIdentityContradiction(it, title, requiredChannel, durationSec)
 		}
 		val needsCompletion = plausible.any {
-			it.channel == null || it.lengthSeconds == null
+			it.channel == null || it.lengthSeconds == null ||
+				// A listing byline reads `Beenie Man`; only the watch page reads
+				// `Beenie Man - Topic`, and the spelling licence requires that
+				// marker. Fetch the page so the owner can be read authoritatively
+				// rather than accepting a near-spelling card on the listing's word.
+				SearchResultsParser.requiresWatchPageForArtistSpelling(
+					it, title, requiredChannel,
+				)
 		}
 
 		var deferredAmbiguity: VideoResolutionAttempt? = null
@@ -674,6 +729,43 @@ class VideoIdResolver {
 				plausible, title, requiredChannel, durationSec,
 			)
 			if (matches.size > 1) {
+				// One uploader, one work, one length, several ids: a recording
+				// published more than once by the same owner. An artist's own
+				// channel and its VEVO mirror both carry the official video —
+				// `Capleton - Real As It Seems (Official Video)` is on WoAlzSVIzRo
+				// and xub1SMhQV84, both 272 s, both bylined `Capleton` — and every
+				// such video was unscrobblable because this refused the pair.
+				//
+				// The Music catalog route already collapses exactly this family;
+				// the same predicate is asked here rather than a second one being
+				// invented, so a set it would not call a family is still ambiguous.
+				duplicateFamilyAmong(matches, durationSec)?.let { representative ->
+					EventLog.append(
+						"resolve",
+						"uploads ${matches.joinToString { it.videoId }} are duplicate uploads of " +
+							"one recording on ${representative.channel}; taking ${representative.videoId}",
+					)
+					return VideoResolutionAttempt(
+						resolution = NativeStructuredMusicMatcher.withPerformerCreditEvidence(
+							candidate = VideoResolution(
+								videoId = representative.videoId,
+								source = "duplicate uploads of one recording",
+								title = representative.title,
+								channel = representative.channel,
+								lengthSeconds = representative.lengthSeconds,
+								uniquelyResolved = true,
+								collaborativeChannel = representative.collaborativeChannel,
+								// Every member passed `identityMatches`, which requires
+								// the published length within tolerance of the card's own.
+								presentationDurationCorroborated = true,
+							),
+							nativeTitle = title,
+							nativeArtist = requiredChannel,
+							durationSec = durationSec,
+							evidence = PerformerCreditEvidence.YOUTUBE_LISTING_COMPLETE_CREDIT,
+						),
+					)
+				}
 				val reason = "ambiguous identity — ${matches.size} uploads match " +
 					"title+channel+duration (${matches.joinToString { it.videoId }}); refusing every id"
 				EventLog.append("resolve", reason)
@@ -690,14 +782,24 @@ class VideoIdResolver {
 						"resolved \"$title\" → ${match.videoId} by title+channel+duration",
 					)
 					return VideoResolutionAttempt(
-						resolution = VideoResolution(
-							videoId = match.videoId,
-							source = "title+channel+duration search",
-							title = match.title,
-							channel = match.channel,
-							lengthSeconds = match.lengthSeconds,
-							uniquelyResolved = true,
-							collaborativeChannel = match.collaborativeChannel,
+						resolution = NativeStructuredMusicMatcher.withPerformerCreditEvidence(
+							candidate = VideoResolution(
+								videoId = match.videoId,
+								source = "title+channel+duration search",
+								title = match.title,
+								channel = match.channel,
+								lengthSeconds = match.lengthSeconds,
+								uniquelyResolved = true,
+								collaborativeChannel = match.collaborativeChannel,
+								// `identityMatches` refuses a null length outright and
+								// requires the card's own length within tolerance of the
+								// one being published.
+								presentationDurationCorroborated = true,
+							),
+							nativeTitle = title,
+							nativeArtist = requiredChannel,
+							durationSec = durationSec,
+							evidence = PerformerCreditEvidence.YOUTUBE_LISTING_COMPLETE_CREDIT,
 						),
 					)
 				}
@@ -882,6 +984,17 @@ class VideoIdResolver {
 			}
 		}
 		if (plausible.isEmpty()) {
+			// A Video-mode presentation cannot be in a songs-filtered response at
+			// all, so an empty result here is not yet evidence that the catalog does
+			// not hold this work. `Fade Away` is published as
+			// `Video • Buju Banton & Kabaka Pyramid` and, as a song, under the
+			// *different* title `Faded Away` — so the songs shelf answers honestly
+			// that nothing matched while the row being played sits one shelf over.
+			//
+			// Asked only when the songs shelf produced nothing plausible: a song row
+			// that did match is the stronger evidence and keeps the route it has.
+			resolveYouTubeMusicVideoRow(config, title, artist, album, durationSec, durationMs)
+				?.let { return it }
 			return VideoResolutionAttempt(
 				refusalReason = "no YouTube Music catalog row had the exact work and artist credit",
 			)
@@ -943,11 +1056,20 @@ class VideoIdResolver {
 				val credits = verificationCandidates
 					.firstOrNull { it.videoId == representative.videoId }?.artists
 				return VideoResolutionAttempt(
-					resolution = representative.copy(
-						source = "duplicate YouTube Music catalog uploads of one recording",
-						uniquelyResolved = true,
-						structuredNativeMusic = true,
-						creditedArtists = credits ?: representative.creditedArtists,
+					resolution = NativeStructuredMusicMatcher.withPerformerCreditEvidence(
+						candidate = representative.copy(
+							source = "duplicate YouTube Music catalog uploads of one recording",
+							uniquelyResolved = true,
+							structuredNativeMusic = true,
+							creditedArtists = credits ?: representative.creditedArtists,
+							// Every member of the family passed the strict structured
+							// match, so the published length is the recording's own.
+							presentationDurationCorroborated = true,
+						),
+						nativeTitle = title,
+						nativeArtist = artist,
+						durationSec = durationSec,
+						evidence = PerformerCreditEvidence.CANONICAL_PAGE_COMPLETE_CREDIT,
 					),
 				)
 			}
@@ -967,7 +1089,7 @@ class VideoIdResolver {
 			fetched.firstOrNull { it.videoId == candidate.videoId }
 		}
 		cardBackedYouTubeMusicResolution(
-			sole, fetchedPage, title, album, durationSec,
+			sole, fetchedPage, title, artist, album, durationSec,
 		)?.let { cardResolution ->
 			EventLog.append(
 				"resolve",
@@ -977,6 +1099,229 @@ class VideoIdResolver {
 			)
 			return VideoResolutionAttempt(resolution = cardResolution)
 		}
+		// The songs shelf named this work and this complete credit, and then the
+		// narrower removed every row it named because none of them is the length
+		// being played. That *is* the Video-mode condition — a video presentation
+		// has a running time no songs row carries — so the shelf that holds those
+		// rows has to be asked here for the same reason it is asked when the songs
+		// shelf named nothing at all.
+		//
+		// Asking only on the empty-`plausible` path read "a song row that did match
+		// is the stronger evidence" as though a row still stood. Once the narrower
+		// has emptied the set there is no such row left, and the route was left
+		// verifying pages for rows whose own length already contradicted the
+		// player. A row that survives the narrower still takes precedence: this is
+		// reached only after every one of them has been tried and refused.
+		if (narrowed.isEmpty()) {
+			resolveYouTubeMusicVideoRow(config, title, artist, album, durationSec, durationMs)
+				?.let { return it }
+		}
+		return verified
+	}
+
+	/**
+	 * The same catalog, asked for the shelf a Video-mode presentation lives on.
+	 *
+	 * Regression: Video mode may publish work, artist metadata and duration without
+	 * an item id. The songs shelf can exclude the matching video row while returning
+	 * a similarly titled but different song, so the resolver must query the video
+	 * shelf without weakening the exact work-and-duration checks.
+	 *
+	 * This half is only the request. What may be believed about the answer is
+	 * [youTubeMusicVideoRecovery], which decides nothing this file did not already
+	 * decide about a song row.
+	 */
+	private suspend fun resolveYouTubeMusicVideoRow(
+		config: YouTubeMusicCatalogSearchParser.Config,
+		title: String,
+		artist: String,
+		album: String?,
+		durationSec: Long,
+		durationMs: Long?,
+	): VideoResolutionAttempt? {
+		val body = JSONObject()
+			.put(
+				"context",
+				JSONObject().put(
+					"client",
+					JSONObject()
+						.put("clientName", "WEB_REMIX")
+						.put("clientVersion", config.clientVersion)
+						.put("hl", "en")
+						.put("gl", "US"),
+				),
+			)
+			.put("params", YouTubeMusicCatalogSearchParser.VIDEOS_FILTER_PARAMS)
+			.put("query", "$title $artist")
+			.toString()
+		val response = postYouTubeMusic(config, "search", body) ?: return null
+		val rows = runCatching {
+			YouTubeMusicCatalogSearchParser.candidates(response)
+		}.getOrNull() ?: return null
+		return youTubeMusicVideoRecovery(
+			rows, title, artist, album, durationSec, durationMs,
+		) { videoId -> fetchCanonicalResolution(videoId, "YouTube Music video search") }
+	}
+
+	/**
+	 * What the video shelf's rows are allowed to prove.
+	 *
+	 * Nothing is relaxed here. The rows are read by the same parser, filtered by
+	 * the same strict work-and-complete-credit test, narrowed by the same album
+	 * and running-time rule — a music video names no release, and a missing album
+	 * has always been absence to that narrower, so what it decides on these rows
+	 * is the length — and the id is still only accepted from a canonical page
+	 * through [NativeStructuredMusicMatcher.select], which requires exactly one
+	 * page to agree on work, artist and length and refuses every id otherwise. The
+	 * only thing that changed is which shelf was asked.
+	 *
+	 * Returns null when the video shelf holds nothing plausible either, so the
+	 * caller's own refusal — the one naming the songs shelf — is what the listen
+	 * carries. A definite answer, resolution or ambiguity, is returned as it is.
+	 */
+	internal suspend fun youTubeMusicVideoRecovery(
+		rows: List<YouTubeMusicCatalogSearchParser.Candidate>,
+		title: String,
+		artist: String,
+		album: String?,
+		durationSec: Long,
+		durationMs: Long?,
+		fetchPage: suspend (String) -> VideoResolution?,
+	): VideoResolutionAttempt? {
+		val plausible = rows.filter { candidate ->
+			YouTubeMusicCatalogSearchParser.matches(candidate, title, artist)
+		}.distinctBy(YouTubeMusicCatalogSearchParser.Candidate::videoId)
+		val narrowed = narrowYouTubeMusicCatalogCandidates(plausible, album, durationSec)
+		EventLog.append(
+			"resolve",
+			"YouTube Music video shelf → ${rows.size} exact-id rows, ${narrowed.size} with " +
+				"the exact work, complete credit and length for \"$title\"" +
+				narrowed.joinToString(prefix = " (", postfix = ")") { row ->
+					"${row.videoId} ${row.durationSeconds ?: "?"}s ${row.musicVideoType}"
+				}.takeIf { narrowed.isNotEmpty() }.orEmpty(),
+		)
+		if (narrowed.isEmpty()) return null
+		if (narrowed.size > MAX_WATCH_PAGE_CANDIDATES) {
+			return VideoResolutionAttempt(
+				refusalReason = "YouTube Music video candidate set exceeded the bounded " +
+					"$MAX_WATCH_PAGE_CANDIDATES-page verification budget; refusing every id",
+			)
+		}
+		val fetched = coroutineScope {
+			narrowed.map { candidate ->
+				async(Dispatchers.IO) { fetchPage(candidate.videoId) }
+			}.awaitAll().filterNotNull()
+		}
+		val verified = NativeStructuredMusicMatcher.select(fetched, title, artist, durationSec)
+		verified.resolution?.let { resolution ->
+			val credits = narrowed.firstOrNull { it.videoId == resolution.videoId }?.artists
+			EventLog.append(
+				"resolve",
+				"resolved \"$title\" → ${resolution.videoId} by exact YouTube Music video " +
+					"work+artist+duration",
+			)
+			return VideoResolutionAttempt(
+				resolution = resolution.copy(
+					source = "exact YouTube Music video work+artist+duration",
+					creditedArtists = credits ?: resolution.creditedArtists,
+					// This id came off the *video shelf*, and finalization has to be
+					// able to re-ask that question. Without the marker the route
+					// buckets as ordinary structured music and revalidates through a
+					// path that never sees the row — the failure
+					// the row-backed route already carries this
+					// marker to avoid.
+					musicVideoRow = true,
+					// The page alone graded the credit above, under the page-title
+					// rule. That rule cannot see the row, so a page whose owner names
+					// the same artist longer or shorter than the player did — `India`
+					// on `La India` — grades NONE here while the *weaker* branches
+					// below grade the very same row and page as complete authority.
+					// Ask that question, unchanged, of a page that already passed the
+					// stricter test rather than leaving the strongest route the only
+					// one that cannot earn it. Nothing is taken on the catalog's word
+					// twice: the owner leg is the canonical page's, not the row's.
+					performerCreditEvidence = resolution.performerCreditEvidence
+						.takeIf(PerformerCreditEvidence::authorizesSongWrite)
+						?: rowBackedPerformerCreditEvidence(credits, artist, resolution),
+				),
+			)
+		}
+		if (verified.failure == VideoResolutionFailure.AMBIGUOUS) {
+			// The same family question the songs shelf asks of its own ambiguities,
+			// asked of the same kind of set: several ids that every strict test has
+			// already accepted. A set it would not call one recording stays refused.
+			NativeStructuredMusicMatcher.sameRecordingAmong(
+				fetched, title, artist, durationSec,
+				playerSeconds = durationMs?.let { Math.round(it / 1000.0) },
+			)?.let { representative ->
+				EventLog.append(
+					"resolve",
+					"YouTube Music video rows for \"$title\" are duplicate uploads of one " +
+						"recording on ${representative.channel} " +
+						"(${representative.lengthSeconds}s); taking ${representative.videoId}",
+				)
+				val credits = narrowed
+					.firstOrNull { it.videoId == representative.videoId }?.artists
+				return VideoResolutionAttempt(
+					resolution = NativeStructuredMusicMatcher.withPerformerCreditEvidence(
+						candidate = representative.copy(
+							source = "duplicate YouTube Music video uploads of one recording",
+							uniquelyResolved = true,
+							structuredNativeMusic = true,
+							creditedArtists = credits ?: representative.creditedArtists,
+							// Every member passed the strict structured match, which
+							// required the player's own length, so the surface is pinned.
+							presentationDurationCorroborated = true,
+						),
+						nativeTitle = title,
+						nativeArtist = artist,
+						durationSec = durationSec,
+						evidence = PerformerCreditEvidence.CANONICAL_PAGE_COMPLETE_CREDIT,
+					),
+				)
+			}
+		}
+		// The page could not carry the whole collaboration. `Fade Away` is
+		// published on one artist's own channel and names only that artist, while
+		// the catalog row credits both — the same shape the songs shelf meets, and
+		// the same authority it already answers with: the row's own length must
+		// equal the player's, and the page must corroborate either one of the
+		// row's credits or the work and the length. Asked here in the same order,
+		// after the stricter tests have had their say.
+		val playerSeconds = durationMs?.let { Math.round(it / 1000.0) }
+		// The player's own number, matched exactly by one row and no other, is the
+		// narrowest available answer to "which of these is the surface playing" —
+		// and the only one left when the shelf renders its rows unevenly, as it
+		// does here: a top-result card may carry no running time of its own, and a
+		// second upload may be a different kind of video. Either stops
+		// [soleOrDuplicateFamilyRow] from calling the set one recording, and that
+		// rule still has the last word when no single row owns the player's second.
+		val sole = narrowed
+			.filter { it.durationSeconds != null && it.durationSeconds == playerSeconds }
+			.singleOrNull()
+			?: soleOrDuplicateFamilyRow(narrowed, playerSeconds)
+		val fetchedPage = sole?.let { candidate ->
+			fetched.firstOrNull { it.videoId == candidate.videoId }
+		}
+		cardBackedYouTubeMusicResolution(sole, fetchedPage, title, artist, album, durationSec)
+			?.let { cardResolution ->
+				EventLog.append(
+					"resolve",
+					"YouTube Music video row ${cardResolution.videoId} is the exact " +
+						"work+credit+length match for \"$title\"; canonical page did not " +
+						"corroborate the whole credit (${verified.refusalReason})",
+				)
+				return VideoResolutionAttempt(
+					resolution = cardResolution.copy(
+						source = "exact YouTube Music video work+artist+duration",
+						musicVideoRow = true,
+					),
+				)
+			}
+		EventLog.append(
+			"resolve",
+			"YouTube Music video recovery refused \"$title\": ${verified.refusalReason}",
+		)
 		return verified
 	}
 
@@ -1020,9 +1365,15 @@ class VideoIdResolver {
 					if (VideoTitleMatcher.compare(title, canonical.title.orEmpty()) ==
 						VideoTitleMatcher.Evidence.CONTRADICTION
 					) return@async null
-					canonical.copy(
-						title = listing.title,
-						channel = canonical.channel,
+					NativeStructuredMusicMatcher.withPerformerCreditEvidence(
+						candidate = canonical.copy(
+							title = listing.title,
+							channel = canonical.channel,
+						),
+						nativeTitle = title,
+						nativeArtist = channel,
+						durationSec = null,
+						evidence = PerformerCreditEvidence.CANONICAL_PAGE_COMPLETE_CREDIT,
 					)
 				}
 			}.awaitAll().filterNotNull().distinctBy { it.videoId }
@@ -1110,6 +1461,52 @@ class VideoIdResolver {
 		)
 	}
 
+	/**
+	 * Re-ask, at finalization, the question the video shelf answered.
+	 *
+	 * The id is never taken on trust: the page is fetched again and must still be
+	 * the length the finalized listen published. The uploader is best-effort
+	 * source metadata, not performer authority and not a veto. What the page is
+	 * *not* asked is to reproduce a title it
+	 * never carried — `Faded Away` on the page against `Fade Away` in the player
+	 * and in the catalog row that named the id — because that is the disagreement
+	 * this route exists to cross, and re-imposing it here would throw away every
+	 * id the route correctly resolved.
+	 */
+	suspend fun revalidateMusicVideoRow(
+		videoId: String,
+		title: String,
+		artist: String,
+		durationSec: Long,
+	): VideoResolutionAttempt {
+		val fetched = fetchCanonicalResolution(videoId, "music video row revalidation")
+			?: return VideoResolutionAttempt(
+				refusalReason = "the music video row's page could not be re-fetched",
+			)
+		// A page that still passes the strict structured match settles the id, and
+		// nothing below may take that away.
+		NativeStructuredMusicMatcher.select(listOf(fetched), title, artist, durationSec)
+			.resolution?.let { page ->
+				return VideoResolutionAttempt(resolution = page.copy(musicVideoRow = true))
+			}
+		if (fetched.videoId != videoId ||
+			fetched.lengthSeconds?.let { abs(it - durationSec) <= DURATION_TOLERANCE_SEC } != true
+		) {
+			return VideoResolutionAttempt(
+				refusalReason = "the music video row's page no longer has the verified id and length",
+			)
+		}
+		return VideoResolutionAttempt(
+			resolution = fetched.copy(
+				source = "re-fetched exact YouTube Music video row",
+				uniquelyResolved = true,
+				structuredNativeMusic = true,
+				musicVideoRow = true,
+				presentationDurationCorroborated = true,
+			),
+		)
+	}
+
 	/** Re-fetch candidates from the run-local cache; the cache itself is never authority. */
 	suspend fun resolveVerifiedCandidates(
 		videoIds: List<String>,
@@ -1150,9 +1547,17 @@ class VideoIdResolver {
 		}.distinctBy { it.videoId }
 		return when (matches.size) {
 			1 -> VideoResolutionAttempt(
-				resolution = matches.single().copy(
-					source = "re-fetched run-local verified candidate",
-					uniquelyResolved = true,
+				resolution = NativeStructuredMusicMatcher.withPerformerCreditEvidence(
+					candidate = matches.single().copy(
+						source = "re-fetched run-local verified candidate",
+						uniquelyResolved = true,
+						// The filter above required a present length within tolerance.
+						presentationDurationCorroborated = true,
+					),
+					nativeTitle = title!!,
+					nativeArtist = channel.orEmpty(),
+					durationSec = durationSec,
+					evidence = PerformerCreditEvidence.CANONICAL_PAGE_COMPLETE_CREDIT,
 				),
 			)
 			0 -> VideoResolutionAttempt(
@@ -1231,6 +1636,21 @@ class VideoIdResolver {
 				VideoResolutionAttempt(resolution = it.copy(uniquelyResolved = true))
 			}
 			else -> {
+				// The same collapse the card path applies, on pages rather than
+				// cards. Reached when the listing left a field to complete, and the
+				// duplicate pair is no less a duplicate pair for that.
+				NativeStructuredMusicMatcher.oneOfDuplicateFamily(matches, durationSec)
+					?.let { representative ->
+						EventLog.append(
+							"resolve",
+							"watch pages ${matches.joinToString { it.videoId }} are duplicate " +
+								"uploads of one recording on ${representative.channel}; " +
+								"taking ${representative.videoId}",
+						)
+						return VideoResolutionAttempt(
+							resolution = representative.copy(uniquelyResolved = true),
+						)
+					}
 				val reason = "ambiguous identity — ${matches.size} uploads match " +
 					"title+channel+duration (${matches.joinToString { it.videoId }}); refusing every id"
 				EventLog.append("resolve", reason)
@@ -1347,7 +1767,21 @@ class VideoIdResolver {
 			lengthSeconds = resolution.lengthSeconds ?: return null,
 		)
 		if (!SearchResultsParser.matchesIdentity(completed, title, channel, durationSec)) return null
-		return resolution.copy(collaborativeChannel = candidate.collaborativeChannel)
+		// The length compared here is the candidate's own watch page, fetched
+		// above — not a search card — and `matchesIdentity` refuses a null or
+		// out-of-tolerance one. Every caller of this function therefore carries a
+		// proof that pinned the surface, which is what lets a Video-mode
+		// presentation be attributed even though no catalog row matches its length.
+		return NativeStructuredMusicMatcher.withPerformerCreditEvidence(
+			candidate = resolution.copy(
+				collaborativeChannel = candidate.collaborativeChannel,
+				presentationDurationCorroborated = true,
+			),
+			nativeTitle = title,
+			nativeArtist = channel,
+			durationSec = durationSec,
+			evidence = PerformerCreditEvidence.CANONICAL_PAGE_COMPLETE_CREDIT,
+		)
 	}
 
 	private suspend fun fetchCanonicalResolution(videoId: String, source: String): VideoResolution? {
@@ -1559,6 +1993,38 @@ class VideoIdResolver {
 		 * A fetched page with a different work, credit, or duration is a veto.
 		 */
 
+		/**
+		 * The one recording behind several search cards, or null.
+		 *
+		 * Delegates to [NativeStructuredMusicMatcher.oneOfDuplicateFamily] — the
+		 * predicate the Music catalog route already collapses duplicate rows with —
+		 * so a search-listing family and a catalog family are decided by the same
+		 * rule rather than by two that can drift apart. It requires one uploader
+		 * key, one work key and lengths within the duplicate spread, and prefers
+		 * the upload whose own length is the one being published.
+		 *
+		 * Returns the original card, so the caller keeps the byline evidence the
+		 * listing carried.
+		 */
+		internal fun duplicateFamilyAmong(
+			matches: List<SearchResultsParser.Candidate>,
+			playerSeconds: Long?,
+		): SearchResultsParser.Candidate? {
+			val chosen = NativeStructuredMusicMatcher.oneOfDuplicateFamily(
+				matches.map { card ->
+					VideoResolution(
+						videoId = card.videoId,
+						source = "search listing",
+						title = card.title,
+						channel = card.channel,
+						lengthSeconds = card.lengthSeconds,
+					)
+				},
+				playerSeconds = playerSeconds,
+			) ?: return null
+			return matches.firstOrNull { it.videoId == chosen.videoId }
+		}
+
 		internal fun soleOrDuplicateFamilyRow(
 			narrowed: List<YouTubeMusicCatalogSearchParser.Candidate>,
 			playerSeconds: Long?,
@@ -1595,6 +2061,7 @@ class VideoIdResolver {
 			candidate: YouTubeMusicCatalogSearchParser.Candidate?,
 			fetchedPage: VideoResolution?,
 			nativeTitle: String,
+			nativeArtist: String,
 			nativeAlbum: String?,
 			durationSec: Long,
 		): VideoResolution? {
@@ -1615,7 +2082,7 @@ class VideoIdResolver {
 					fetchedPage, nativeTitle, durationSec,
 				)
 			) return null
-			return VideoResolution(
+			val resolution = VideoResolution(
 				videoId = row.videoId,
 				source = "exact YouTube Music catalog work+artist+album+duration",
 				title = row.title,
@@ -1626,7 +2093,61 @@ class VideoIdResolver {
 				uniquelyResolved = true,
 				structuredNativeMusic = true,
 				creditedArtists = row.artists,
+				// Guarded at the top of this function: a row whose own duration is
+				// missing or outside tolerance never reaches here.
+				presentationDurationCorroborated = true,
 			)
+			val pageOwnerBacksCompleteCatalogCredit = fetchedPage != null &&
+				completeCatalogCreditHasCanonicalOwner(row.artists, nativeArtist, fetchedPage)
+			return resolution.copy(
+				performerCreditEvidence = if (pageOwnerBacksCompleteCatalogCredit) {
+					PerformerCreditEvidence.YOUTUBE_MUSIC_CATALOG_AND_CANONICAL_OWNER
+				} else {
+					PerformerCreditEvidence.NONE
+				},
+			)
+		}
+
+		/**
+		 * The row's complete credit, backed by the canonical page's own owner.
+		 *
+		 * Exactly [completeCatalogCreditHasCanonicalOwner], reached from the branch
+		 * whose page already passed the strict structured match. It exists because
+		 * that branch grades the credit from the page title alone and therefore
+		 * cannot see the row that named the id — while
+		 * [cardBackedYouTubeMusicResolution], which accepts *less* about the page,
+		 * grades with the row. Returns [PerformerCreditEvidence.NONE] when the row
+		 * published no credit, which is the same answer that branch gives.
+		 */
+		private fun rowBackedPerformerCreditEvidence(
+			rowArtists: List<String>?,
+			nativeArtist: String,
+			page: VideoResolution,
+		): PerformerCreditEvidence {
+			val artists = rowArtists?.takeIf(List<String>::isNotEmpty)
+				?: return PerformerCreditEvidence.NONE
+			return if (completeCatalogCreditHasCanonicalOwner(artists, nativeArtist, page)) {
+				PerformerCreditEvidence.YOUTUBE_MUSIC_CATALOG_AND_CANONICAL_OWNER
+			} else {
+				PerformerCreditEvidence.NONE
+			}
+		}
+
+		private fun completeCatalogCreditHasCanonicalOwner(
+			catalogArtists: List<String>,
+			nativeArtist: String,
+			page: VideoResolution,
+		): Boolean {
+			if (!NativeStructuredMusicMatcher.completeCreditsAgree(catalogArtists, nativeArtist)) {
+				return false
+			}
+			return catalogArtists.any { creditedArtist ->
+				SearchResultsParser.channelKey(page.channel) ==
+					SearchResultsParser.channelKey(creditedArtist) ||
+					SearchResultsParser.channelIsSameArtistNamedDifferently(
+						creditedArtist, page.channel,
+					)
+			}
 		}
 
 		/**

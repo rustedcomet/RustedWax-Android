@@ -160,7 +160,7 @@ class MusicClassifierTest {
 	}
 
 	@Test
-	fun `the field sample of misclassified film content is video`() {
+	fun `the representative misclassified film content is video`() {
 		// Film & Animation — the category alone must decide these.
 		assertEquals(video, kindOf(
 			"COYOTE VS. ACME Official Final Trailer (2026) John Cena",
@@ -201,7 +201,7 @@ class MusicClassifierTest {
 
 	/** The same sample with enrichment OFF — the structural fallbacks. */
 	@Test
-	fun `the field sample degrades sanely without a category`() {
+	fun `the representative sample degrades sanely without a category`() {
 		// "Official Final Trailer" slipped past the exact phrase "official
 		// trailer"; the structural rule reads context + trailer.
 		assertEquals(video, kindOf(

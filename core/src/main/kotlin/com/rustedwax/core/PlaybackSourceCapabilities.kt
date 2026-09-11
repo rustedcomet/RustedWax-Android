@@ -73,4 +73,21 @@ data class PlaybackSourceCapabilities(
 	 * reduced both presentations to the same work identity.
 	 */
 	val republishesAlternateMediaDurations: Boolean = false,
+
+	/**
+	 * Playback earns nothing until the transport has published a timeline.
+	 *
+	 * A page-backed source drives one MediaSession for whatever the page happens
+	 * to be playing, and a feed's inline autoplay preview is playing in exactly
+	 * that sense: `PLAYING`, a real title and artist, and — for its entire life —
+	 * `position = -1` with no duration at all. Regression: an inline preview can
+	 * otherwise bank wall-clock time while the viewer only scrolls past it; later
+	 * identity and duration recovery must not turn that interval into playback.
+	 *
+	 * A real playback on the same page publishes both within about a second, so
+	 * the absence is not a property of the source but of what it is playing.
+	 * True only where that has been observed; every other source measures from
+	 * its first PLAYING as it always did.
+	 */
+	val requiresEstablishedTimeline: Boolean = false,
 )

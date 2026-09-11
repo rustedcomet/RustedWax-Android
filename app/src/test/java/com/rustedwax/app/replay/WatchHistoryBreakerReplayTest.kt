@@ -647,7 +647,7 @@ class WatchHistoryBreakerReplayTest : ReplayScenarioTest() {
 
 	@Test
 	fun `a PiP Short still resolves after the three ads that used to stand the route down`() {
-		// The reduced field order: ad, ad, ad, then an untitled Short
+		// Synthetic callback order: ad, ad, ad, then an untitled Short
 		// finalized in picture-in-picture — the shape that has no title of its own
 		// and therefore nothing but watch history to identify it.
 		val harness = harness()

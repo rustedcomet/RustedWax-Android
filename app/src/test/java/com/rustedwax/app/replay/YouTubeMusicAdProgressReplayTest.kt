@@ -12,7 +12,7 @@ import org.junit.Test
 /**
  * Free YouTube Music pre-rolls, published under the song's own title and artist.
  *
- * The traces these mirror were captured on a non-Premium account: the transport
+	 * The synthetic traces represent free-tier behavior: the transport
  * carried the interstitial's duration and position while the metadata already
  * named the song that had not started yet.
  *
@@ -39,6 +39,8 @@ class YouTubeMusicAdProgressReplayTest : ReplayScenarioTest() {
 				videoId = videoId,
 				title = title,
 				author = artist,
+				originalArtist = artist,
+				watchPageArtistCredit = artist,
 				lengthSeconds = durationMs / 1000,
 				category = "Music",
 				watchPageResolved = true,

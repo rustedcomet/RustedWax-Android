@@ -33,7 +33,7 @@ class NativeShortParserTest {
 	}
 
 	@Test
-	fun `Samsung measured sibling overlay and time bar shape parses`() {
+	fun `sibling overlay and time bar shape parses`() {
 		val title = "🎭 He Put on a Magic Mask! | The Mask (1994)😂#shorts #movierecap"
 		val overlay = node(
 			id = "reel_player_overlay_container",
@@ -42,8 +42,8 @@ class NativeShortParserTest {
 				node(description = "@SonaDarus"),
 				node(description = "Subscribe to @SonaDarus.", clickable = true, className = "android.widget.Button"),
 				node(description = title, clickable = true),
-				// Measured on the live A12 write gate: YouTube duplicated one
-				// title hashtag as a standalone semantic navigation chip.
+				// YouTube may duplicate one title hashtag as a standalone semantic
+				// navigation chip.
 				node(description = "#movierecap", clickable = true),
 				node(description = "Original Sound (Contains music from: Retro · Wayne Jones)", clickable = true, className = "android.widget.Button"),
 				node(description = "like this video along with 595 thousand other people", clickable = true, className = "android.widget.RadioButton"),
@@ -487,7 +487,7 @@ class NativeShortParserTest {
 
 	@Test
 	fun `position resolves an id-less footer the blocklist cannot`() {
-		// The real shape measured on the device: no resource ids anywhere in the
+		// Representative shape: no resource ids anywhere in the
 		// footer, and an unknown control the blocklist has never seen. Before
 		// geometry this refused; the title runs along the bottom-left while every
 		// control that keeps being mistaken for it is pinned to the right column.

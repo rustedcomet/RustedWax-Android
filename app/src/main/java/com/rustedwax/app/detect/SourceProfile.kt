@@ -39,7 +39,8 @@ data class SourceProfile(
 	val minDurationSeconds: Long,
 
 	/**
-	 * The MediaSession `ARTIST` field names a performer rather than an uploader.
+	 * The MediaSession `ARTIST` field is source-published artist metadata rather
+	 * than an uploader field. It remains best effort and is not a write gate.
 	 * False sends credits through the parsing ladder instead — see §3.2 and
 	 * [ScrobbleBuilder.creditsForKind].
 	 */

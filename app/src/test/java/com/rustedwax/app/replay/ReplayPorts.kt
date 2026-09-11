@@ -551,6 +551,7 @@ class ReplayIdentitySource : VideoIdentitySource {
 		SEARCH,
 		VERIFIED_CANDIDATES,
 		STRUCTURED_MUSIC_REVALIDATION,
+		MUSIC_VIDEO_ROW_REVALIDATION,
 	}
 
 	val calls = mutableListOf<Route>()
@@ -669,6 +670,16 @@ class ReplayIdentitySource : VideoIdentitySource {
 		durationSec: Long,
 	): VideoResolutionAttempt {
 		calls += Route.STRUCTURED_MUSIC_REVALIDATION
+		return structuredMusic(videoId)
+	}
+
+	override suspend fun revalidateMusicVideoRow(
+		videoId: String,
+		title: String,
+		artist: String,
+		durationSec: Long,
+	): VideoResolutionAttempt {
+		calls += Route.MUSIC_VIDEO_ROW_REVALIDATION
 		return structuredMusic(videoId)
 	}
 }

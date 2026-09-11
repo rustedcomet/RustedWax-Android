@@ -232,6 +232,43 @@ object TrackProgressCarry {
 		return resumedAt - stoppedAt in 0..(unobservedMs + RESUME_WINDOW_MS)
 	}
 
+	/**
+	 * Whether the replacement's own position proves it *restarted* the item rather
+	 * than continued it.
+	 *
+	 * The mirror of [resumesCarriedPosition], and deliberately not its negation.
+	 * That one answers "may this position extend the carry's life", so it says no
+	 * whenever evidence is missing or thin. This one answers "does this position
+	 * refute the carry", so it must say no in exactly those same cases and yes
+	 * only when both sides are known and disagree.
+	 *
+	 * Playback does not run backwards on its own. A session rebuilt in place
+	 * reports where it left off, a little behind it while buffering, or a little
+	 * ahead if it kept playing unobserved — never materially behind. So a
+	 * replacement whose position sits more than [RESUME_WINDOW_MS] *before* the
+	 * carried one is a second viewing of the same item, not the first one
+	 * resuming.
+	 *
+	 * Regression: a session can stop well into an item and the same item can be
+	 * reopened near its beginning inside the carry window. A matching metadata key
+	 * must not carry the first viewing into that restart and double-count the same
+	 * content.
+	 *
+	 * Both bounds matter. `lastPositionMs` and `resumePositionMs` must both be
+	 * present, because absent evidence refutes nothing and the established
+	 * behaviour has to stand. And the gap is measured only in the backwards
+	 * direction: a replacement that resumes *ahead* is the ordinary unobserved
+	 * interruption [continuesCarriedPosition] already admits.
+	 */
+	internal fun contradictsCarriedPosition(
+		progress: Progress,
+		resumePositionMs: Long?,
+	): Boolean {
+		val stoppedAt = progress.lastPositionMs ?: return false
+		val resumedAt = resumePositionMs ?: return false
+		return stoppedAt - resumedAt > RESUME_WINDOW_MS
+	}
+
 	/** Overwriting a live continuation must not silently discard its listen. */
 	private fun store(key: String, entry: Stored) {
 		carried.put(key, entry)?.let { previous -> displaced[previous.token] = previous.progress }
@@ -273,6 +310,17 @@ object TrackProgressCarry {
 		}
 		val remembered = stored.trackIdentity ?: return null
 		if (!remembered.sameTrackAs(trackIdentity)) return null
+		// Position outranks the window. Inside it the key was trusted on its own,
+		// which is right for a session rebuilt mid-item and wrong for the same item
+		// started again: both look identical to a title-and-artist key, and only the
+		// position tells them apart.
+		//
+		// Left stored rather than removed, exactly as the identity refusal above
+		// does: the first viewing is owed its own finalization, and its owner's
+		// expiry timer is what gives it one. On the device that separates a single
+		// justified 130 s scrobble from an 80 s viewing that earns none, instead of
+		// one 210 s listen claiming both.
+		if (contradictsCarriedPosition(stored.progress, resumePositionMs)) return null
 		// Inside the metadata window the key is enough, exactly as before. Beyond
 		// it the replacement has to show it is continuing this viewing rather than
 		// starting another one, and only an exactly identified track may ask.

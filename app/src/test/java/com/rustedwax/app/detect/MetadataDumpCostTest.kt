@@ -38,7 +38,7 @@ class MetadataDumpCostTest {
 	}
 
 	/**
-	 * The exact shape measured on the device: YouTube publishes numeric extras
+	 * Representative source shape: YouTube publishes numeric extras
 	 * under its own namespace, and `dump` asks each of them for text first.
 	 */
 	private fun youTubeMusicShaped() = CountingFields(

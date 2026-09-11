@@ -35,6 +35,7 @@ class WatchPageParserTest {
 		assertEquals("OLD MOON CHILD", facts.author)
 		assertEquals("Music", facts.category)
 		assertEquals("Bring Me The Horizon", facts.originalArtist)
+		assertEquals("Bring Me The Horizon", facts.watchPageArtistCredit)
 		assertEquals(254L, facts.lengthSeconds)
 	}
 

@@ -127,15 +127,276 @@ object SearchResultsParser {
 
 		return candidates.filter { c ->
 			val len = c.lengthSeconds ?: return@filter false
-			titleAgrees(title, c.title) &&
-				channelMatches(c, wantChannel) &&
-				kotlin.math.abs(len - durationSec) <= DURATION_TOLERANCE_SEC
+			if (kotlin.math.abs(len - durationSec) > DURATION_TOLERANCE_SEC) return@filter false
+			val artistPrefixed = titleNamesArtistThenSession(title, channel, c.title)
+			val titleExact = titleAgrees(title, c.title)
+			(titleExact || artistPrefixed) &&
+				channelAgrees(c, wantChannel, channel, artistPrefixed, titleExact)
 		}
 	}
 
 	private fun titleAgrees(sessionTitle: String, candidateTitle: String): Boolean =
 		shortTitleMatches(sessionTitle, candidateTitle) ||
 			VideoTitleMatcher.mentionSpellingOnly(sessionTitle, candidateTitle)
+
+	/** Separators YouTube puts between an owning artist and the track. */
+	private val ARTIST_TITLE_SEPARATORS = charArrayOf('-', '–', '—', '|')
+
+	/**
+	 * The candidate's own title is this session's title behind an
+	 * `"<artist> - "` prefix.
+	 *
+	 * The ordinary shape of an artist-owned upload, and the reason a legitimate
+	 * first play could not be identified at all. YouTube Music publishes
+	 * `TITLE = "Solid As A Rock (Official Audio)"` with
+	 * `ARTIST = "Sizzla Kalonji"`, while the upload it is playing is titled
+	 * `"Sizzla Kalonji - Solid As A Rock (Official Audio)"`. Those are the same
+	 * item described twice, and [titleKey] equality alone calls them different.
+	 *
+	 * Deliberately not a fuzzy match. Both halves must be *exact* keys: the part
+	 * before the first separator must be the artist the session published, and
+	 * everything after it must be the session's title. `"Sizzla Kalonji - Solid
+	 * As A Rock - RMR Records Jamaica"` is refused here, because its remainder
+	 * names a third party and is not the session's title — which is also why the
+	 * *first* separator is the one that counts.
+	 *
+	 * This never widens which titles agree on its own: it is one extra shape, and
+	 * a candidate still has to satisfy channel and duration independently.
+	 */
+	internal fun titleNamesArtistThenSession(
+		sessionTitle: String,
+		sessionArtist: String?,
+		candidateTitle: String,
+	): Boolean {
+		val artist = sessionArtist?.let(::titleKey)?.takeIf { it.isNotEmpty() } ?: return false
+		val wanted = titleKey(sessionTitle).takeIf { it.isNotEmpty() } ?: return false
+		val cut = candidateTitle.indexOfFirst { it in ARTIST_TITLE_SEPARATORS }
+		if (cut <= 0) return false
+		return titleKey(candidateTitle.take(cut)) == artist &&
+			titleKey(candidateTitle.substring(cut + 1)) == wanted
+	}
+
+	/**
+	 * The candidate title opens with the work the player named.
+	 *
+	 * The exact counterpart of [titleNamesArtistThenSession], for the order
+	 * YouTube publishes just as often. Both of these are real canonical titles
+	 * over rows a YouTube Music shelf matched on work *and* complete credit:
+	 *
+	 * ```
+	 * El Preso - Fruko y Sus Tesos (Video Oficial) | Discos Fuentes
+	 * Gotas De Lluvia, Grupo Niche - Video Letra
+	 * ```
+	 *
+	 * [com.rustedwax.app.detect.TitleParser.parse] cannot orient either one — the
+	 * first has two separators and a channel that agrees with neither side, so it
+	 * conservatively keeps the whole string as the track; the second is read as a
+	 * conventional `Artist - Track` and yields `Video Letra`. That conservatism is
+	 * correct for building a payload and wrong for asking "does this page name the
+	 * work", because the answer is plainly yes in both.
+	 *
+	 * Deliberately not a substring search. The work must be the title's opening
+	 * run, whole, up to a separator or a comma — so every boundary is tried rather
+	 * than only the first, which is what lets a work that contains a comma of its
+	 * own (`Oiga, Mire, Vea - …`) be compared entire instead of cut at its second
+	 * word. A title that opens with a *different* work, or with the artist, does
+	 * not match.
+	 *
+	 * Says nothing whatever about who performed the work. Its callers grade the
+	 * performer separately and a distributor's upload still earns no credit.
+	 */
+	internal fun titleLeadsWithSessionWork(
+		candidateTitle: String,
+		sessionWork: String,
+	): Boolean {
+		val wanted = titleKey(sessionWork).takeIf(String::isNotEmpty) ?: return false
+		val title = candidateTitle.trim()
+		title.forEachIndexed { index, character ->
+			if (index > 0 && (character in ARTIST_TITLE_SEPARATORS || character == ',')) {
+				if (titleKey(title.take(index)) == wanted) return true
+			}
+		}
+		return false
+	}
+
+	/**
+	 * The owner names the same artist under a shorter form of the name.
+	 *
+	 * `"Sizzla"` owning `"Sizzla Kalonji"`'s upload, once `- Topic` and `VEVO`
+	 * have been stripped by [TitleParser.cleanChannel]. Compared as whole name
+	 * tokens rather than as substrings: `"Sizzla"` may own `"Sizzla Kalonji"`'s
+	 * upload, but an owner cannot establish identity by adding arbitrary tokens,
+	 * so `"Sizzla Gang"` may not own `"Sizzla"`'s. Owner-side additions are
+	 * limited to the exact observed aliases below.
+	 *
+	 * **Never consulted on its own.** [channelAgrees] reaches it only where the
+	 * candidate's own title already named this exact artist, which is independent
+	 * evidence that the upload belongs to them. Without that licence the strict
+	 * rule stands, which is what keeps a reupload under a different owner out.
+	 */
+	internal fun channelIsSameArtistNamedDifferently(
+		sessionArtist: String?,
+		candidateChannel: String?,
+	): Boolean {
+		val artist = artistNameTokens(sessionArtist)
+		val owner = artistNameTokens(candidateChannel)
+		if (artist.isEmpty() || owner.isEmpty()) return false
+		return artist.containsAll(owner) || (artist to owner) in BOUNDED_OWNER_TOKEN_ALIASES
+	}
+
+	private val BOUNDED_OWNER_TOKEN_ALIASES = setOf(
+		listOf("india") to listOf("la", "india"),
+		listOf("fruko") to listOf("fruko", "y", "sus", "tesos"),
+	)
+
+	private fun artistNameTokens(value: String?): List<String> = value
+		?.let { TitleParser.cleanChannel(it) }
+		?.let(::titleKey)
+		?.split(' ')
+		?.filter(String::isNotBlank)
+		.orEmpty()
+
+	/**
+	 * The session credited a collaboration and the upload is owned by the act at
+	 * the head of that credit.
+	 *
+	 * `ARTIST = "Little Lion Sound & Queen Omega"` while the upload sits on
+	 * `Little Lion Sound`, which is where a collaboration is normally published.
+	 * [channelMatches] already reads a byline this way in the other direction — a
+	 * *candidate* whose owner is a multi-act byline led by the session's artist —
+	 * and this is the same reading of the same evidence, on the side the session
+	 * happens to have published it.
+	 *
+	 * Requires the leader to be the owner *exactly*, so it recognises a byline
+	 * rather than accepting any owner whose name appears somewhere in the credit.
+	 * Both call sites reach it only after the title has already agreed, and the
+	 * length still binds independently.
+	 */
+	internal fun channelLeadsSessionCollaboration(
+		sessionArtist: String?,
+		candidateChannel: String?,
+	): Boolean {
+		val leader = collaboratorLeader(sessionArtist)?.let(::channelKey) ?: return false
+		val owner = channelKey(candidateChannel) ?: return false
+		return owner == leader
+	}
+
+	/**
+	 * An owner YouTube itself binds to the artist.
+	 *
+	 * `"Beenie Man - Topic"` is generated by YouTube for the rights holder's art
+	 * tracks and `"capletonVEVO"` by the label's official programme; in both the
+	 * channel name *is* the artist's name by construction, which is what makes
+	 * either a statement about who recorded the work rather than about who
+	 * uploaded a copy of it.
+	 *
+	 * The other markers [com.rustedwax.app.detect.TitleParser.cleanChannel]
+	 * strips — `Official`, `Music`, `TV`, `Records` — are deliberately excluded:
+	 * a label or a fan channel can carry them, so they say nothing about the
+	 * artist. Read from the raw name, because cleaning is what removes the marker.
+	 */
+	internal fun ownerIsAuthoritativeArtistChannel(channel: String?): Boolean {
+		val raw = channel?.trim()?.takeIf(String::isNotBlank) ?: return false
+		return raw.endsWith(" - Topic", ignoreCase = true) ||
+			raw.endsWith("VEVO", ignoreCase = true)
+	}
+
+	/**
+	 * Two spellings of one artist's name, differing by a single character.
+	 *
+	 * YouTube Music published `ARTIST = "Bennie Man & Mr Vegas"` over an upload
+	 * whose owner is `Beenie Man - Topic`: `bennieman` against `beenieman`, one
+	 * substitution, and `Bad Man Nuh Flee` was unscrobblable for it while its
+	 * title and its length both agreed exactly.
+	 *
+	 * Deliberately **not** a fuzzy matcher. Exactly one edit — one substitution,
+	 * insertion or deletion — over keys of at least
+	 * [MIN_ARTIST_SPELLING_KEY_LENGTH] characters, so a short name cannot hop to
+	 * a different artist. Punctuation and spacing differences never reach it at
+	 * all: [channelKey] already erases them, so `"Mr Vegas"` and `"Mr. Vegas"`
+	 * are the same key and agree exactly.
+	 *
+	 * The session's whole credit and the lead act of a collaboration it credited
+	 * are both tried, because the published byline may name several acts while
+	 * the upload sits on one of their channels.
+	 *
+	 * **Never consulted on its own.** [channelAgrees] reaches it only where the
+	 * title already matched exactly *and* the owner is authoritative, and the
+	 * caller's own uniqueness rule still has to leave one survivor.
+	 */
+	internal fun artistNameIsOneSpellingApart(
+		sessionArtist: String?,
+		candidateChannel: String?,
+	): Boolean {
+		val owner = channelKey(candidateChannel) ?: return false
+		if (owner.length < MIN_ARTIST_SPELLING_KEY_LENGTH) return false
+		return listOfNotNull(
+			channelKey(sessionArtist),
+			collaboratorLeader(sessionArtist)?.let(::channelKey),
+		).any {
+			it.length >= MIN_ARTIST_SPELLING_KEY_LENGTH && differsByOneCharacter(it, owner)
+		}
+	}
+
+	/** Long enough that one changed character cannot reach a different act. */
+	private const val MIN_ARTIST_SPELLING_KEY_LENGTH = 6
+
+	private fun differsByOneCharacter(first: String, second: String): Boolean = when {
+		first == second -> false
+		first.length == second.length -> first.indices.count { first[it] != second[it] } == 1
+		first.length == second.length + 1 -> isOneDeletionOf(first, second)
+		second.length == first.length + 1 -> isOneDeletionOf(second, first)
+		else -> false
+	}
+
+	private fun isOneDeletionOf(longer: String, shorter: String): Boolean {
+		var i = 0
+		while (i < shorter.length && longer[i] == shorter[i]) i++
+		return longer.removeRange(i, i + 1) == shorter
+	}
+
+	/**
+	 * A card the listing cannot settle, because only its watch page names the
+	 * owner authoritatively.
+	 *
+	 * A search byline reads `Beenie Man`; the page reads `Beenie Man - Topic`.
+	 * The spelling licence requires the marker, so a near-spelling card is worth
+	 * completing and is never acceptable from the listing alone — which is also
+	 * the extra evidence that makes the licence safe.
+	 */
+	internal fun requiresWatchPageForArtistSpelling(
+		candidate: Candidate,
+		title: String,
+		channel: String?,
+	): Boolean {
+		val wantChannel = channelKey(channel) ?: return false
+		if (!shortTitleMatches(title, candidate.title)) return false
+		if (channelMatches(candidate, wantChannel)) return false
+		if (ownerIsAuthoritativeArtistChannel(candidate.channel)) return false
+		return artistNameIsOneSpellingApart(channel, candidate.channel)
+	}
+
+	/**
+	 * Exact owner agreement, or one of three named variations the session's own
+	 * fields license: the same artist under a shorter name on an upload whose
+	 * title says so ([artistPrefixed]); the lead act of a collaboration the
+	 * session credited to several; or one artist name spelled two ways, which
+	 * needs an exact title *and* an owner YouTube binds to the artist.
+	 */
+	private fun channelAgrees(
+		candidate: Candidate,
+		wantChannel: String,
+		sessionArtist: String?,
+		artistPrefixed: Boolean,
+		titleExact: Boolean,
+	): Boolean = channelMatches(candidate, wantChannel) ||
+		(artistPrefixed && channelIsSameArtistNamedDifferently(sessionArtist, candidate.channel)) ||
+		channelLeadsSessionCollaboration(sessionArtist, candidate.channel) ||
+		(
+			titleExact &&
+				ownerIsAuthoritativeArtistChannel(candidate.channel) &&
+				artistNameIsOneSpellingApart(sessionArtist, candidate.channel)
+			)
 
 	/**
 	 * Whether a fully-populated candidate proves the same media-session item.
@@ -159,10 +420,18 @@ object SearchResultsParser {
 		channel: String?,
 		durationSec: Long?,
 	): Boolean {
-		if (!titleAgrees(title, candidate.title)) return false
+		val artistPrefixed = titleNamesArtistThenSession(title, channel, candidate.title)
+		val titleExact = titleAgrees(title, candidate.title)
+		if (!titleExact && !artistPrefixed) return false
 		val wantChannel = channelKey(channel) ?: return false
 		val candidateChannel = channelKey(candidate.channel)
-		if (candidateChannel != null && !channelMatches(candidate, wantChannel)) return false
+		// A near-spelling card is admitted here without the authoritative marker
+		// the listing cannot show, so that its watch page — which can — is fetched.
+		// Acceptance still happens in [identityMatches], against that page.
+		if (candidateChannel != null &&
+			!channelAgrees(candidate, wantChannel, channel, artistPrefixed, titleExact) &&
+			!requiresWatchPageForArtistSpelling(candidate, title, channel)
+		) return false
 		val candidateDuration = candidate.lengthSeconds
 		if (
 			candidateDuration != null && durationSec != null &&

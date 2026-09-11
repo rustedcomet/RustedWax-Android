@@ -27,6 +27,7 @@ class BrowserYouTubeAdapter(
 		requiresExactIdToCarryProgress = false,
 		usesStoppedReplacementGrace = false,
 		supportsPictureInPictureInference = false,
+		requiresEstablishedTimeline = true,
 	)
 
 	override val evidenceCapabilities = SourceEvidenceCapabilities(

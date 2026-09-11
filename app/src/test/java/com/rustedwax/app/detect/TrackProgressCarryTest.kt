@@ -482,9 +482,8 @@ class TrackProgressCarryTest {
 	}
 
 	/**
-	 * Reduced physical regression. YouTube Music token 553
-	 * disappeared at 199165ms of 299235ms (66.6%) after resolving exact id
-	 * UxQv0SGRt8g. The generic resumable-position path parked that already-earned
+	 * Regression: an identified YouTube Music listen can disappear after crossing
+	 * the threshold. The generic resumable-position path parked that already-earned
 	 * auto-scrobble for fifteen minutes, leaving it in neither History nor Not
 	 * logged. The scoring layer may request prompt disposition without teaching
 	 * this carry store what a threshold means.
@@ -615,9 +614,9 @@ class TrackProgressCarryTest {
 	/**
 	 * A screen lock is not the end of a viewing.
 	 *
-	 * The physical case, to the millisecond: Gangnam Style at 71 065 ms with
-	 * 71 286 ms measured, the screen locked, and the same video back four minutes
-	 * later at 110 591 ms. The forty seconds in between played to nobody, so the
+	 * Synthetic regression: the screen locks after roughly 71 seconds and the same
+	 * item returns later at a position roughly 40 seconds ahead. The gap played to
+	 * nobody, so the
 	 * position moved without the clock — which is precisely the shape the
 	 * in-place resume window cannot describe, and precisely why the whole listen
 	 * used to be thrown away and restarted at zero.

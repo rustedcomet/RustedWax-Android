@@ -550,7 +550,7 @@ class ForegroundShortTrackerTest {
 
 	@Test
 	fun `the freshness watchdog interleaving does not stop inferred credit`() {
-		// Measured on the device: while the surface is gone the 1s freshness
+		// While the surface is gone the 1s freshness
 		// watchdog raises its own Missing with no playback evidence, so real
 		// observations arrive interleaved with generic ones. Treating a generic
 		// refusal as a pause dropped the anchor between every pair of real ticks

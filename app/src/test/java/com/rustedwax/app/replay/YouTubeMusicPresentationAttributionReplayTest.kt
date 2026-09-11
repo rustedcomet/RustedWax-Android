@@ -1,6 +1,6 @@
 package com.rustedwax.app.replay
 
-import com.rustedwax.app.detect.NativePreResolvedRoute
+import com.rustedwax.app.enrich.NativeStructuredMusicMatcher
 import com.rustedwax.app.enrich.VideoFacts
 import com.rustedwax.app.scrobble.FinalizationRuntime
 import com.rustedwax.youtube.identity.VideoResolution
@@ -57,6 +57,8 @@ class YouTubeMusicPresentationAttributionReplayTest : ReplayScenarioTest() {
 				videoId = videoId,
 				title = title,
 				author = artist,
+				originalArtist = artist,
+				watchPageArtistCredit = artist,
 				lengthSeconds = durationMs / 1000,
 				category = "Music",
 				watchPageResolved = true,
@@ -75,6 +77,7 @@ class YouTubeMusicPresentationAttributionReplayTest : ReplayScenarioTest() {
 						lengthSeconds = durationMs / 1000,
 						uniquelyResolved = true,
 						structuredNativeMusic = true,
+						presentationDurationCorroborated = true,
 					),
 				)
 			} else {
@@ -345,14 +348,205 @@ class YouTubeMusicPresentationAttributionReplayTest : ReplayScenarioTest() {
 	}
 
 	@Test
-	fun `only the duration-corroborated route may attribute a presentation`() {
-		assertTrue(NativePreResolvedRoute.STRUCTURED_MUSIC.corroboratesPresentationDuration)
+	fun `the structured matcher marks its own proof as duration-corroborated`() {
+		val resolved = NativeStructuredMusicMatcher.select(
+			candidates = listOf(
+				VideoResolution(
+					videoId = videoId,
+					source = "search",
+					title = title,
+					channel = artist,
+					lengthSeconds = songMs / 1000,
+				),
+			),
+			nativeTitle = title,
+			nativeArtist = artist,
+			durationSec = songMs / 1000,
+		).resolution
+		assertNotNull(resolved)
+		assertTrue(
+			"the matcher that compared the lengths is what records that it did",
+			resolved!!.presentationDurationCorroborated,
+		)
+	}
+
+	@Test
+	fun `a proof is unattributed until the code that matched it says otherwise`() {
+		assertFalse(
+			"the safe default: a new resolver path attributes nothing until its " +
+				"author has decided the length was checked",
+			VideoResolution(videoId = videoId, source = "some future route")
+				.presentationDurationCorroborated,
+		)
+	}
+
+	// ── H. time measured on an unattributed presentation is never folded on ───
+
+	/**
+	 * Synthetic regression for unattributed duration churn.
+	 *
+	 * YouTube Music published "Solid As A Rock" / Sizzla under three lengths in one
+	 * listen — 91 s, then 39 s, then the real 213 s song. The first two were never
+	 * attributed to the work; only the third was. The listen nonetheless finalized
+	 * at `played 243s of 213s` and broadcast `percent_played: 100` after about
+	 * 110 s of the song had actually played.
+	 *
+	 * The 130 s belonged to whatever those two surfaces were. Once carried past the
+	 * boundary it became indistinguishable from the song's own, and the song spent
+	 * it.
+	 */
+	@Test
+	fun `two unattributed presentations add nothing to the song that follows them`() {
+		val harness = harness().feed(
+			PlaybackEvent.SessionMetadata(title = title, artist = artist, durationMs = 91_000),
+			PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 0),
+			// Left before its own end, so the spent-surface rule cannot reach it.
+			PlaybackEvent.Advance(40_000),
+			// And shorter than the one before it, which that rule also cannot reach:
+			// it only discards a surface a *longer* one replaces.
+			PlaybackEvent.SessionMetadata(title = title, artist = artist, durationMs = 39_000),
+			PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 0),
+			PlaybackEvent.Advance(30_000),
+			// The song itself, and the only surface this harness will attribute.
+			PlaybackEvent.SessionMetadata(title = title, artist = artist, durationMs = songMs),
+			PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 0),
+			PlaybackEvent.Advance(110_000),
+			PlaybackEvent.Finalized("song ended"),
+		)
+
+		val song = harness.finalized.single()
 		assertEquals(
-			"every other route names the work without checking the surface",
-			emptyList<NativePreResolvedRoute>(),
-			NativePreResolvedRoute.entries
-				.filter { it != NativePreResolvedRoute.STRUCTURED_MUSIC }
-				.filter { it.corroboratesPresentationDuration },
+			"only the 110s observed on the proven 213s presentation may count",
+			110_000L,
+			song.playedMs,
+		)
+		assertTrue(
+			"progress may never exceed the work it is credited to",
+			song.playedMs <= songMs,
+		)
+		assertEquals(
+			"110s of 213s is 51%; folding the 70s would have made it 84% and eligible",
+			emptyList<ReplayHarness.BroadcastPayload>(),
+			harness.broadcasts,
+		)
+	}
+
+	/**
+	 * The Dai Dai shape: an interstitial that is *not* fully spent before the song
+	 * replaces it, so the spent-surface rule cannot discard it. Finalized
+	 * `253s of 223s` and wrote 100 %.
+	 */
+	@Test
+	fun `an interstitial cut short before the song still adds nothing to it`() {
+		val harness = harness().feed(
+			PlaybackEvent.SessionMetadata(title = title, artist = artist, durationMs = 30_000),
+			PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 0),
+			// Cut off at 18s of its own 30s: never spent, so the surface is replaced
+			// rather than superseded.
+			PlaybackEvent.Advance(18_000),
+			PlaybackEvent.SessionMetadata(title = title, artist = artist, durationMs = songMs),
+			PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 0),
+			PlaybackEvent.Advance(120_000),
+			PlaybackEvent.Finalized("song ended"),
+		)
+
+		assertEquals(
+			"the 18s of interstitial is not the song's",
+			120_000L,
+			harness.finalized.single().playedMs,
+		)
+		assertEquals(
+			"120s of 213s is 56% — below threshold, so nothing may be written",
+			emptyList<ReplayHarness.BroadcastPayload>(),
+			harness.broadcasts,
+		)
+	}
+
+	/**
+	 * The one thing an interstitial always has is the song's own name. If sharing
+	 * a title and artist were enough, every scenario above would fail — so this
+	 * asserts the negative directly: provisional time may not be made organic by
+	 * the metadata agreeing with itself.
+	 */
+	@Test
+	fun `identical title and artist across surfaces does not make provisional time organic`() {
+		val harness = harness().feed(
+			PlaybackEvent.SessionMetadata(title = title, artist = artist, durationMs = 45_000),
+			PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 0),
+			// Short of its own length: not a spent surface, so nothing but the
+			// attribution rule can keep this interval out of the song.
+			PlaybackEvent.Advance(40_000),
+		)
+		assertTrue(
+			"the surface must be unattributed for this scenario to mean anything",
+			harness.trace.presentationAttributionAmbiguous,
+		)
+
+		harness.feed(
+			PlaybackEvent.SessionMetadata(title = title, artist = artist, durationMs = songMs),
+			PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 0),
+			PlaybackEvent.Advance(100_000),
+			PlaybackEvent.Finalized("song ended"),
+		)
+
+		assertEquals(100_000L, harness.finalized.single().playedMs)
+		assertEquals(emptyList<ReplayHarness.BroadcastPayload>(), harness.broadcasts)
+	}
+
+	/**
+	 * Ad time may not carry a genuine sub-threshold play over the line. This is the
+	 * user-visible harm: 45 s of interstitial plus 100 s of a 213 s song is 68 % of
+	 * nothing anyone listened to.
+	 */
+	@Test
+	fun `interstitial seconds cannot lift a sub-threshold song over the line`() {
+		val harness = harness().feed(
+			PlaybackEvent.SessionMetadata(title = title, artist = artist, durationMs = 45_000),
+			PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 0),
+			PlaybackEvent.Advance(40_000),
+			PlaybackEvent.SessionMetadata(title = title, artist = artist, durationMs = songMs),
+			PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 0),
+			PlaybackEvent.Advance(100_000),
+			PlaybackEvent.Finalized("song ended"),
+		)
+
+		assertEquals(
+			"140s would have been 65% and eligible; 100s is 46% and is not",
+			emptyList<ReplayHarness.BroadcastPayload>(),
+			harness.broadcasts,
+		)
+		assertEquals(100_000L, harness.finalized.single().playedMs)
+	}
+
+	/**
+	 * The other half of the rule, and the one that must not change: a presentation
+	 * that *was* proven keeps its progress across the boundary. A Song↔Video switch
+	 * is one listen continuing, and this fix does not touch it.
+	 */
+	@Test
+	fun `a proven presentation keeps its progress across an alternate-length switch`() {
+		val harness = harness().feed(
+			PlaybackEvent.SessionMetadata(title = title, artist = artist, durationMs = songMs),
+			PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 0),
+			PlaybackEvent.Advance(100_000),
+		)
+		assertFalse(
+			"the song must be attributed before the switch, or this proves nothing",
+			harness.trace.presentationAttributionAmbiguous,
+		)
+
+		harness.feed(
+			// The video rendering of the same work, at its own length.
+			PlaybackEvent.SessionMetadata(title = title, artist = artist, durationMs = 240_000),
+			PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 100_000),
+			PlaybackEvent.Advance(40_000),
+			PlaybackEvent.Finalized("song ended"),
+		)
+
+		assertEquals(
+			"the 100s earned on the proven surface survives the switch",
+			140_000L,
+			harness.finalized.single().playedMs,
 		)
 	}
 }

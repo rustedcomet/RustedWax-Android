@@ -29,15 +29,15 @@ class ShortsContinuityFieldTest {
 			organic(title, position, at)
 			at += 1_000
 		}
-		// 16:31:46, one frame with the footer absent.
+		// One frame with the footer absent.
 		finalized.addAll(tracker.proofMissing(at, "identity is stabilizing").finalized)
 		at += 1_000
-		// 16:31:47, the handle is back but the title is not.
+		// Next frame: the handle is back but the title is not.
 		organic(null, 91, at)
 		at += 1_000
 		organic(null, 94, at)
 		at += 3_000
-		// 16:31:50, the hold is released and the title returns.
+		// Later, the hold is released and the title returns.
 		for (position in 95L..119L) {
 			organic(title, position, at)
 			at += 1_000

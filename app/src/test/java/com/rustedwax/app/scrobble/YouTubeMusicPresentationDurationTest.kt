@@ -37,6 +37,8 @@ class YouTubeMusicPresentationDurationTest : ReplayScenarioTest() {
 				videoId = audioId,
 				title = "Buss It Open",
 				author = "Mr. Vegas",
+				originalArtist = "Mr. Vegas",
+				watchPageArtistCredit = "Mr. Vegas",
 				lengthSeconds = 196,
 				category = "Music",
 				watchPageResolved = true,

@@ -30,6 +30,8 @@ class NowPreviewTest {
 					videoId = it,
 					title = "Dear Jessie",
 					author = "Madonna",
+					originalArtist = "Madonna",
+					watchPageArtistCredit = "Madonna",
 					category = "Music",
 					lengthSeconds = 276,
 					musicVideoType = "MUSIC_VIDEO_TYPE_OMV",
