@@ -1266,7 +1266,7 @@ class ForegroundShortTracker(
 		/**
 		 * How long a footer title may be missing and still continue its Short.
 		 *
-		 * The measured blink is one to three seconds. This is deliberately far
+		 * A brief blink lasts only a few seconds. This is deliberately far
 		 * shorter than any navigation and longer than [MISSING_PROOF_GRACE_MS],
 		 * so a blink spanning a brief freeze still continues.
 		 */
@@ -1275,8 +1275,8 @@ class ForegroundShortTracker(
 		/**
 		 * How long a Short that has just gone away may come back and resume.
 		 *
-		 * A tab switch away and back measured 7–14 seconds; thirty gives that
-		 * room without letting an unrelated re-encounter half a minute later
+		 * Thirty seconds accommodates a brief tab switch without letting
+		 * an unrelated re-encounter half a minute later
 		 * inherit someone else's seconds.
 		 */
 		const val RESUME_WINDOW_MS = 30_000L

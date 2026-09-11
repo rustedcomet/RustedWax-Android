@@ -1,6 +1,7 @@
 package com.rustedwax.app.enrich
 
 import com.rustedwax.youtube.identity.VideoResolution
+import com.rustedwax.youtube.identity.PerformerCreditEvidence
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -354,27 +355,33 @@ class YouTubeMusicCatalogSearchParserTest {
 			lengthSeconds = 168,
 		)
 
-		assertNotNull(
-			VideoIdResolver.cardBackedYouTubeMusicResolution(
+		val catalogOnly = VideoIdResolver.cardBackedYouTubeMusicResolution(
 				row, fetchedPage = null, nativeTitle = "So High",
+				nativeArtist = "Mr. Vegas, Lizi & Walshy Fire",
 				nativeAlbum = "So High", durationSec = 168,
-			),
+			)
+		assertNotNull(catalogOnly)
+		assertEquals(
+			"catalog credit without a canonical credited owner is not independent authority",
+			PerformerCreditEvidence.NONE,
+			catalogOnly?.performerCreditEvidence,
 		)
 		assertNotNull(
 			VideoIdResolver.cardBackedYouTubeMusicResolution(
-				row, agreeingPage, "So High", "So High", 168,
+				row, agreeingPage, "So High", "Mr. Vegas, Lizi & Walshy Fire", "So High", 168,
 			),
 		)
 		assertNull(
 			VideoIdResolver.cardBackedYouTubeMusicResolution(
 				row, agreeingPage.copy(title = "A different work"),
-				"So High", "So High", 168,
+				"So High", "Mr. Vegas, Lizi & Walshy Fire", "So High", 168,
 			),
 		)
 		assertNull(
 			VideoIdResolver.cardBackedYouTubeMusicResolution(
 				row.copy(album = "A different release"), fetchedPage = null,
-				nativeTitle = "So High", nativeAlbum = "So High", durationSec = 168,
+				nativeTitle = "So High", nativeArtist = "Mr. Vegas, Lizi & Walshy Fire",
+				nativeAlbum = "So High", durationSec = 168,
 			),
 		)
 	}
@@ -388,6 +395,7 @@ class YouTubeMusicCatalogSearchParserTest {
 		assertNotNull(
 			VideoIdResolver.cardBackedYouTubeMusicResolution(
 				row, fetchedPage = null, nativeTitle = "Wine Pon It",
+				nativeArtist = "Munga",
 				nativeAlbum = null, durationSec = 188,
 			),
 		)
@@ -395,6 +403,7 @@ class YouTubeMusicCatalogSearchParserTest {
 		assertNull(
 			VideoIdResolver.cardBackedYouTubeMusicResolution(
 				row, fetchedPage = null, nativeTitle = "Wine Pon It",
+				nativeArtist = "Munga",
 				nativeAlbum = "Some other release", durationSec = 188,
 			),
 		)
@@ -415,18 +424,20 @@ class YouTubeMusicCatalogSearchParserTest {
 
 		assertNotNull(
 			VideoIdResolver.cardBackedYouTubeMusicResolution(
-				row, aliasPage, "Wine Pon It", null, 188,
+				row, aliasPage, "Wine Pon It", "Munga", null, 188,
 			),
 		)
 		// The work and the length are still hard requirements.
 		assertNull(
 			VideoIdResolver.cardBackedYouTubeMusicResolution(
-				row, aliasPage.copy(title = "A different work"), "Wine Pon It", null, 188,
+				row, aliasPage.copy(title = "A different work"),
+				"Wine Pon It", "Munga", null, 188,
 			),
 		)
 		assertNull(
 			VideoIdResolver.cardBackedYouTubeMusicResolution(
-				row, aliasPage.copy(lengthSeconds = 400), "Wine Pon It", null, 188,
+				row, aliasPage.copy(lengthSeconds = 400),
+				"Wine Pon It", "Munga", null, 188,
 			),
 		)
 	}

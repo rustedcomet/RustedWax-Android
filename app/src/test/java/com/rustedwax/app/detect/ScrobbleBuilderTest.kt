@@ -1,7 +1,11 @@
 package com.rustedwax.app.detect
 
+import com.rustedwax.app.enrich.MusicBrainzVerifier
+import com.rustedwax.app.enrich.FactsCache
 import com.rustedwax.app.enrich.VideoFacts
 import com.rustedwax.hive.HiveScrobblePayload
+import com.rustedwax.youtube.identity.VideoResolution
+import com.rustedwax.youtube.identity.PerformerCreditEvidence
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -128,14 +132,23 @@ class ScrobbleBuilderTest {
 		assertEquals("Intro", payload.title)
 	}
 
-	/** YouTube Music is a music player and its artist field really is one. */
+	/** Source-published YouTube Music metadata is preserved rather than reparsed. */
 	@Test
-	fun `YouTube Music keeps trusting its own metadata`() {
+	fun `YouTube Music preserves its source-published metadata`() {
 		val payload = ScrobbleBuilder.from(
 			nativeMusicSession(
 				title = "Clean Song (Official Audio)",
 				artist = "Clean Artist",
 				album = "Clean Album",
+			),
+			VideoFacts(
+				videoId = "abcdefghijk",
+				title = "Clean Song (Official Audio)",
+				author = "Distributor Uploads",
+				originalArtist = "Clean Artist",
+				watchPageArtistCredit = "Clean Artist",
+				category = "Music",
+				lengthSeconds = 240,
 			),
 		)
 		assertEquals(HiveScrobblePayload.KIND_SONG, payload!!.kind)
@@ -149,7 +162,7 @@ class ScrobbleBuilderTest {
 	 * listen is kept, and only the claim about it narrows to what is provable.
 	 */
 	@Test
-	fun `an unestablishable artist downgrades the kind instead of guessing`() {
+	fun `an unsplittable generic music title remains a video entry`() {
 		val payload = ScrobbleBuilder.from(
 			session("Full Album Mix Nonstop", "Some Uploader").copy(
 				packageName = YouTubeProbe.YOUTUBE_PACKAGE,
@@ -166,6 +179,104 @@ class ScrobbleBuilderTest {
 		assertNotNull(payload)
 		assertEquals(HiveScrobblePayload.KIND_VIDEO, payload!!.kind)
 		assertEquals("Some Uploader", payload.artist)
+	}
+
+	// ── source metadata remains best effort after identity verification ───────
+	// ── the product contract: a verified listen scrobbles on source metadata ──
+
+	/*
+	 * RustedWax is a playback scrobbler, not a musicological authority. What has
+	 * to be right is the *media identity* and the *playback*: a verified video id,
+	 * a title, real measured time, and a reasonable song/video classification.
+	 * The artist string is best-effort — whatever YouTube or YouTube Music
+	 * published for that id — and an imperfect one is acceptable where a wrong
+	 * video or invented playback is not.
+	 *
+	 * MusicBrainz is enrichment: it supplies canonical spelling and feeds
+	 * classification. It may not authorize a write and it may not veto one.
+	 */
+
+	@Test
+	fun `a verified music listen scrobbles on source metadata with no MusicBrainz match`() {
+		val payload = ScrobbleBuilder.from(
+			nativeMusicSession("El Preso", "Fruko & Wilson Saoko", null),
+			VideoFacts(
+				videoId = "abcdefghijk",
+				title = "El Preso - Fruko y Sus Tesos (Video Oficial) | Some Label",
+				author = "Some Label Distribution",
+				category = "Music",
+				lengthSeconds = 240,
+				watchPageResolved = true,
+				musicVideoType = "MUSIC_VIDEO_TYPE_OMV",
+			),
+			MusicBrainzVerifier.Match(found = false),
+		)
+
+		assertEquals(HiveScrobblePayload.KIND_SONG, payload?.kind)
+		assertEquals("Fruko & Wilson Saoko", payload?.artist)
+		assertEquals("El Preso", payload?.title)
+	}
+
+	@Test
+	fun `an unreachable MusicBrainz cannot veto a verified listen`() {
+		val session = nativeMusicSession("Known Work", "Known Artist", null)
+		val facts = VideoFacts(
+			videoId = "abcdefghijk",
+			title = "Known Work",
+			author = "Some Label Distribution",
+			category = "Music",
+			lengthSeconds = 240,
+			watchPageResolved = true,
+			musicVideoType = "MUSIC_VIDEO_TYPE_OMV",
+		)
+
+		// `null` is what a timeout, a DNS failure and an HTTP 503 all produce.
+		for (mb in listOf(null, MusicBrainzVerifier.Match(found = false))) {
+			val payload = ScrobbleBuilder.from(session, facts, mb)
+			assertEquals(HiveScrobblePayload.KIND_SONG, payload?.kind)
+			assertEquals("Known Artist", payload?.artist)
+		}
+	}
+
+	@Test
+	fun `an ordinary YouTube video may be credited to the channel that published it`() {
+		val payload = ScrobbleBuilder.from(
+			session("Some Talk About Things", "A Channel", 600_000),
+			VideoFacts(
+				videoId = "abcdefghijk",
+				title = "Some Talk About Things",
+				author = "A Channel",
+				category = "Entertainment",
+				lengthSeconds = 600,
+				watchPageResolved = true,
+			),
+		)
+
+		assertNotNull("a verified listen is still a listen", payload)
+		assertEquals("A Channel", payload?.artist)
+	}
+
+	@Test
+	fun `an unverified video id is still refused`() {
+		val session = nativeMusicSession("Known Work", "Known Artist", null)
+		val facts = VideoFacts(
+			videoId = "abcdefghijk",
+			title = "Known Work",
+			author = "Known Artist",
+			category = "Music",
+			lengthSeconds = 240,
+			watchPageResolved = true,
+			musicVideoType = "MUSIC_VIDEO_TYPE_OMV",
+		)
+
+		assertNull(
+			"no id, no hyperlink, no entry",
+			ScrobbleBuilder.from(session, facts, null, videoId = null),
+		)
+		assertNull(
+			"a malformed id is not a YouTube video",
+			ScrobbleBuilder.from(session, facts, null, videoId = "not-an-id"),
+		)
 	}
 
 	private fun nativeMusicSession(
@@ -211,6 +322,8 @@ class ScrobbleBuilderTest {
 				videoId = "abcdefghijk",
 				title = "Different Browser-Shaped Artist - Different Title",
 				author = "Different Channel",
+				originalArtist = "Native Artist",
+				watchPageArtistCredit = "Native Artist",
 				category = "Music",
 				lengthSeconds = 240,
 				album = "Lookup Album",
@@ -221,6 +334,134 @@ class ScrobbleBuilderTest {
 		assertEquals("Native Artist", payload.artist)
 		assertEquals("Song - Not a Browser Credit Shape (Live)", payload.title)
 		assertEquals("Native Album", payload.album)
+	}
+
+	@Test
+	fun `native YouTube Music preserves its artist when the page has a managed owner`() {
+		val payload = ScrobbleBuilder.from(
+			nativeMusicSession("Bohemian Rhapsody", "Queen", "A Night At The Opera"),
+			VideoFacts(
+				videoId = "abcdefghijk",
+				title = "Bohemian Rhapsody",
+				author = "Queen - Topic",
+				category = "Music",
+				lengthSeconds = 240,
+				watchPageResolved = true,
+				musicVideoType = "MUSIC_VIDEO_TYPE_ATV",
+			),
+		)
+
+		assertEquals("Queen", payload!!.artist)
+	}
+
+	@Test
+	fun `MusicBrainz may enrich a verified native YouTube Music credit`() {
+		val payload = ScrobbleBuilder.from(
+			nativeMusicSession("Known Work", "Known Artist", null),
+			VideoFacts(
+				videoId = "abcdefghijk",
+				title = "Known Work",
+				author = "Distributor Uploads",
+				category = "Music",
+				lengthSeconds = 240,
+			),
+			MusicBrainzVerifier.Match(
+				found = true,
+				artist = "Known Artist",
+				title = "Known Work",
+			),
+		)
+
+		assertEquals("Known Artist", payload!!.artist)
+	}
+
+	@Test
+	fun `a revalidated structured identity preserves source credit metadata`() {
+		val session = nativeMusicSession("Known Solo Work", "Known Solo Artist", null)
+		val identity = VideoResolution(
+			videoId = "abcdefghijk",
+			source = "structured native music title+artist+duration",
+			title = "Known Solo Artist - Known Solo Work",
+			channel = "Known Solo Artist",
+			lengthSeconds = 240,
+			uniquelyResolved = true,
+			structuredNativeMusic = true,
+			presentationDurationCorroborated = true,
+			performerCreditEvidence = PerformerCreditEvidence.CANONICAL_PAGE_COMPLETE_CREDIT,
+		)
+		val payload = ScrobbleBuilder.from(
+			session = session,
+			facts = VideoFacts(
+				videoId = identity.videoId,
+				title = identity.title,
+				author = identity.channel,
+				lengthSeconds = 240,
+				category = "Music",
+			),
+			identityEvidence = identity,
+		)
+
+		assertEquals("Known Solo Artist", payload!!.artist)
+	}
+
+	@Test
+	fun `resolver metadata does not override the source-published credit`() {
+		val session = nativeMusicSession("Follow You (Official Video)", "Bring Me The Horizon", null)
+		val raw = VideoResolution(
+			videoId = "abcdefghijk",
+			source = "title+channel+duration search",
+			title = "Bring Me The Horizon - Follow You (Official Video)",
+			channel = "Bring Me The Horizon",
+			lengthSeconds = 240,
+			uniquelyResolved = true,
+			presentationDurationCorroborated = true,
+			performerCreditEvidence = PerformerCreditEvidence.YOUTUBE_LISTING_COMPLETE_CREDIT,
+		)
+
+		assertEquals(
+			"Bring Me The Horizon",
+			ScrobbleBuilder.from(
+				session = session,
+				facts = VideoFacts(
+					videoId = raw.videoId,
+					title = raw.title,
+					author = raw.channel,
+					lengthSeconds = 240,
+					category = "Music",
+				),
+				identityEvidence = raw,
+			)!!.artist,
+		)
+	}
+
+	@Test
+	fun `legacy facts remain usable with a fresh verified identity`() {
+		val session = nativeMusicSession("Legacy Work", "Legacy Artist", null)
+		val facts = FactsCache.decode(
+			"abcdefghijk",
+			"""{"title":"Legacy Artist - Legacy Work","author":"Legacy Artist","lengthSeconds":240,"category":"Music","watchPageResolved":true,"ownerHandle":null}""",
+		)
+		val identity = VideoResolution(
+			videoId = "abcdefghijk",
+			source = "structured native music title+artist+duration",
+			title = "Legacy Artist - Legacy Work",
+			channel = "Legacy Artist",
+			lengthSeconds = 240,
+			uniquelyResolved = true,
+			structuredNativeMusic = true,
+			presentationDurationCorroborated = true,
+			performerCreditEvidence = PerformerCreditEvidence.CANONICAL_PAGE_COMPLETE_CREDIT,
+		)
+
+		assertNull(facts?.watchPageArtistCredit)
+		assertEquals(
+			"Legacy Artist",
+			ScrobbleBuilder.from(
+				session = session,
+				facts = facts,
+				identityEvidence = identity,
+			)!!.artist,
+		)
 	}
 
 	@Test
@@ -266,14 +507,9 @@ class ScrobbleBuilderTest {
 
 		val songPayload = ScrobbleBuilder.from(nativeSong)
 		val videoPayload = ScrobbleBuilder.from(nativeVideo)
-		// The YouTube *app* publishes the channel in the ARTIST slot, so "Clean
-		// Artist" is an uploader, not a performer under the classification contract.
-		// With no `Artist - Track` separator in the title there is nothing else to
-		// establish a performer from, so this stops claiming to be a song and
-		// becomes a video credited to its channel, which is true by construction.
-		// The listen is not lost; only the claim about it narrows to what is
-		// provable. This assertion previously read `KIND_SONG` / "Clean Artist"
-		// and was encoding the bug.
+		// The YouTube app publishes a channel in the ARTIST slot. With no
+		// `Artist - Track` structure in the generic title, classification keeps the
+		// intact title and channel as a video entry; the verified listen is not lost.
 		assertEquals(HiveScrobblePayload.KIND_VIDEO, songPayload!!.kind)
 		assertEquals("Clean Artist", songPayload.artist)
 		assertEquals("Clean Song", songPayload.title)

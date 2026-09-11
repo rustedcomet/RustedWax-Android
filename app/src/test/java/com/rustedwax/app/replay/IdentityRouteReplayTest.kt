@@ -1,6 +1,7 @@
 package com.rustedwax.app.replay
 
 import com.rustedwax.app.enrich.VideoFacts
+import com.rustedwax.app.enrich.VideoIdResolver
 import com.rustedwax.youtube.identity.VideoResolution
 import com.rustedwax.youtube.identity.VideoResolutionAttempt
 import com.rustedwax.youtube.identity.VideoResolutionFailure
@@ -233,6 +234,130 @@ class IdentityRouteReplayTest : ReplayScenarioTest() {
 			listOf(RefusalKind.NO_VERIFIED_VIDEO_ID, RefusalKind.NO_VERIFIED_VIDEO_ID),
 			harness.unlinkedRefusalKinds,
 		)
+	}
+
+	// ---- the bounded predecessor budget ---------------------------------------
+
+	/**
+	 * Plays two verified uploads so the third listen reaches the consecutive
+	 * playlist route with a real adjacent pair behind it.
+	 */
+	private fun ReplayHarness.playTwoVerifiedPredecessors() {
+		env.facts.put(facts("firstVideoA", "First", "A Channel", 200))
+		env.facts.put(facts("secondVideo", "Second", "A Channel", 200))
+		listOf("firstVideoA" to "First", "secondVideo" to "Second").forEach { (id, title) ->
+			feed(
+				listOf(
+					PlaybackEvent.NotificationObserved(host = "youtube.com"),
+					PlaybackEvent.UrlObserved(host = "www.youtube.com", videoId = id),
+				) + playing(title, "A Channel", 200_000),
+			)
+		}
+	}
+
+	/** The production classification for a discovery set above the bounded budget. */
+	private fun budgetRefusal(lists: Int = 20): VideoResolutionAttempt =
+		checkNotNull(VideoIdResolver().predecessorPlaylistBudgetRefusal(lists))
+
+	@Test
+	fun `a predecessor set above the budget skips that route and lets search resolve`() {
+		// The reproduced defect: predecessor discovery returned 20 public lists,
+		// above the 8-list budget, so no candidate was ever fetched — and the
+		// refusal was typed AMBIGUOUS, which stopped the chain before search, the
+		// route that had already resolved this track twice during playback.
+		val harness = ReplayHarness(ReplaySource.BRAVE)
+		harness.playTwoVerifiedPredecessors()
+		harness.env.facts.put(facts("thirdVideoC", "Third", "A Channel", 200))
+		harness.env.identity.predecessorAttempt = { _, _ -> budgetRefusal() }
+		harness.env.identity.search = { title ->
+			VideoResolutionAttempt(
+				resolution = resolution("thirdVideoC", title, "A Channel", 200, "search"),
+			)
+		}
+
+		harness.feed(
+			listOf(PlaybackEvent.NotificationObserved(host = "youtube.com")) +
+				playing("Third", "A Channel", 200_000),
+		)
+
+		assertTrue(
+			"the budget-exceeded route must not end the chain: ${harness.identityRoutes}",
+			Route.SEARCH in harness.identityRoutes,
+		)
+		assertEquals(
+			listOf("firstVideoA", "secondVideo", "thirdVideoC"),
+			harness.broadcasts.map { it.videoId },
+		)
+	}
+
+	@Test
+	fun `a budget skip with nothing later verified still refuses rather than guesses`() {
+		val harness = ReplayHarness(ReplaySource.BRAVE)
+		harness.playTwoVerifiedPredecessors()
+		harness.env.identity.predecessorAttempt = { _, _ -> budgetRefusal() }
+
+		harness.feed(
+			listOf(PlaybackEvent.NotificationObserved(host = "youtube.com")) +
+				playing("Third", "A Channel", 200_000),
+		)
+
+		assertTrue(Route.SEARCH in harness.identityRoutes)
+		assertEquals(listOf("firstVideoA", "secondVideo"), harness.broadcasts.map { it.videoId })
+		assertEquals(listOf(RefusalKind.NO_VERIFIED_VIDEO_ID), harness.terminalRefusalKinds)
+		assertEquals(listOf(RefusalKind.NO_VERIFIED_VIDEO_ID), harness.unlinkedRefusalKinds)
+	}
+
+	@Test
+	fun `predecessor candidates that were evaluated and disagree still stop the chain`() {
+		// The other half of the fix: once candidate playlists have actually been
+		// fetched and their followers conflict, that is an identity verdict and
+		// no later route may overrule it.
+		val harness = ReplayHarness(ReplaySource.BRAVE)
+		harness.playTwoVerifiedPredecessors()
+		harness.env.identity.predecessorAttempt = { _, _ ->
+			VideoResolutionAttempt(
+				refusalReason = "ambiguous identity — 2 immediate playlist followers matched",
+				failure = VideoResolutionFailure.AMBIGUOUS,
+			)
+		}
+		harness.env.identity.search = {
+			error("search must not run after evaluated predecessor ambiguity")
+		}
+
+		harness.feed(
+			listOf(PlaybackEvent.NotificationObserved(host = "youtube.com")) +
+				playing("Third", "A Channel", 200_000),
+		)
+
+		assertFalse(Route.SEARCH in harness.identityRoutes)
+		assertEquals(listOf("firstVideoA", "secondVideo"), harness.broadcasts.map { it.videoId })
+		assertTrue(harness.terminalRefusalReasons.single().contains("ambiguous identity"))
+	}
+
+	@Test
+	fun `a predecessor route that simply found nothing continues exactly as before`() {
+		val harness = ReplayHarness(ReplaySource.BRAVE)
+		harness.playTwoVerifiedPredecessors()
+		harness.env.facts.put(facts("thirdVideoC", "Third", "A Channel", 200))
+		harness.env.identity.predecessorAttempt = { _, _ ->
+			VideoResolutionAttempt(
+				refusalReason = "no immediate playlist follower matched the finalized track",
+				failure = VideoResolutionFailure.NO_MATCH,
+			)
+		}
+		harness.env.identity.search = { title ->
+			VideoResolutionAttempt(
+				resolution = resolution("thirdVideoC", title, "A Channel", 200, "search"),
+			)
+		}
+
+		harness.feed(
+			listOf(PlaybackEvent.NotificationObserved(host = "youtube.com")) +
+				playing("Third", "A Channel", 200_000),
+		)
+
+		assertTrue(Route.SEARCH in harness.identityRoutes)
+		assertEquals("thirdVideoC", harness.broadcasts.last().videoId)
 	}
 
 	// ---- temporary failure ----------------------------------------------------

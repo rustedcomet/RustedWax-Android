@@ -28,6 +28,7 @@ import com.rustedwax.app.detect.TrackProgressCarry
 import com.rustedwax.core.TransportState
 import com.rustedwax.app.detect.UrlEvidence
 import com.rustedwax.app.detect.YouTubeProbe
+import com.rustedwax.app.detect.listenNeedsPresentationProof
 import com.rustedwax.app.detect.resolverContextWithObservedUrl
 
 enum class ReplaySource(val packageName: String, val label: String) {
@@ -254,6 +255,30 @@ class PlaybackTrace(
 	val presentationAttributionAmbiguous: Boolean
 		get() = listen.presentationUnprovenForNamedWork
 
+	/**
+	 * Whether the current listen already holds an exact source id.
+	 *
+	 * Paired with [presentationAttributionAmbiguous] so a scenario can state the
+	 * combination that mattered: identity present, attribution absent. A listen in
+	 * that state must still be allowed to ask for proof.
+	 */
+	val currentHasExactSourceItemId: Boolean
+		get() = listen.trackIdentity.hasExactSourceItemId
+
+	/**
+	 * The exact id this listen currently holds, or null.
+	 *
+	 * The value rather than its presence, because a presentation boundary can
+	 * leave the *wrong* id in place — one proved against a surface that has since
+	 * been discarded — and a boolean cannot tell that apart from holding none.
+	 */
+	val currentSourceItemId: String?
+		get() = listen.trackIdentity.sourceItemId
+
+	/** The memory-only carry id the resolver last installed, when one stands. */
+	val preResolvedNativeVideoId: String?
+		get() = evidence.resolverContext.preResolvedNativeVideoId
+
 	/** Wired by [ReplayHarness] to the same runtime entry point production uses. */
 	var onCarryAuthorityRequested:
 		((SessionSnapshot, (SessionProbe.NativeResolvedIdentity?) -> Unit) -> Unit)? = null
@@ -369,8 +394,13 @@ class PlaybackTrace(
 	 */
 	private fun requestCarryAuthority() {
 		if (listen.suppressedByForegroundShort || listen.finalized ||
-			listen.trackIdentity.hasExactSourceItemId ||
 			listen.transport != TransportState.PLAYING
+		) return
+		// Production's own rule, called rather than restated.
+		if (!listenNeedsPresentationProof(
+				hasExactSourceItemId = listen.trackIdentity.hasExactSourceItemId,
+				presentationAttributionAmbiguous = listen.presentationUnprovenForNamedWork,
+			)
 		) return
 		val duration = bundle.durationMs ?: return
 		val adapter = sourceAdapter ?: return
@@ -394,7 +424,7 @@ class PlaybackTrace(
 			) return@requester
 			carryAuthorityResolutions++
 			dispatch(PlaybackInput.ExactIdEstablished(proof.videoId))
-			if (proof.route.corroboratesPresentationDuration && attributedPresentationMs != null) {
+			if (proof.presentationDurationCorroborated && attributedPresentationMs != null) {
 				dispatch(
 					PlaybackInput.PresentationAttributionEstablished(
 						sourceItemId = proof.videoId,
@@ -601,10 +631,11 @@ class PlaybackTrace(
 			is PlaybackEvent.PresentationAttributionEstablished -> {
 				evidence.resolverContext = evidence.resolverContext.copy(
 					preResolvedNativeVideoId = event.videoId,
-					// The route that actually produces this input in production. It
-					// used to say RAW_TITLE_CHANNEL, which is the one thing this
-					// event cannot have come from: that route never checks the
-					// published length, so it may not attribute a surface.
+					// Any route may carry this input — what qualifies a proof is that
+					// it checked the published length, not which listing named the
+					// work. STRUCTURED_MUSIC is simply the commonest such proof, and
+					// the field is recorded here only so the resolver context matches
+					// what production would have stored.
 					preResolvedNativeRoute = NativePreResolvedRoute.STRUCTURED_MUSIC,
 				)
 				dispatch(PlaybackInput.ExactIdEstablished(event.videoId))
@@ -1343,6 +1374,8 @@ class PlaybackTrace(
 		// `playedMsAt` is zero by construction, which is the production guarantee
 		// that the same seconds are never counted on both surfaces.
 		val playedMs = listen.playedMsAt(clock.nowMillis())
+		val unattributedMeasuredMs = listen.unattributedMeasuredMs
+		val refusedFinalPresentationMs = listen.refusedFinalPresentationMs
 		return SessionSnapshot(
 			packageName = source.packageName,
 			appLabel = source.label,
@@ -1353,6 +1386,8 @@ class PlaybackTrace(
 			durationMs = durationMs,
 			positionMs = positionMs,
 			playedMs = playedMs,
+			unattributedMeasuredMs = unattributedMeasuredMs,
+			refusedFinalPresentationMs = refusedFinalPresentationMs,
 			loopDetected = listen.loopDetected,
 			explicitAdSignal = evidence.explicitAdSignal,
 			browserEvidenceEnabled = browserEvidenceEnabled && !source.isNative,
@@ -1371,6 +1406,16 @@ class PlaybackTrace(
 				?.let { playedMs.toDouble() / it },
 			identity = identity,
 			resolverContext = evidence.resolverContext.copy(
+				// Production's `SessionProbe.snapshot` freezes the *current*
+				// presentation's own length here, separately from the conservative
+				// established duration above. Omitting it handed every replayed
+				// resolver the longest length this listen had ever seen, so a
+				// scenario in which a short surface precedes the song asked for the
+				// wrong item — the exact confusion these scenarios exist to catch.
+				presentationDurationMs = listen.trackIdentity.durationMs.takeIf {
+					SourceProfile.playbackCapabilitiesFor(source.packageName)
+						.republishesAlternateMediaDurations
+				},
 				knownTitle = confirmed?.let { bundle.title },
 				knownChannel = confirmed?.let { bundle.artist },
 				knownDurationSeconds = confirmed?.let { durationMs?.div(1000) },

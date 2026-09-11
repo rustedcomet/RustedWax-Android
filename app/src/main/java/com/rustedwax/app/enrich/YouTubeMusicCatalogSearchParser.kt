@@ -15,6 +15,19 @@ object YouTubeMusicCatalogSearchParser {
 	 */
 	const val SONGS_FILTER_PARAMS = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D"
 
+	/**
+	 * YouTube Music's "Videos" search filter, the sibling of [SONGS_FILTER_PARAMS].
+	 *
+	 * The songs filter is what makes a row name its album and its running time, and
+	 * it is also why a Video-mode presentation can never be in that response: the
+	 * shelf it filters to holds art tracks, and the music video the player is
+	 * actually rendering is a different row entirely. This filter asks for that
+	 * shelf instead. Its rows carry no album — a music video belongs to no release
+	 * — but they do carry the same hyperlinked artist byline and the same trailing
+	 * `m:ss`, which is what the strict credit and length tests need.
+	 */
+	const val VIDEOS_FILTER_PARAMS = "EgWKAQIQAWoKEAkQChAFEAMQBA%3D%3D"
+
 	data class Config(
 		val apiKey: String,
 		val clientVersion: String,

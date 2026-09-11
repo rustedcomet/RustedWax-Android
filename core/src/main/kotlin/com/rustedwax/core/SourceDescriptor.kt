@@ -38,7 +38,8 @@ data class SourceDescriptor(
 	 */
 	val hasBrowserEvidence: Boolean,
 	/**
-	 * The session's `ARTIST` field names a performer rather than an uploader.
+	 * The session's `ARTIST` field is source-published artist metadata rather than
+	 * an uploader field. It remains best effort and is not an authorization gate.
 	 * This is source-declared rather than inferred from a package name.
 	 */
 	val trustsMetadataArtist: Boolean,

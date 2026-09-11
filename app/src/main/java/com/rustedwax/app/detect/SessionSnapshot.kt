@@ -24,6 +24,30 @@ data class SessionSnapshot(
 	 */
 	val playedMs: Long,
 
+	/**
+	 * What was measured under this title and then refused attribution, in ms.
+	 *
+	 * Non-zero only where [playedMs] was cleared because the source never
+	 * established which presentation was the named work. It is not progress and
+	 * must never be scored, broadcast, or added to [playedMs] — it may belong to
+	 * an interstitial, which is exactly why the progress was cleared. Its only
+	 * consumer is the refusal row, which would otherwise be suppressed by the
+	 * notability floor and leave a listen with no explanation anywhere.
+	 */
+	val unattributedMeasuredMs: Long = 0,
+
+	/**
+	 * The part of [unattributedMeasuredMs] measured on the presentation this
+	 * listen finalized on, in ms.
+	 *
+	 * Read only by finalization, and only where the resolver it was still waiting
+	 * for has since pinned this very presentation to the named work — the same
+	 * proof that would have cleared the refusal outright had it arrived while the
+	 * track was still playing. It is not progress until then and is never scored,
+	 * broadcast or added to [playedMs] by anything else.
+	 */
+	val refusedFinalPresentationMs: Long = 0,
+
 	val loopDetected: Boolean,
 
 	val explicitAdSignal: String? = null,
@@ -200,6 +224,16 @@ enum class NativePreResolvedRoute {
 	PLAYLIST,
 
 	/**
+	 * The id came from YouTube Music's own video shelf, over a row the player
+	 * matched exactly on work, complete credit and running time.
+	 *
+	 * Kept distinct from [STRUCTURED_MUSIC] so finalization re-asks *that*
+	 * question — the page's length and owner — instead of a title YouTube and
+	 * YouTube Music spell differently for the same upload.
+	 */
+	MUSIC_VIDEO_ROW,
+
+	/**
 	 * The id came from the signed-in account's watch history.
 	 *
 	 * Kept distinct for the same reason as [PLAYLIST]: finalization re-asks the
@@ -207,25 +241,4 @@ enum class NativePreResolvedRoute {
 	 * history has since re-described refuses instead of carrying a stale answer.
 	 */
 	HISTORY,
-
-	;
-
-	/**
-	 * Whether this route also proved the *currently published length* is the
-	 * named work's own, and not an interstitial's borrowing its metadata.
-	 *
-	 * Only [STRUCTURED_MUSIC] does. Its matcher requires the player's published
-	 * duration to agree with a fetched catalog row's own length before it will
-	 * name an id at all — see [com.rustedwax.app.enrich.NativeStructuredMusicMatcher.matches]
-	 * and the duration checks around `structuredNativeMusic = true` in
-	 * [com.rustedwax.app.enrich.VideoIdResolver]. A pre-roll publishes the song's
-	 * title and artist with its own short length, so it cannot satisfy that
-	 * agreement, and the resolver refuses while one is on screen.
-	 *
-	 * The other three name the work from a feed, a history entry or a title and
-	 * channel. Each can be right about *which song* while an interstitial is
-	 * still what is playing, so none of them may attribute measured time.
-	 */
-	val corroboratesPresentationDuration: Boolean
-		get() = this == STRUCTURED_MUSIC
 }

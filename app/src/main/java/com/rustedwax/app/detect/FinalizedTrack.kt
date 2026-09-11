@@ -53,6 +53,8 @@ data class FinalizedTrack(
 		positionMs = measurement.positionMs,
 		firstObservedPositionMs = measurement.firstObservedPositionMs,
 		playedMs = measurement.playedMs,
+		unattributedMeasuredMs = measurement.unattributedMeasuredMs,
+		refusedFinalPresentationMs = measurement.refusedFinalPresentationMs,
 		loopDetected = measurement.loopDetected,
 		explicitAdSignal = evidence.explicitAdSignal,
 		browserEvidenceEnabled = source.hasBrowserEvidence,
@@ -122,6 +124,8 @@ data class FinalizedTrack(
 			),
 			measurement = PlaybackMeasurement(
 				playedMs = snapshot.playedMs,
+				unattributedMeasuredMs = snapshot.unattributedMeasuredMs,
+				refusedFinalPresentationMs = snapshot.refusedFinalPresentationMs,
 				durationMs = snapshot.durationMs,
 				positionMs = snapshot.positionMs,
 				firstObservedPositionMs = snapshot.firstObservedPositionMs,

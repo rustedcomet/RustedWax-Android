@@ -60,6 +60,8 @@ class FinalizedTrackAdapterTest {
 		positionMs = 190_000,
 		firstObservedPositionMs = 1_500,
 		playedMs = 195_000,
+		unattributedMeasuredMs = 41_000,
+		refusedFinalPresentationMs = 29_000,
 		loopDetected = true,
 		explicitAdSignal = "Sponsored · Ad",
 		browserEvidenceEnabled = true,

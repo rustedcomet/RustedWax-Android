@@ -1,6 +1,7 @@
 package com.rustedwax.app.enrich
 
 import com.rustedwax.youtube.identity.VideoResolution
+import com.rustedwax.youtube.identity.PerformerCreditEvidence
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -310,6 +311,10 @@ class NativeStructuredMusicMatcherTest {
 		)
 		assertEquals("abcdefghijk", unique.resolution?.videoId)
 		assertTrue(unique.resolution?.structuredNativeMusic == true)
+		assertEquals(
+			PerformerCreditEvidence.CANONICAL_PAGE_COMPLETE_CREDIT,
+			unique.resolution?.performerCreditEvidence,
+		)
 
 		val ambiguous = NativeStructuredMusicMatcher.select(
 			listOf(page, page.copy(videoId = "zyxwvutsrqp")), "Se Preparó", "Ozuna", 188,

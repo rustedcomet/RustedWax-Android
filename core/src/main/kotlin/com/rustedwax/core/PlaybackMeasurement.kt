@@ -3,6 +3,25 @@ package com.rustedwax.core
 data class PlaybackMeasurement(
 	/** Content milliseconds consumed, speed-scaled. Includes [inferredPlayedMs]. */
 	val playedMs: Long,
+	/**
+	 * Milliseconds measured under this title and then refused attribution.
+	 *
+	 * Non-zero only where [playedMs] was cleared because the source never
+	 * established which presentation was the named work. Not progress: it may
+	 * belong to an interstitial, which is why the progress was cleared. Carried
+	 * so a refusal can explain itself rather than be suppressed as if nothing had
+	 * been measured at all.
+	 */
+	val unattributedMeasuredMs: Long = 0,
+	/**
+	 * The part of [unattributedMeasuredMs] measured on the presentation this
+	 * listen finalized on.
+	 *
+	 * Not progress, and never to be added to [playedMs] on the strength of the
+	 * length alone. Its only reader is finalization, and only once the resolver it
+	 * was still waiting for has pinned this same presentation to the named work.
+	 */
+	val refusedFinalPresentationMs: Long = 0,
 	/** The length this track established; null when the source never published one. */
 	val durationMs: Long?,
 	/** Last extrapolated transport position, when the source publishes one. */

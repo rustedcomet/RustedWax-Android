@@ -43,6 +43,27 @@ internal fun finalizedPresentation(
 	album = established.album ?: currentAlbum,
 )
 
+/**
+ * Whether this listen still has to ask for a presentation proof.
+ *
+ * An id the listen already holds is a reason not to look again *only while the
+ * listen is also already attributed*. The two facts have different lifetimes: a
+ * playback generation beginning after STOPPED on the same presentation carries
+ * the previous listen's `trackIdentity` — id included — into a state whose
+ * attribution has been reset. Reading the id alone therefore skipped the lookup
+ * for a listen that held no proof, and a re-entered 228 s video measured its
+ * whole length and could credit none of it.
+ *
+ * Identity outlives a listen; attribution does not. For a source that never
+ * needs attribution the ambiguity flag is always false, so this is exactly the
+ * old rule there. Duplicate lookups *within* one listen are still prevented by
+ * the request signature, which this does not replace.
+ */
+internal fun listenNeedsPresentationProof(
+	hasExactSourceItemId: Boolean,
+	presentationAttributionAmbiguous: Boolean,
+): Boolean = !hasExactSourceItemId || presentationAttributionAmbiguous
+
 internal fun resolverContextWithObservedUrl(
 	context: ResolverContext,
 	url: UrlEvidence.Evidence,
@@ -237,6 +258,18 @@ class SessionProbe(
 	data class NativeResolvedIdentity(
 		val videoId: String,
 		val route: NativePreResolvedRoute,
+		/**
+		 * The proof that named this id also required the length the player is
+		 * publishing to be this work's own.
+		 *
+		 * Carried as a fact from the resolver rather than inferred from [route]:
+		 * the route buckets describe *which listing* named the work, and more than
+		 * one of them contains both duration-checked and duration-blind paths. A
+		 * Video-mode presentation, whose length matches no catalog row, is
+		 * corroborated by its own watch page and belongs here even though its
+		 * route is not the structured one.
+		 */
+		val presentationDurationCorroborated: Boolean = false,
 	)
 
 	/**
@@ -1615,8 +1648,11 @@ class SessionProbe(
 		 * here. This establishes carry identity, not ownership of measured playback.
 		 */
 		private fun requestNativeCarryAuthority() {
-			if (suppressedByForegroundShort || finalized ||
-				trackIdentity.hasExactSourceItemId || !isPlaying(state)
+			if (suppressedByForegroundShort || finalized || !isPlaying(state)) return
+			if (!listenNeedsPresentationProof(
+					hasExactSourceItemId = trackIdentity.hasExactSourceItemId,
+					presentationAttributionAmbiguous = listen.presentationUnprovenForNamedWork,
+				)
 			) return
 			// Whether this presentation is worth one bounded lookup is the source's
 			// question: a browser's exact id is already in the address bar.
@@ -1658,16 +1694,19 @@ class SessionProbe(
 					if (currentSignature != signature || proof == null) return@post
 					dispatch(PlaybackInput.ExactIdEstablished(proof.videoId))
 					// The id alone proves the work, never the surface — an interstitial
-					// borrows the song's title and artist field-for-field, so a route
-					// that matched on those may have named the right song while the
-					// wrong thing was playing. STRUCTURED_MUSIC is the one route that
-					// also required the *currently published* length to agree with the
-					// catalog row's own length (NativeStructuredMusicMatcher.matches),
-					// and a 6/15/30s pre-roll cannot satisfy that — which is why the
-					// resolver refuses outright while one is on screen. So this route,
-					// and only this route, is live proof that the duration surface
-					// being measured is the named work's.
-					if (proof.route.corroboratesPresentationDuration &&
+					// borrows the song's title and artist field-for-field, so a proof
+					// built only from those may have named the right song while the
+					// wrong thing was playing. Only a proof that also required the
+					// *currently published* length to be this work's own can say the
+					// interval being measured belongs to it, and a 15/30/45s pre-roll
+					// cannot satisfy that.
+					//
+					// Asked of the proof, not of the route: the route buckets say which
+					// listing named the work, and a Video-mode presentation — whose
+					// length matches no catalog row — is corroborated by its own watch
+					// page while landing outside the structured bucket entirely. Reading
+					// the bucket instead lost every such listen.
+					if (proof.presentationDurationCorroborated &&
 						attributedPresentationMs != null
 					) {
 						dispatch(
@@ -1675,6 +1714,12 @@ class SessionProbe(
 								sourceItemId = proof.videoId,
 								presentationDurationMs = attributedPresentationMs,
 							),
+						)
+						EventLog.append(
+							"native-identity",
+							"$packageName attributed the ${attributedPresentationMs / 1000}s " +
+								"presentation to ${proof.videoId} (${proof.route}); its measured " +
+								"time is the work's own",
 						)
 					}
 					resolverContext = resolverContext.copy(
@@ -1891,6 +1936,9 @@ class SessionProbe(
 			) {
 				latchedVideo = live.copy(source = "${live.source} (latched)")
 				EventLog.append("identity", "$packageName latched video ${live.videoId} for this track")
+				// The page named what it is playing, which a feed tile never does.
+				// See `PlaybackReducer.withEstablishedTimeline`.
+				dispatch(PlaybackInput.PageNamedItem)
 				requestVideoFacts(live.videoId)
 			}
 
@@ -2343,6 +2391,8 @@ class SessionProbe(
 				durationMs = duration,
 				positionMs = position,
 				playedMs = played,
+				unattributedMeasuredMs = listen.unattributedMeasuredMs,
+				refusedFinalPresentationMs = listen.refusedFinalPresentationMs,
 				loopDetected = loopDetected,
 				explicitAdSignal = explicitAdSignal,
 				browserEvidenceEnabled = !adapter.evidenceCapabilities.packageProvesSource &&
@@ -2463,7 +2513,7 @@ class SessionProbe(
 		 * taking a dependency for one string.
 		 */
 		private const val METADATA_KEY_ADVERTISEMENT = "android.media.metadata.ADVERTISEMENT"
-		/** Measured 8 s STOPPED gap between same-title native duration phases. */
+		/** Grace covering a short STOPPED gap between same-title duration phases. */
 		const val NATIVE_STOPPED_FINALIZE_GRACE_MS = 10_000L
 		const val MIN_NATIVE_PRE_RESOLVE_DURATION_MS = 60_000L
 

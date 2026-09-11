@@ -13,8 +13,8 @@ import org.junit.Test
 /**
  * Screen off, and then back on — one viewing, replayed end to end.
  *
- * The reduced physical case: Gangnam Style, 252 s, played to 71 s before the
- * power key. YouTube publishes `STATE_STOPPED` on screen-off exactly as it
+	 * Synthetic regression: a 252 s item plays to 71 s before screen-off. YouTube
+	 * publishes `STATE_STOPPED` on screen-off exactly as it
  * publishes it when a person is finished with a video, the exact-ID-less
  * replacement grace ran out ten seconds later, and the listen was scored at
  * 28 % and refused. Four minutes on, the same video came back at 110 s as a

@@ -256,6 +256,13 @@ internal interface VideoIdentitySource {
 		artist: String,
 		durationSec: Long,
 	): VideoResolutionAttempt
+
+	suspend fun revalidateMusicVideoRow(
+		videoId: String,
+		title: String,
+		artist: String,
+		durationSec: Long,
+	): VideoResolutionAttempt
 }
 
 /** The signed-in account's own watch history. */
@@ -549,6 +556,14 @@ internal class ResolverIdentitySource(
 		durationSec: Long,
 	): VideoResolutionAttempt =
 		resolver.revalidatePreResolvedNativeMusic(videoId, title, artist, durationSec)
+
+	override suspend fun revalidateMusicVideoRow(
+		videoId: String,
+		title: String,
+		artist: String,
+		durationSec: Long,
+	): VideoResolutionAttempt =
+		resolver.revalidateMusicVideoRow(videoId, title, artist, durationSec)
 }
 
 internal class AccountWatchHistory(

@@ -171,11 +171,24 @@ class SourceAdapterContractTest {
 		}
 
 		assertEquals(41L, state.instanceToken)
-		assertEquals(120_000L, state.playedMsAt(120_000L))
+		// One listen, and its measurement is provisional.
+		//
+		// Nothing here ever attributed a presentation: the state carries an exact
+		// id, and an exact id is not proof of *which* published length is the work
+		// — the interstitials that wear a song's own title and artist carry one
+		// too. So the interval measured before each toggle is refused at the
+		// boundary rather than folded into the surface that follows it, which is
+		// the whole of the false-progress fix. It is recorded, not discarded, so
+		// the outcome can still explain itself.
+		//
+		// A presentation that *has* been attributed keeps its progress across the
+		// same toggle; that is the Song↔Video contract, and
+		// `YouTubeMusicPresentationAttributionReplayTest` holds it.
+		assertEquals(0L, state.playedMsAt(120_000L))
+		assertEquals(120_000L, state.unattributedMeasuredMs)
 
-		// 120 s is below 60% of the retained 208979 ms work. Ending now exposes
-		// exactly one terminal snapshot to the engine, so it can record one
-		// below-threshold outcome rather than one outcome per presentation.
+		// Ending now exposes exactly one terminal snapshot to the engine, so it can
+		// record one outcome rather than one outcome per presentation.
 		val ended = reducer.reduce(
 			state,
 			PlaybackInput.FinalizeRequested("stopped", elapsedRealtimeMs = 120_000L),

@@ -149,8 +149,7 @@ class SessionProbeDeviceTest {
 		// be watching two sessions for one package — which is a real production
 		// state with real consequences (`MediaSessionAdEvidence.conflict`, a carry
 		// claimed by the wrong watch) and not the one any test below is about.
-		// Measured: this is what made `progress_carries_across_a_real_session_
-		// replacement` fail in a full run and pass on its own.
+		// This prevents a preceding test's live session from leaking into the next.
 		waitForQuiet()
 		finalized.clear()
 	}
@@ -161,9 +160,8 @@ class SessionProbeDeviceTest {
 	 * A single "nothing is published" reading is not enough. The platform's
 	 * active-session callback lags a release by a few hundred milliseconds, so the
 	 * previous test's session can be absent at the moment of the check and adopted
-	 * immediately afterwards — measured 12:10:07 on this device, where the probe
-	 * registered on two of our sessions inside half a second and the test that
-	 * followed watched two listens instead of one.
+	 * immediately afterwards. Waiting for a stable quiet interval prevents the
+	 * following test from observing two listens instead of one.
 	 */
 	private fun waitForQuiet(quietForMs: Long = 1_200) {
 		val deadline = System.currentTimeMillis() + 20_000
@@ -239,9 +237,8 @@ class SessionProbeDeviceTest {
 	 *
 	 * Scoped to a title rather than to the package. The instrumentation process
 	 * outlives every test method, and a `MediaSession` released by a neighbouring
-	 * test can still be listed as active for a moment afterwards — measured on this
-	 * device as a probe registering two controllers for this package inside half a
-	 * second. A wait that accepted "any session of ours" would then be satisfied by
+	 * test can still be listed as active briefly. A wait that accepted "any session
+	 * of ours" would then be satisfied by
 	 * the wrong one, and the assertion that followed would describe a listen the
 	 * test never created.
 	 */

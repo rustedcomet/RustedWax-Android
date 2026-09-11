@@ -430,7 +430,7 @@ object NativeShortParser {
 			node.className?.contains("Button", ignoreCase = true) == true
 		) return false
 		// Some Shorts expose a clickable hashtag from the full footer title as a
-		// second, bare semantic View (measured as `#hack` on the A12). It is a
+		// second, bare semantic View containing only that hashtag. It is a
 		// navigation chip, not a competing title. Keep this deliberately narrower
 		// than removing hashtags from a real title: only one all-hashtag token is
 		// excluded, while any conflicting prose still fails closed.
@@ -471,9 +471,9 @@ object NativeShortParser {
 	/**
 	 * How far into the player's width a title may start, as a percentage.
 	 *
-	 * Measured on the 720px A12: the title begins at x≈30 while the action
-	 * column sits at x≈630 of 720. A third of the width separates them by a wide
-	 * margin in both directions.
+	 * On a representative 720 px layout the title begins near the left edge while
+	 * the action column sits near the right edge. A third of the width separates
+	 * them by a wide margin in both directions.
 	 */
 	private const val TITLE_LEFT_FRACTION = 33
 

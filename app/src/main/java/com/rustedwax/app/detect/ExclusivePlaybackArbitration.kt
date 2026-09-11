@@ -37,7 +37,7 @@ object ExclusivePlaybackArbitration {
 					it.transport == TransportState.PLAYING && it.metadataUsable
 			}
 			// A readable browser position is independent evidence that its content
-			// may genuinely still be running. The field failure had position -1;
+			// may genuinely still be running. An unavailable position has no such proof;
 			// only that unmeasurable clock is ended by the exclusive takeover.
 			.filter { it.rawPositionMs == null }
 			.map(ConcurrentPlaybackCandidate::key)

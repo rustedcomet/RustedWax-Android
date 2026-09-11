@@ -170,6 +170,176 @@ class VideoIdentityCorroboratorTest {
 		)
 	}
 
+	/**
+	 * The row-backed route's own evidence has to survive its own finalization.
+	 *
+	 * [VideoIdResolver.cardBackedYouTubeMusicResolution] resolves an id from a
+	 * YouTube Music row whose work *and complete credit* the player matched
+	 * exactly, at the player's own length, requiring of the canonical page only
+	 * that it be that length and name that work — deliberately, because such a
+	 * page is often a distributor's upload that restates neither credit. Asking it
+	 * to restate the credit here anyway threw those ids away at finalization and
+	 * the listens they belonged to ended at zero.
+	 *
+	 * Nothing about the performer is decided by any of this. Artist-credit
+	 * provenance is descriptive and cannot authorize or veto the verified id.
+	 */
+	@Test
+	fun `a row-backed id survives on verified work and length regardless of page owner`() {
+		val session = ended("Known Work", "Act One & Act Two", 219_000).copy(
+			packageName = YouTubeProbe.YOUTUBE_MUSIC_PACKAGE,
+			appLabel = "YouTube Music",
+		)
+		val credits = listOf("Act One", "Act Two")
+		val resolution = VideoResolution(
+			videoId = "rOwBaCkEd12",
+			source = "exact YouTube Music video work+artist+duration",
+			title = "Known Work",
+			channel = credits.joinToString(", "),
+			lengthSeconds = 219,
+			uniquelyResolved = true,
+			structuredNativeMusic = true,
+			creditedArtists = credits,
+			musicVideoRow = true,
+			presentationDurationCorroborated = true,
+		)
+		// A distributor's upload: it publishes the work first, its own promo
+		// suffix after, and an owner that is a company rather than an act.
+		val facts = VideoFacts(
+			videoId = resolution.videoId,
+			title = "Known Work - Act One (Official Video) | Some Label",
+			author = "Some Label Distribution",
+			lengthSeconds = 219,
+			watchPageResolved = true,
+		)
+
+		assertNull(VideoIdentityCorroborator.contradiction(session, resolution, facts))
+		assertNotNull(
+			"the catalog row must still name the finalized work",
+			VideoIdentityCorroborator.contradiction(
+				session, resolution.copy(title = "Another Work"), facts,
+			),
+		)
+		assertNotNull(
+			"the canonical page must still have the finalized presentation length",
+			VideoIdentityCorroborator.contradiction(
+				session, resolution, facts.copy(lengthSeconds = 400),
+			),
+		)
+		assertNotNull(
+			"the canonical page must still report the row's exact id",
+			VideoIdentityCorroborator.contradiction(
+				session, resolution, facts.copy(videoId = "oThErViDeO1"),
+			),
+		)
+	}
+
+	@Test
+	fun `an owner YouTube binds to another act does not veto the verified id`() {
+		val session = ended("Known Work", "Act One & Act Two", 219_000).copy(
+			packageName = YouTubeProbe.YOUTUBE_MUSIC_PACKAGE,
+			appLabel = "YouTube Music",
+		)
+		val credits = listOf("Act One", "Act Two")
+		val resolution = VideoResolution(
+			videoId = "rOwBaCkEd12",
+			source = "exact YouTube Music video work+artist+duration",
+			title = "Known Work",
+			channel = credits.joinToString(", "),
+			lengthSeconds = 219,
+			uniquelyResolved = true,
+			structuredNativeMusic = true,
+			creditedArtists = credits,
+		)
+		val page = VideoFacts(
+			videoId = resolution.videoId,
+			title = "Known Work",
+			lengthSeconds = 219,
+			watchPageResolved = true,
+		)
+
+		// `- Topic` and `VEVO` are names YouTube generates for a rights holder, but a
+		// name is still only who hosts the file. The work and the length verified this
+		// id, and the uploader neither authorizes nor vetoes it.
+		assertNull(
+			VideoIdentityCorroborator.contradiction(
+				session, resolution, page.copy(author = "Unrelated Artist - Topic"),
+			),
+		)
+		assertNull(
+			VideoIdentityCorroborator.contradiction(
+				session, resolution, page.copy(author = "UnrelatedArtistVEVO"),
+			),
+		)
+	}
+
+	@Test
+	fun `a page that names another work contradicts however its owner is spelled`() {
+		val session = ended("Known Work", "Act One & Act Two", 219_000).copy(
+			packageName = YouTubeProbe.YOUTUBE_MUSIC_PACKAGE,
+			appLabel = "YouTube Music",
+		)
+		val credits = listOf("Act One", "Act Two")
+		val resolution = VideoResolution(
+			videoId = "rOwBaCkEd12",
+			source = "exact YouTube Music video work+artist+duration",
+			title = "Known Work",
+			channel = credits.joinToString(", "),
+			lengthSeconds = 219,
+			uniquelyResolved = true,
+			structuredNativeMusic = true,
+			creditedArtists = credits,
+		)
+		val facts = VideoFacts(
+			videoId = resolution.videoId,
+			title = "Another Work - Act One (Official Video) | Some Label",
+			author = "Some Label Distribution",
+			lengthSeconds = 219,
+			watchPageResolved = true,
+		)
+
+		assertNotNull(VideoIdentityCorroborator.contradiction(session, resolution, facts))
+		assertNotNull(
+			"and the length still binds independently of the title",
+			VideoIdentityCorroborator.contradiction(
+				session,
+				resolution,
+				facts.copy(
+					title = "Known Work - Act One (Official Video) | Some Label",
+					lengthSeconds = 400,
+				),
+			),
+		)
+	}
+
+	@Test
+	fun `a route carrying no row credit is not offered the row-backed licence`() {
+		val session = ended("Known Work", "Act One & Act Two", 219_000).copy(
+			packageName = YouTubeProbe.YOUTUBE_MUSIC_PACKAGE,
+			appLabel = "YouTube Music",
+		)
+		// The same page and the same length, but nothing proved a complete credit
+		// for this id before it got here, so there is no row to be backed by.
+		val resolution = VideoResolution(
+			videoId = "rOwBaCkEd12",
+			source = "structured native music title+artist+duration",
+			title = "Known Work",
+			channel = "Some Label Distribution",
+			lengthSeconds = 219,
+			uniquelyResolved = true,
+			structuredNativeMusic = true,
+		)
+		val facts = VideoFacts(
+			videoId = resolution.videoId,
+			title = "Known Work - Act One (Official Video) | Some Label",
+			author = "Some Label Distribution",
+			lengthSeconds = 219,
+			watchPageResolved = true,
+		)
+
+		assertNotNull(VideoIdentityCorroborator.contradiction(session, resolution, facts))
+	}
+
 	private fun ended(
 		title: String,
 		channel: String,
@@ -306,7 +476,7 @@ class VideoIdentityCorroboratorTest {
 	 * exactly the ones that must survive it.
 	 */
 	@Test
-	fun `the channel alias still refuses without a matching route channel or id`() {
+	fun `a history id is bound by title and length and never by its uploader`() {
 		val session = ended(
 			"Bring Me The Horizon - Kool-Aid (Official Video)",
 			"Bring Me The Horizon",
@@ -331,22 +501,21 @@ class VideoIdentityCorroboratorTest {
 			lengthSeconds = 244,
 			watchPageResolved = true,
 		)
-		// The route never matched a channel of its own: nothing has ever agreed
-		// with the session artist, so the watch page is the only opinion there is
-		// and it disagrees.
-		assertNotNull(
+		// Whatever the route or the page says about the uploader, it is metadata:
+		// a different or missing channel neither licenses nor refuses this id.
+		assertNull(
 			VideoIdentityCorroborator.contradiction(
 				session, resolution.copy(channel = "Some Other Uploader"), facts,
 			),
 		)
-		assertNotNull(
+		assertNull(
 			VideoIdentityCorroborator.contradiction(
 				session, resolution.copy(channel = null), facts,
 			),
 		)
-		// Facts for a different video prove nothing about this one, so the two
-		// names are no longer two spellings of one uploader.
-		assertNotNull(
+		// Facts for a different video prove nothing about this one, and without an
+		// owner veto they do not refuse it either.
+		assertNull(
 			VideoIdentityCorroborator.contradiction(
 				session, resolution, facts.copy(videoId = "B9wvTuDC-H0"),
 			),
@@ -365,7 +534,7 @@ class VideoIdentityCorroboratorTest {
 	}
 
 	@Test
-	fun `a browser route that matched a channel of its own is trusted too`() {
+	fun `a browser route id is bound by title and length and never by its uploader`() {
 		val session = ended("Te Busco", "Cosculluela El Principe", 234_000)
 		val resolution = VideoResolution(
 			videoId = "7J6xA1_f8as",
@@ -385,9 +554,9 @@ class VideoIdentityCorroboratorTest {
 		)
 		assertNull(VideoIdentityCorroborator.contradiction(session, resolution, facts))
 
-		// The address bar named the id; no route matched a channel against the
-		// session, so the watch page is the only opinion there is.
-		assertNotNull(
+		// The address bar named the id; the uploader the page reports is metadata
+		// and does not refuse it.
+		assertNull(
 			VideoIdentityCorroborator.contradiction(
 				session,
 				resolution.copy(
@@ -399,15 +568,14 @@ class VideoIdentityCorroboratorTest {
 				facts,
 			),
 		)
-		// Even a uniquely-resolved route gets nothing when its own channel never
-		// agreed with the session artist.
-		assertNotNull(
+		// Nor does a route whose own channel never agreed with the session artist.
+		assertNull(
 			VideoIdentityCorroborator.contradiction(
 				session, resolution.copy(channel = "Some Other Uploader"), facts,
 			),
 		)
-		// Facts belonging to a different video are not a second name for this one.
-		assertNotNull(
+		// Facts belonging to a different video corroborate nothing and veto nothing.
+		assertNull(
 			VideoIdentityCorroborator.contradiction(
 				session, resolution, facts.copy(videoId = "B9wvTuDC-H0"),
 			),
@@ -603,12 +771,12 @@ class VideoIdentityCorroboratorTest {
 		)
 
 		assertNull(VideoIdentityCorroborator.contradiction(session, resolution, facts))
-		assertNotNull(
+		assertNull(
 			VideoIdentityCorroborator.contradiction(
 				session, resolution, facts.copy(author = "Unrelated Artist - Topic"),
 			),
 		)
-		assertNotNull(
+		assertNull(
 			VideoIdentityCorroborator.contradiction(
 				session, resolution.copy(creditedArtists = listOf("Unrelated Artist")), facts,
 			),
@@ -726,8 +894,9 @@ class VideoIdentityCorroboratorTest {
 				session, resolution, facts.copy(lengthSeconds = 400),
 			),
 		)
-		// And the music-client credit itself must agree.
-		assertNotNull(
+		// The music-client credit is artist metadata like the page's owner: it may
+		// corroborate the name, but a different one does not veto the verified id.
+		assertNull(
 			VideoIdentityCorroborator.contradiction(
 				session, resolution, facts.copy(originalArtist = "Unrelated Artist"),
 			),
@@ -780,7 +949,10 @@ class VideoIdentityCorroboratorTest {
 	}
 
 	@Test
-	fun `same title different unobserved upload retains conservative channel guard`() {
+	fun `a different uploader of the same title and length is not refused by its channel`() {
+		// Uniqueness is the resolving route's to enforce — every search and history
+		// route already refuses an ambiguous set. The corroborator binds title and
+		// length, and a different uploader name is metadata, not a contradiction.
 		val session = ended("Nunca Me Amó", "Boy Wonder Chosen Few", 204_000)
 		val otherUpload = VideoResolution(
 			videoId = "otherUpload1",
@@ -789,7 +961,11 @@ class VideoIdentityCorroboratorTest {
 			channel = "Different Uploader",
 			lengthSeconds = 204,
 		)
-		assertNotNull(VideoIdentityCorroborator.contradiction(session, otherUpload, null))
+		assertNull(VideoIdentityCorroborator.contradiction(session, otherUpload, null))
+		assertNotNull(
+			"its length still binds",
+			VideoIdentityCorroborator.contradiction(session, otherUpload.copy(lengthSeconds = 150), null),
+		)
 	}
 
 	@Test
@@ -857,31 +1033,31 @@ class VideoIdentityCorroboratorTest {
 				session, base.copy(uniquelyResolved = false), facts(),
 			),
 		)
-		// The three fields still all have to agree: a byline leader match cannot
-		// rescue a contradicting duration.
+		// Title and duration still bind; the byline and the session artist are
+		// metadata and neither rescue nor refuse the id below.
 		assertNotNull(
 			VideoIdentityCorroborator.contradiction(
 				session, base.copy(lengthSeconds = 45), facts(length = 45),
 			),
 		)
-		assertNotNull(
+		assertNull(
 			VideoIdentityCorroborator.contradiction(
 				session, base.copy(channel = "Owner Collaborator"),
 				facts(author = "Owner Collaborator"),
 			),
 		)
-		assertNotNull(
+		assertNull(
 			VideoIdentityCorroborator.contradiction(
 				session.copy(artist = "Own"), base, facts(),
 			),
 		)
-		assertNotNull(
+		assertNull(
 			VideoIdentityCorroborator.contradiction(
 				session, base.copy(channel = "Owner Fan and Collaborator"),
 				facts(author = "Owner Fan and Collaborator"),
 			),
 		)
-		assertNotNull(
+		assertNull(
 			VideoIdentityCorroborator.contradiction(
 				session, base.copy(channel = "Another Owner and Collaborator"),
 				facts(author = "Another Owner and Collaborator"),
@@ -1241,5 +1417,110 @@ class VideoIdentityCorroboratorTest {
 		)
 
 		assertNull(VideoIdentityCorroborator.contradiction(session, resolution, facts))
+	}
+
+	// ── the uploader is metadata, not identity ───────────────────────────────
+
+	private fun musicSession(title: String, artist: String, durationMs: Long) =
+		ended(title, artist, durationMs).copy(
+			packageName = YouTubeProbe.YOUTUBE_MUSIC_PACKAGE,
+			appLabel = "YouTube Music",
+		)
+
+	@Test
+	fun `a label distributor or fan uploader does not veto a verified title and length`() {
+		val session = musicSession("El Preso", "Fruko & Wilson Saoko", 292_000)
+		listOf("Discos Fuentes Edimusica", "salsa uploads 1985", "Fruko y Sus Tesos Oficial").forEach { owner ->
+			val resolution = VideoResolution(
+				videoId = "FN5oLBXiNvM",
+				source = "search",
+				title = "El Preso",
+				channel = owner,
+				lengthSeconds = 292,
+				uniquelyResolved = true,
+			)
+			val facts = VideoFacts(
+				videoId = resolution.videoId,
+				title = "El Preso",
+				author = owner,
+				lengthSeconds = 292,
+				watchPageResolved = true,
+			)
+			assertNull(owner, VideoIdentityCorroborator.contradiction(session, resolution, facts))
+		}
+	}
+
+	@Test
+	fun `an uploader named exactly like the artist cannot rescue a wrong title or length`() {
+		val session = musicSession("El Preso", "Fruko & Wilson Saoko", 292_000)
+		val sameOwner = "Fruko & Wilson Saoko"
+		val wrongWork = VideoResolution(
+			videoId = "wRoNgWoRk12",
+			source = "search",
+			title = "Los Charcos",
+			channel = sameOwner,
+			lengthSeconds = 292,
+			uniquelyResolved = true,
+		)
+		assertNotNull(
+			VideoIdentityCorroborator.contradiction(
+				session,
+				wrongWork,
+				VideoFacts(
+					videoId = wrongWork.videoId,
+					title = "Los Charcos",
+					author = sameOwner,
+					lengthSeconds = 292,
+					watchPageResolved = true,
+				),
+			),
+		)
+		val wrongLength = wrongWork.copy(videoId = "wRoNgLeN123", title = "El Preso", lengthSeconds = 331)
+		assertNotNull(
+			VideoIdentityCorroborator.contradiction(
+				session,
+				wrongLength,
+				VideoFacts(
+					videoId = wrongLength.videoId,
+					title = "El Preso",
+					author = sameOwner,
+					lengthSeconds = 331,
+					watchPageResolved = true,
+				),
+			),
+		)
+	}
+
+	@Test
+	fun `a distributor-hosted video row still refuses a page reporting another id or length`() {
+		val session = musicSession("El Preso", "Fruko & Wilson Saoko", 292_000)
+		val row = VideoResolution(
+			videoId = "FN5oLBXiNvM",
+			source = "exact YouTube Music video work+artist+duration",
+			title = "El Preso",
+			channel = "Fruko & Wilson Saoko",
+			lengthSeconds = 292,
+			uniquelyResolved = true,
+			structuredNativeMusic = true,
+			musicVideoRow = true,
+			creditedArtists = listOf("Fruko & Wilson Saoko"),
+		)
+		val page = VideoFacts(
+			videoId = row.videoId,
+			title = "El Preso - Fruko y Sus Tesos (Video Oficial)",
+			author = "Discos Fuentes Edimusica",
+			lengthSeconds = 292,
+			watchPageResolved = true,
+		)
+
+		assertNull(VideoIdentityCorroborator.contradiction(session, row, page))
+		assertNotNull(
+			"the page must still be the row's exact id",
+			VideoIdentityCorroborator.contradiction(session, row, page.copy(videoId = "sOmEoThEr12")),
+		)
+		assertNotNull(
+			"and the player's length",
+			VideoIdentityCorroborator.contradiction(session, row, page.copy(lengthSeconds = 400)),
+		)
 	}
 }
