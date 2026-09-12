@@ -32,7 +32,92 @@ class PlaybackReducer(
 	)
 
 	fun reduce(state: ListenState, input: PlaybackInput): Transition =
-		withEstablishedTimeline(reduceCore(state, input), input)
+		withTransportContentEvidence(
+			state,
+			input,
+			withEstablishedTimeline(withPlayerAdSuppression(reduceCore(state, input)), input),
+		)
+
+	/**
+	 * No clock runs while the source's own player is drawing its advertisement UI.
+	 *
+	 * Asked of every reduction rather than of the branches that start the clock,
+	 * for the same reason [withEstablishedTimeline] is: several routes set
+	 * [ListenState.playingSinceElapsedMs], and an interval the player itself
+	 * labelled an advertisement must not be measured by any of them. The window is
+	 * dropped rather than banked — the transitions that could have been running one
+	 * across the label's arrival already settled it in [onPlayerAdVisible].
+	 */
+	private fun withPlayerAdSuppression(transition: Transition): Transition {
+		val state = transition.state
+		if (state.playerAdSignal == null || state.playingSinceElapsedMs == null) return transition
+		return transition.copy(state = state.copy(playingSinceElapsedMs = null))
+	}
+
+	/**
+	 * Record how far the transport's own last word can carry the running clock.
+	 *
+	 * Every PLAYING callback restates it from its position, rate and the length of
+	 * the item it was published for; anything else that callback reports forgets
+	 * it. A bundle for the same instance keeps it only while it names the same
+	 * length, because the end is a statement about that length.
+	 *
+	 * Asked here rather than in each branch that starts a clock, because the rule is
+	 * about the transport, not about which branch happened to run. A transition
+	 * that changed nothing is left exactly as it was: the caller reads an unchanged
+	 * state as "keep whatever a nested finalization installed".
+	 */
+	private fun withTransportContentEvidence(
+		before: ListenState,
+		input: PlaybackInput,
+		transition: Transition,
+	): Transition {
+		val next = transition.state
+		if (next == before) return transition
+		val (endsAt, basis) = when (input) {
+			is PlaybackInput.TransportChanged -> {
+				val position = input.newPositionMs?.takeIf { it >= 0 }
+				// The length of the item the running clock belongs to, never the
+				// bundle's: a native source can resume the organic item while its
+				// bundle still names the interstitial's length. The longest length
+				// this listen established errs toward crediting, and a quarantined
+				// replacement is described by the replacement's own length.
+				val duration = (
+					next.durationReplacementMs
+						?: maxOf(next.trackIdentity.durationMs ?: 0, next.longestDurationMs ?: 0)
+					).takeIf { it > 0 }
+				if (next.finalized || input.transport != TransportState.PLAYING ||
+					position == null || duration == null || next.speed <= 0
+				) {
+					null to null
+				} else {
+					val remaining = (duration - position).coerceAtLeast(0)
+					(input.elapsedRealtimeMs + (remaining / next.speed).toLong()) to duration
+				}
+			}
+			is PlaybackInput.MetadataPublished ->
+				if (next.instanceToken == before.instanceToken &&
+					(
+						next.durationReplacementMs
+							?: maxOf(next.trackIdentity.durationMs ?: 0, next.longestDurationMs ?: 0)
+						) == before.transportContentDurationMs
+				) {
+					before.transportContentEndsAtElapsedMs to before.transportContentDurationMs
+				} else {
+					null to null
+				}
+			else -> return transition
+		}
+		if (endsAt == next.transportContentEndsAtElapsedMs && basis == next.transportContentDurationMs) {
+			return transition
+		}
+		return transition.copy(
+			state = next.copy(
+				transportContentEndsAtElapsedMs = endsAt,
+				transportContentDurationMs = basis,
+			),
+		)
+	}
 
 	/**
 	 * Nothing is measured until the transport says where in the item it is.
@@ -174,6 +259,7 @@ class PlaybackReducer(
 		is PlaybackInput.ForegroundShortTookOver -> onForegroundShortTookOver(state, input)
 		is PlaybackInput.ForegroundShortReleased -> onForegroundShortReleased(state, input)
 		is PlaybackInput.PictureInPictureObserved -> onPictureInPicture(state, input)
+		is PlaybackInput.PlayerAdSurfaceObserved -> onPlayerAdSurface(state, input)
 		is PlaybackInput.ForegroundSurface -> Transition(state)
 		is PlaybackInput.IdleDeadlineReached -> onIdleDeadline(state, input)
 	}
@@ -206,6 +292,9 @@ class PlaybackReducer(
 			return Transition(state)
 		}
 		if (state.transport != TransportState.PLAYING) return Transition(state)
+		// An advertisement in progress: nothing is being measured, so nothing has run
+		// out, and the presentation that follows it is the one this listen is for.
+		if (state.playerAdSignal != null) return Transition(state)
 		// A presentation the source itself has not let this reducer attribute cannot
 		// say when the named work should have ended, and a finalize is the one
 		// decision here that cannot be taken back. The field ended a 213 s song at
@@ -242,8 +331,13 @@ class PlaybackReducer(
 		}
 		// Only once the item's own length is genuinely used up. A deadline that
 		// fired early — a rate change, a seek — must not end a listen still in
-		// progress.
-		if (played < duration) return Transition(state)
+		// progress. A clock held at the transport's own end of the item has used
+		// up everything the transport can vouch for, even when that falls short of
+		// the length this listen established.
+		val transportRanOut = state.durationReplacementMs == null &&
+			!state.durationReplacementReturnPending &&
+			state.transportContentEndsAtElapsedMs?.let { input.elapsedRealtimeMs >= it } == true
+		if (played < duration && !transportRanOut) return Transition(state)
 		return Transition(
 			state,
 			effects = listOf(
@@ -261,15 +355,257 @@ class PlaybackReducer(
 		)
 	}
 
+	// ── 0. the player's own advertisement UI ───────────────────────────────
+
+	/**
+	 * What the source's player drew, applied to the presentation it was drawn over.
+	 *
+	 * A source can publish a pre-roll under the upcoming item's title and artist
+	 * with the advertisement's length, so nothing in the session can tell the two
+	 * apart — but its player draws literal advertisement labels for exactly as long
+	 * as the advertisement runs. That literal state is authoritative where duration shape never
+	 * was: while it shows, no clock runs, and a presentation it was drawn over from
+	 * the start is an advertisement whose seconds belong to nothing.
+	 *
+	 * A look that could not see the player learns nothing. It keeps a label already
+	 * read for the presentation it was read on, and forgets it at the next one.
+	 */
+	private fun onPlayerAdSurface(
+		state: ListenState,
+		input: PlaybackInput.PlayerAdSurfaceObserved,
+	): Transition {
+		// The foreground Shorts route owns the player, and its ad labels travel its
+		// own route. Nothing the watch player showed describes that listen.
+		if (state.suppressedByForegroundShort) return Transition(state)
+		return when (input.surface) {
+			PlayerAdSurface.UNOBSERVED -> Transition(
+				state.copy(
+					playerAdSurfaceObservable = false,
+					presentationAdAbsentSinceElapsedMs = null,
+				),
+			)
+			PlayerAdSurface.VISIBLE -> onPlayerAdVisible(
+				state,
+				input.signal?.trim()?.takeIf(String::isNotEmpty) ?: UNNAMED_PLAYER_AD_SIGNAL,
+				input.elapsedRealtimeMs,
+			)
+			PlayerAdSurface.ABSENT -> onPlayerAdAbsent(state, input.elapsedRealtimeMs)
+		}
+	}
+
+	private fun onPlayerAdVisible(
+		state: ListenState,
+		signal: String,
+		elapsedRealtimeMs: Long,
+	): Transition {
+		val seen = state.copy(
+			playerAdSignal = signal,
+			playerAdSurfaceObservable = true,
+			presentationAdAbsentSinceElapsedMs = null,
+		)
+		if (state.finalized || state.describingTabOnly) return Transition(seen)
+		val newlyVisible = state.playerAdSignal == null
+		val banked = seen.accumulate(elapsedRealtimeMs)
+		val sincePresentation =
+			(banked.playedMs - state.presentationBaselinePlayedMs).coerceAtLeast(0)
+		// A presentation already measured as organic, with the player seen without
+		// its label, is not an advertisement because a label now covers it: the
+		// player draws it a moment before the session republishes, and the organic
+		// seconds before that are real. Likewise a presentation credited for longer
+		// than any observation lag could explain before the first look at all.
+		// Either way the clock stops here and nothing already earned is touched.
+		val coversOrganic = state.presentationOrganicConfirmed ||
+			(!state.presentationShownAsAd && sincePresentation > PLAYER_AD_ONSET_REFUSAL_LIMIT_MS)
+		if (coversOrganic) {
+			return Transition(
+				banked.copy(playingSinceElapsedMs = null),
+				effects = if (newlyVisible) {
+					listOf(
+						PlaybackEffect.Note(
+							"ad",
+							"the player drew its ad label \"$signal\" over a presentation already " +
+								"measured as organic; not measuring while it shows",
+						),
+					)
+				} else {
+					emptyList()
+				},
+			)
+		}
+		// The label belongs to this presentation from its first second: whatever was
+		// credited on it before the label was read is the observation's lag, and it
+		// is the advertisement's, not anything's progress.
+		val keptMs = minOf(banked.playedMs, state.presentationBaselinePlayedMs)
+		val refusedMs = banked.playedMs - keptMs
+		return Transition(
+			banked.copy(
+				playedMs = keptMs,
+				playingSinceElapsedMs = null,
+				presentationShownAsAd = true,
+			),
+			effects = if (newlyVisible || refusedMs > 0) {
+				listOf(
+					PlaybackEffect.Note(
+						"ad",
+						"the player drew its ad label \"$signal\"; this presentation is an " +
+							"advertisement and nothing is measured while the label shows" +
+							if (refusedMs > 0) {
+								" — the ${refusedMs}ms counted before the label was read is removed"
+							} else {
+								""
+							},
+					),
+				)
+			} else {
+				emptyList()
+			},
+		)
+	}
+
+	private fun onPlayerAdAbsent(state: ListenState, elapsedRealtimeMs: Long): Transition {
+		val wasVisible = state.playerAdSignal != null
+		val cleared = state.copy(playerAdSignal = null, playerAdSurfaceObservable = true)
+		if (state.finalized || state.describingTabOnly) {
+			return Transition(cleared.copy(presentationAdAbsentSinceElapsedMs = null))
+		}
+		val playing = state.transport == TransportState.PLAYING
+		// Only the label held this clock. A quarantine or an unconfirmed return still
+		// holds it for reasons of its own, and those are not this observation's to end.
+		val measuring = playing && state.durationReplacementMs == null &&
+			!state.durationReplacementReturnPending
+		var next = cleared
+		if (wasVisible && measuring && next.playingSinceElapsedMs == null) {
+			next = next.copy(playingSinceElapsedMs = elapsedRealtimeMs)
+		}
+		// An advertisement draws its label for as long as it runs, but a first look
+		// can land before the player has drawn it. A presentation is organic only once
+		// the player has been seen playing it without the label for long enough that
+		// no ad could still be waiting to label itself.
+		if (!state.presentationOrganicConfirmed) {
+			val absentSince = state.presentationAdAbsentSinceElapsedMs
+			next = when {
+				!playing -> next.copy(presentationAdAbsentSinceElapsedMs = null)
+				absentSince == null || wasVisible ->
+					next.copy(presentationAdAbsentSinceElapsedMs = elapsedRealtimeMs)
+				elapsedRealtimeMs - absentSince >= PLAYER_AD_ABSENT_CONFIRM_MS -> next.copy(
+					presentationOrganicConfirmed = true,
+					presentationShownAsAd = false,
+					presentationAdAbsentSinceElapsedMs = null,
+				)
+				else -> next
+			}
+		}
+		return Transition(
+			next,
+			effects = if (wasVisible) {
+				listOf(
+					PlaybackEffect.Note(
+						"ad",
+						if (measuring) {
+							"the player's ad label is gone; measuring resumes"
+						} else {
+							"the player's ad label is gone"
+						},
+					),
+				)
+			} else {
+				emptyList()
+			},
+		)
+	}
+
+	/**
+	 * Replace an advertisement that held this listen's anchor with what followed it.
+	 *
+	 * The listen's anchor is the presentation measurement is attributed to, and a
+	 * pre-roll takes it simply by arriving first. Every duration rule below reads
+	 * the anchor as organic — which is how the trailer that followed two sponsored
+	 * surfaces was quarantined as their replacement. Once the player has labelled
+	 * the anchor an advertisement there is nothing to protect: its seconds were
+	 * never credited, its length was never the work's, and an id resolved against it
+	 * described it. The incoming presentation starts measurement exactly where the
+	 * advertisement began, whatever its length.
+	 */
+	private fun onAdvertisementAnchorReplaced(
+		state: ListenState,
+		input: PlaybackInput.MetadataPublished,
+		new: TrackIdentity,
+	): Transition {
+		val adDuration = state.trackIdentity.durationMs ?: 0
+		val newDuration = new.durationMs ?: 0
+		val banked = state.accumulate(input.elapsedRealtimeMs)
+		val keptMs = minOf(banked.playedMs, state.presentationBaselinePlayedMs)
+		val refusedMs = banked.playedMs - keptMs
+		val freshListen = keptMs == 0L
+		val longest = maxOf(state.presentationPriorLongestDurationMs ?: 0, newDuration).takeIf { it > 0 }
+		val replaced = banked.copy(
+			trackIdentity = new.copy(
+				artist = new.artist ?: state.trackIdentity.artist,
+				album = new.album ?: state.trackIdentity.album,
+				// Only an id this bundle itself published. One resolved while the
+				// advertisement was installed was resolved for the advertisement.
+				sourceItemId = new.sourceItemId,
+				durationMs = newDuration,
+			),
+			playedMs = keptMs,
+			pipInferredMs = if (freshListen) 0 else banked.pipInferredMs,
+			pipInference = if (freshListen) null else banked.pipInference,
+			fastestSpeedSeen = if (freshListen) banked.speed else banked.fastestSpeedSeen,
+			firstSeenPositionMs = if (freshListen) null else banked.firstSeenPositionMs,
+			// The next position belongs to the advertisement's own timeline.
+			leadInSkipsNextPosition = true,
+			loopDetected = if (freshListen) false else banked.loopDetected,
+			longestDurationMs = longest,
+			organicPresentationDurationMs = null,
+			organicAnchorProvenByExactItem = false,
+			organicPresentationRebased = false,
+			durationReplacementMs = null,
+			durationReplacementOrganicPositionMs = null,
+			durationReplacementReturnPending = false,
+			durationReplacementEndedAtBoundary = false,
+			durationReplacementReturnGraceScheduled = false,
+			durationReplacementCandidatePositionMs = null,
+			presentationUnprovenForNamedWork = false,
+			playingSinceElapsedMs = input.elapsedRealtimeMs
+				.takeIf { banked.transport == TransportState.PLAYING },
+		).beginPresentation(
+			baselinePlayedMs = state.presentationBaselinePlayedMs,
+			priorLongestDurationMs = state.presentationPriorLongestDurationMs,
+		)
+		return Transition(
+			replaced,
+			before = buildList {
+				add(PlaybackEffect.CancelStoppedFinalizationGrace)
+				add(PlaybackEffect.CancelContinuation)
+				add(PlaybackEffect.InvalidateInFlightIdentityRequest)
+				add(PlaybackEffect.ClearPreResolvedNativeIdentity)
+				add(
+					PlaybackEffect.Note(
+						"ad",
+						"the ${adDuration / 1000}s presentation the player labelled an advertisement " +
+							"is replaced by a ${newDuration / 1000}s presentation under the same title; " +
+							"none of the advertisement is credited and measurement starts here" +
+							if (refusedMs > 0) " (${refusedMs}ms removed)" else "",
+					),
+				)
+			},
+			effects = listOf(
+				PlaybackEffect.InstallMetadata,
+				PlaybackEffect.RequestCarryAuthority,
+				PlaybackEffect.LogMetadata("presentation that replaced a labelled advertisement"),
+			),
+		)
+	}
+
 	// ── 1. progress and speed accounting ───────────────────────────────────
 
 	private fun ListenState.accumulate(elapsedRealtimeMs: Long): ListenState {
 		if (suppressedByForegroundShort || describingTabOnly) {
 			return copy(playingSinceElapsedMs = null)
 		}
-		val startedAt = playingSinceElapsedMs ?: return this
+		if (playingSinceElapsedMs == null) return this
 		return copy(
-			playedMs = playedMs + ((elapsedRealtimeMs - startedAt) * speed).toLong(),
+			playedMs = playedMs + runningWindowMs(playingSinceElapsedMs, elapsedRealtimeMs),
 			fastestSpeedSeen = maxOf(fastestSpeedSeen, speed),
 			playingSinceElapsedMs = null,
 		)
@@ -288,6 +624,7 @@ class PlaybackReducer(
 		return Transition(
 			banked.copy(
 				playedMs = banked.playedMs + input.playedMs,
+				presentationBaselinePlayedMs = banked.presentationBaselinePlayedMs + input.playedMs,
 				startedAtEpochSec = minOf(banked.startedAtEpochSec, input.startedAtEpochSec),
 				playingSinceElapsedMs = input.elapsedRealtimeMs
 					.takeIf { banked.transport == TransportState.PLAYING },
@@ -522,7 +859,10 @@ class PlaybackReducer(
 			state.playedMsAt(input.elapsedRealtimeMs) == 0L
 		if (outgoingWasPlaceholder && new.isUsable) {
 			return Transition(
-				state.withNewInstance(input).copy(trackIdentity = new),
+				state.withNewInstance(input).copy(trackIdentity = new).beginPresentation(
+					baselinePlayedMs = state.playedMs,
+					priorLongestDurationMs = state.longestDurationMs,
+				),
 				effects = listOf(
 					PlaybackEffect.InstallMetadata,
 					PlaybackEffect.RestoreCarriedProgress,
@@ -587,6 +927,15 @@ class PlaybackReducer(
 		input: PlaybackInput.MetadataPublished,
 		new: TrackIdentity,
 	): Transition {
+		// Asked before any duration shape, because the player's label answers the one
+		// question those shapes can only guess at. Only while the advertisement holds
+		// the anchor itself: a labelled replacement inside a quarantine is already kept
+		// off the organic clock by the quarantine, and its return is handled there.
+		if (state.presentationShownAsAd && state.durationReplacementMs == null &&
+			!state.durationReplacementReturnPending
+		) {
+			return onAdvertisementAnchorReplaced(state, input, new)
+		}
 		val priorDuration = maxOf(
 			state.trackIdentity.durationMs ?: 0,
 			state.longestDurationMs ?: 0,
@@ -726,6 +1075,9 @@ class PlaybackReducer(
 					// and Video are different exact catalog items, so only progress and
 					// the logical listen token survive the presentation boundary.
 					trackIdentity = new.copy(sourceItemId = null),
+				).beginPresentation(
+					baselinePlayedMs = continuing.playedMs,
+					priorLongestDurationMs = state.longestDurationMs,
 				),
 				before = buildList {
 					add(PlaybackEffect.CancelStoppedFinalizationGrace)
@@ -795,6 +1147,12 @@ class PlaybackReducer(
 				playingSinceElapsedMs = input.elapsedRealtimeMs.takeIf {
 					state.transport == TransportState.PLAYING && positionConfirmed
 				},
+			).beginPresentation(
+				baselinePlayedMs = state.playedMs,
+				// The organic length is already among these, so a label still drawn over
+				// the returning presentation can never cost the work its own length.
+				priorLongestDurationMs = maxOf(priorDuration ?: 0, state.longestDurationMs ?: 0)
+					.takeIf { it > 0 },
 			)
 			return Transition(
 				resumed,
@@ -956,7 +1314,7 @@ class PlaybackReducer(
 					presentationUnprovenForNamedWork = false,
 					playingSinceElapsedMs = input.elapsedRealtimeMs
 						.takeIf { state.transport == TransportState.PLAYING },
-				),
+				).beginPresentation(baselinePlayedMs = 0, priorLongestDurationMs = null),
 				before = buildList {
 					add(PlaybackEffect.CancelStoppedFinalizationGrace)
 					add(PlaybackEffect.CancelContinuation)
@@ -1038,6 +1396,9 @@ class PlaybackReducer(
 				durationReplacementReturnGraceScheduled = false,
 				durationReplacementCandidatePositionMs = null,
 				playingSinceElapsedMs = null,
+			).beginPresentation(
+				baselinePlayedMs = banked.playedMs,
+				priorLongestDurationMs = priorDuration,
 			),
 			before = listOf(
 				PlaybackEffect.CancelStoppedFinalizationGrace,
@@ -1217,6 +1578,8 @@ class PlaybackReducer(
 			instanceToken = input.instanceToken ?: state.instanceToken,
 			instanceEstablishedAtMillis = input.nowMillis,
 			playedMs = state.playedMs + input.playedMs,
+			// Earned before this transport existed, so no label read on it can remove it.
+			presentationBaselinePlayedMs = state.presentationBaselinePlayedMs + input.playedMs,
 			startedAtEpochSec = input.startedAtEpochSec,
 			fastestSpeedSeen = input.fastestSpeedSeen,
 			loopDetected = input.loopDetected,
@@ -1339,9 +1702,30 @@ class PlaybackReducer(
 				),
 			)
 		}
+		val banked = state.accumulate(input.elapsedRealtimeMs)
+		// A listen that ends on a presentation the player labelled an advertisement
+		// ends without it. Its label may have gone a moment before the listen did —
+		// the overlay clears first — and whatever ran in that moment is still the
+		// advertisement's.
+		val adRefusedMs = if (state.presentationShownAsAd) {
+			(banked.playedMs - state.presentationBaselinePlayedMs).coerceAtLeast(0)
+		} else {
+			0
+		}
 		return Transition(
-			state.accumulate(input.elapsedRealtimeMs).copy(finalized = true),
-			before = listOf(PlaybackEffect.CancelStoppedFinalizationGrace),
+			banked.copy(finalized = true, playedMs = banked.playedMs - adRefusedMs),
+			before = buildList {
+				add(PlaybackEffect.CancelStoppedFinalizationGrace)
+				if (adRefusedMs > 0) {
+					add(
+						PlaybackEffect.Note(
+							"ad",
+							"[${input.reason}] the ${adRefusedMs}ms measured after the player's ad " +
+								"label cleared still belongs to the advertisement; not credited",
+						),
+					)
+				}
+			},
 			effects = listOf(
 				PlaybackEffect.FreezeAndReport(
 					input.reason,
@@ -1604,6 +1988,9 @@ class PlaybackReducer(
 					speed = input.speed,
 					playingSinceElapsedMs = input.elapsedRealtimeMs,
 					lastObservedPositionMs = input.newPositionMs,
+				).beginPresentation(
+					baselinePlayedMs = state.playedMs,
+					priorLongestDurationMs = state.longestDurationMs,
 				),
 				before = listOf(
 					PlaybackEffect.CancelStoppedFinalizationGrace,
@@ -1711,6 +2098,10 @@ class PlaybackReducer(
 				loopDetected = false,
 				finalized = false,
 				metadataObservedSincePlaybackBoundary = false,
+				// The watch player is no longer what is on screen.
+				playerAdSignal = null,
+				playerAdSurfaceObservable = false,
+				presentationAdAbsentSinceElapsedMs = null,
 			),
 			before = before,
 			effects = listOf(
@@ -1840,7 +2231,31 @@ class PlaybackReducer(
 		finalized = false,
 		instanceToken = nextInstanceToken,
 		instanceEstablishedAtMillis = nowMillis,
-	)
+	).beginPresentation(baselinePlayedMs = 0, priorLongestDurationMs = null)
+
+	/**
+	 * The installed presentation changed; what the player showed is re-asked of the next one.
+	 *
+	 * A label the player is still visibly drawing describes whatever is installed
+	 * now — the session republishes a moment before the overlay goes. A label that
+	 * was read and has since gone out of sight does not: it was read for the
+	 * presentation that just ended, and holding the next one to it would suppress a
+	 * video on the strength of an ad nobody can see any more.
+	 */
+	private fun ListenState.beginPresentation(
+		baselinePlayedMs: Long,
+		priorLongestDurationMs: Long?,
+	): ListenState {
+		val stillDrawn = playerAdSignal != null && playerAdSurfaceObservable
+		return copy(
+			playerAdSignal = playerAdSignal.takeIf { stillDrawn },
+			presentationShownAsAd = stillDrawn,
+			presentationOrganicConfirmed = false,
+			presentationAdAbsentSinceElapsedMs = null,
+			presentationBaselinePlayedMs = baselinePlayedMs,
+			presentationPriorLongestDurationMs = priorLongestDurationMs,
+		)
+	}
 
 	/** A new track instance on unchanged measurement — the placeholder handover. */
 	private fun ListenState.withNewInstance(input: PlaybackInput.MetadataPublished): ListenState =
@@ -1891,6 +2306,27 @@ class PlaybackReducer(
 		const val DURATION_REBASE_MAX_TOLERANCE_MS = 180_000L
 
 		const val ORGANIC_ANCHOR_SUPERSEDE_FACTOR = 10L
+
+		/**
+		 * How long the player must be seen playing a presentation without its ad label
+		 * before that presentation is organic.
+		 *
+		 * An advertisement labels itself for as long as it runs; this only covers the
+		 * moment before the overlay is drawn, and the observer looks once a second.
+		 */
+		const val PLAYER_AD_ABSENT_CONFIRM_MS = 3_000L
+
+		/**
+		 * The most a presentation may already have been credited for a first label to
+		 * still remove it.
+		 *
+		 * Beyond this no observation lag explains it: the player was simply not being
+		 * looked at, and seconds that old are not taken back on a later look.
+		 */
+		const val PLAYER_AD_ONSET_REFUSAL_LIMIT_MS = 15_000L
+
+		/** Recorded when a source reports a visible ad surface without its words. */
+		const val UNNAMED_PLAYER_AD_SIGNAL = "the player showed its advertisement controls"
 
 		/**
 		 * Banked progress below which a listen has not yet measured anything.
@@ -1950,14 +2386,24 @@ class PlaybackReducer(
 	}
 }
 
-private fun Long?.orZero(): Long = this ?: 0
-
 /** What a transport can be doing, with no platform constant in sight. */
 enum class TransportState {
 	PLAYING,
 	PAUSED,
 	STOPPED,
 	OTHER,
+}
+
+/** What one look at the source's own player said about its advertisement UI. */
+enum class PlayerAdSurface {
+	/** The player drew one of its literal advertisement labels or controls. */
+	VISIBLE,
+
+	/** The player itself was on screen and drew no advertisement label. */
+	ABSENT,
+
+	/** The player could not be seen, so nothing was learned either way. */
+	UNOBSERVED,
 }
 
 /**
@@ -2082,6 +2528,19 @@ data class ListenState(
 	val presentationUnprovenForNamedWork: Boolean = false,
 	/** Last position published by this transport, retained across metadata callbacks. */
 	val lastObservedPositionMs: Long? = null,
+	/**
+	 * When the transport's last PLAYING callback runs out of the item it was
+	 * published for — its position, rate and length taken at their word — or null
+	 * when any of them is unknown.
+	 *
+	 * A running window is never credited past this instant. Content beyond it
+	 * needs a callback to say playback went on: a seek, a wrap, the next track. A
+	 * process frozen by the OS delivers none of those until it thaws, and the wall
+	 * clock that passed meanwhile is not playback.
+	 */
+	val transportContentEndsAtElapsedMs: Long? = null,
+	/** The item length [transportContentEndsAtElapsedMs] was derived from. */
+	val transportContentDurationMs: Long? = null,
 
 	val leadInSkipsNextPosition: Boolean = false,
 
@@ -2090,6 +2549,28 @@ data class ListenState(
 	val describingTabOnly: Boolean = false,
 	/** The structurally proven foreground Shorts route owns this player. */
 	val suppressedByForegroundShort: Boolean = false,
+	/**
+	 * The literal advertisement label the source's own player is drawing now, or null.
+	 *
+	 * While set, no played clock runs. See `PlaybackReducer.onPlayerAdSurface`.
+	 */
+	val playerAdSignal: String? = null,
+	/** The player was in sight at the last look, so [playerAdSignal] is current. */
+	val playerAdSurfaceObservable: Boolean = false,
+	/**
+	 * The installed presentation is an advertisement: the player labelled it before
+	 * it had been measured as anything else, and has not since been seen playing it
+	 * unlabelled. Its seconds are not progress.
+	 */
+	val presentationShownAsAd: Boolean = false,
+	/** The player was seen playing the installed presentation without its ad label. */
+	val presentationOrganicConfirmed: Boolean = false,
+	/** When that unlabelled stretch began, while it is still too short to confirm. */
+	val presentationAdAbsentSinceElapsedMs: Long? = null,
+	/** Progress this listen had already banked when the installed presentation began. */
+	val presentationBaselinePlayedMs: Long = 0,
+	/** [longestDurationMs] as it stood before the installed presentation arrived. */
+	val presentationPriorLongestDurationMs: Long? = null,
 	/** One finalize per track, however many callbacks announce the end. */
 	val finalized: Boolean = false,
 	/**
@@ -2126,9 +2607,20 @@ data class ListenState(
 		} else if (finalized || durationReplacementMs != null || durationReplacementReturnPending) {
 			playedMs + pipInferredMs
 		} else {
-			playedMs + pipInferredMs +
-				playingSinceElapsedMs?.let { ((elapsedRealtimeMs - it) * speed).toLong() }.orZero()
+			playedMs + pipInferredMs + runningWindowMs(playingSinceElapsedMs, elapsedRealtimeMs)
 		}
+
+	/**
+	 * Content consumed by a window that started at [startedAtElapsedMs], at the
+	 * current rate, no further than [transportContentEndsAtElapsedMs].
+	 */
+	fun runningWindowMs(startedAtElapsedMs: Long?, elapsedRealtimeMs: Long): Long {
+		val startedAt = startedAtElapsedMs ?: return 0
+		val evidencedUntil = transportContentEndsAtElapsedMs
+			?.let { minOf(elapsedRealtimeMs, it) }
+			?: elapsedRealtimeMs
+		return ((evidencedUntil - startedAt).coerceAtLeast(0) * speed).toLong()
+	}
 
 	/**
 	 * How long from now this listen should be given before it is treated as
@@ -2147,6 +2639,7 @@ data class ListenState(
 	fun idleFinalizeDelayMs(elapsedRealtimeMs: Long, durationMs: Long?): Long? {
 		if (finalized || suppressedByForegroundShort || describingTabOnly) return null
 		if (transport != TransportState.PLAYING) return null
+		if (playerAdSignal != null) return null
 		// Nothing this deadline could decide: the source has not established which
 		// length is the work, so neither that length nor silence measured against it
 		// may end this listen.
@@ -2160,6 +2653,19 @@ data class ListenState(
 
 	fun establishedDurationMs(publishedMs: Long?): Long? {
 		val installedIsQuarantined = durationReplacementMs != null
+		// The longest length guards an unproven presentation: an interstitial's
+		// shorter number must not make the work look complete. Once an exact-item
+		// proof has attributed the installed presentation to the work, its length
+		// is the work's, and a longer one this title showed earlier belonged to a
+		// surface that was not — a pre-roll published under the song's own title.
+		if (!installedIsQuarantined && !durationReplacementReturnPending) {
+			organicPresentationDurationMs?.takeIf { attributed ->
+				organicAnchorProvenByExactItem && attributed > 0 &&
+					trackIdentity.durationMs?.let { installed ->
+						kotlin.math.abs(installed - attributed) <= TrackIdentity.DURATION_REFINEMENT_TOLERANCE_MS
+					} == true
+			}?.let { return it }
+		}
 		val accepted = if (installedIsQuarantined) null else publishedMs
 		return accepted?.let { maxOf(it, longestDurationMs ?: 0) }
 			?: longestDurationMs
@@ -2356,6 +2862,19 @@ sealed interface PlaybackInput {
 		val nowMillis: Long,
 		val playing: Boolean,
 		val durationMs: Long?,
+	) : PlaybackInput
+
+	/**
+	 * The source's own player was looked at for its advertisement UI.
+	 *
+	 * [signal] is the literal label read when [surface] is
+	 * [PlayerAdSurface.VISIBLE], and null otherwise. The reducer never infers an
+	 * advertisement from anything else; this is the one input that says so.
+	 */
+	data class PlayerAdSurfaceObserved(
+		val surface: PlayerAdSurface,
+		val signal: String?,
+		val elapsedRealtimeMs: Long,
 	) : PlaybackInput
 
 	/**

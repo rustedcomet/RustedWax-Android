@@ -53,9 +53,14 @@ class YouTubeMusicAdapter(
 		)
 	}
 
-	/** No Shorts surface, so no handover may ever take this player away. */
-	override val evidenceCapabilities =
-		super.evidenceCapabilities.copy(presentsForegroundShorts = false)
+	/**
+	 * No Shorts surface, so no handover may ever take this player away, and no
+	 * player the native observer can see, so no ad label can describe it.
+	 */
+	override val evidenceCapabilities = super.evidenceCapabilities.copy(
+		presentsForegroundShorts = false,
+		presentsWatchPlayerAdSurface = false,
+	)
 
 	/** The playlist bar belongs to the YouTube app's watch screen, not to this one. */
 	override fun withPlaylistEvidence(context: ResolverContext): ResolverContext = context

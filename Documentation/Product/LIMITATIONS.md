@@ -29,12 +29,22 @@ evidence stops inference.
 Shorts scrobbling is disabled by default. It also depends on optional Android
 access that can be revoked or disrupted by the operating system.
 
+## Android background reliability
+
+For reliable background monitoring, set RustedWax's Android **Battery usage** to
+**Unrestricted**, particularly on Samsung devices. Battery restrictions can
+suspend the process and delay playback callbacks or finalization. This setting
+does not guarantee uninterrupted delivery or identification of every listen.
+
 ## Ads and duration churn
 
 Native apps may reuse one media session across content, ads, and interstitial
-screens. RustedWax quarantines material duration replacements and excludes
-interstitial intervals. An unresolved duration conflict can cause a legitimate
-listen to be skipped.
+screens. In the YouTube app, time under the watch player's own ad label is not
+measured, but only while the native accessibility service can see the player
+(see [Detection](DETECTION.md#native-watch-player-ads)). Otherwise RustedWax
+quarantines material duration replacements and excludes interstitial intervals.
+An unresolved duration conflict can cause a legitimate listen to be skipped.
+YouTube Music exposes no ad label that RustedWax can read.
 
 ## Background browser playback
 

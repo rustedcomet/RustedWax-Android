@@ -23,10 +23,10 @@ class AbandonedPlaybackReplayTest : ReplayScenarioTest() {
 				isUnlisted = false,
 			),
 		)
-		// The synthetic fixture was classified `song`. A bare title like "Example Track"
+		// The synthetic fixture is classified `song`. A bare title like "Example Track"
 		// names no `Artist - Track` structure of its own, so the category alone
 		// does not carry it; MusicBrainz confirming the recording is what did.
-		// Scripted here so the fixture reaches the same `kind` this regression needs —
+		// Scripted here so the fixture reaches the `kind` needed by this regression —
 		// and `kind == song` is one of the three conditions the double-listen cap
 		// turns on, so getting it wrong would hide the defect rather than show it.
 		harness.env.music.found("Example Artist", "Example Track", "Example Artist", "Example Track")
@@ -40,7 +40,7 @@ class AbandonedPlaybackReplayTest : ReplayScenarioTest() {
 		PlaybackEvent.SessionMetadata(
 			title = "Example Track",
 			artist = "Example Artist",
-			// The synthetic payload carried `"album":"Example Track"`, which is what made
+			// The synthetic payload carries the title as its album, which is what makes
 			// `MusicClassifier` call it a song — and `kind == song` is one of the
 			// three conditions the double-listen cap turns on.
 			album = "Example Track",
@@ -93,11 +93,11 @@ class AbandonedPlaybackReplayTest : ReplayScenarioTest() {
 	}
 
 	@Test
-	fun `the same over-run on a session that reports position still earns two`() {
-		// The other side of the rule, so the fix is a gate on evidence rather than
-		// a blanket cap. Same song, same 3452%, but this transport publishes a
-		// position — so a second listen is corroborated and the 160% rule applies
-		// exactly as it did before.
+	fun `the same over-run on a session that reports position still earns one`() {
+		// A position read once, at the start, says where that window began and
+		// how much of the song it had left. It does not say the song played a
+		// second time: the same shape can arise when the OS freezes a process
+		// for an hour, so it must not qualify a second operation.
 		val harness = harness()
 
 		harness.feed(
@@ -117,8 +117,38 @@ class AbandonedPlaybackReplayTest : ReplayScenarioTest() {
 		)
 
 		val snapshot = harness.finalized.single()
-		assertEquals(false, snapshot.loopDetected)
+		assertEquals(186_000L, snapshot.playedMs)
 		assertTrue("position was readable", snapshot.firstObservedPositionMs != null)
+		assertEquals(1, harness.broadcasts.size)
+	}
+
+	@Test
+	fun `a second pass the position proves on that session still earns two`() {
+		// The other side of the rule, so the fix is a gate on evidence rather than
+		// a blanket cap: a seek back 120 s in, then the song through again.
+		val harness = harness()
+
+		harness.feed(
+			listOf(
+				PlaybackEvent.NotificationObserved(host = "youtube.com"),
+				PlaybackEvent.UrlObserved(host = "www.youtube.com", videoId = videoId),
+				PlaybackEvent.SessionMetadata(
+					title = "Example Track",
+					artist = "Example Artist",
+					album = "Example Track",
+					durationMs = 186_000,
+				),
+				PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 0),
+				PlaybackEvent.Advance(120_000),
+				PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 0),
+				PlaybackEvent.Advance(186_000),
+				PlaybackEvent.Finalized("the browser named its tab instead of a track"),
+			),
+		)
+
+		val snapshot = harness.finalized.single()
+		assertEquals(false, snapshot.loopDetected)
+		assertEquals(306_000L, snapshot.playedMs)
 		assertEquals(2, harness.broadcasts.size)
 	}
 

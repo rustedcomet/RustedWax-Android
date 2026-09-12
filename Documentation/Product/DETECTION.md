@@ -51,6 +51,29 @@ evidence that YouTube still has the relevant visible window and media audio.
 Inferred time is bounded and cannot be transferred to a different logical
 track.
 
+## Native watch-player ads
+
+Native YouTube publishes a pre-roll under the upcoming video's own title and
+channel, with the ad's length, so the media session cannot tell the ad from the
+video. While an ordinary video is playing, the same native service looks at the
+watch player about once a second for YouTube's own ad controls. A reading counts
+only when both the view id is one of the player's ad controls
+(`ad_progress_text`, `skip_ad_button_container`, `player_learn_more_button`)
+and the label is one of the exact ad labels ("Sponsored", "Skip ad", "Visit
+advertiser").
+
+- While a label is showing, no playback time is measured.
+- A presentation labelled from its first seconds is an advertisement. None of
+  its time is credited, and the presentation that follows it starts the
+  measurement, whatever its length.
+- Absence counts only when the full-size watch player was on screen with no ad
+  control drawn. A presentation becomes organic once it has been seen playing
+  unlabelled for three seconds.
+- When the player cannot be observed, no absence is inferred. A previously read
+  ad label continues to hold the current presentation's clock until an observed
+  absence or a presentation change permits measurement. A supported ad control
+  still visible on the minimized player remains positive ad evidence.
+
 ## Watch history
 
 The optional YouTube connection can read the signed-in account's history feed

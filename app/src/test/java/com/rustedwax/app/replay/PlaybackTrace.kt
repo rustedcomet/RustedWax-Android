@@ -595,6 +595,16 @@ class PlaybackTrace(
 				if (shortTracker.hasActive) observeShort(clock.nowMillis())
 			}
 
+			// `SessionProbe.handleNativeWatchAd` dispatches exactly this, stamped
+			// when the host receives it.
+			is PlaybackEvent.PlayerAdSurfaceObserved -> dispatch(
+				PlaybackInput.PlayerAdSurfaceObserved(
+					surface = event.surface,
+					signal = event.label,
+					elapsedRealtimeMs = clock.nowMillis(),
+				),
+			)
+
 			is PlaybackEvent.AccessibilityScan -> {
 				evidence.accessibilityCoverage = if (event.sawYouTubeRoot) {
 					MediaSessionAccessibilityEvidence.Coverage(

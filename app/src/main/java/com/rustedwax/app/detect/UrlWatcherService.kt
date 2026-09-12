@@ -85,7 +85,7 @@ class UrlWatcherService : AccessibilityService() {
 				(expectedPackage != null && expectedPackage != rootPackage)
 			) return null
 			val raw = readUrlBar(root, rootPackage)
-			val host = raw?.let(::hostOf)
+			val host = BrowserOrigin.hostOf(raw)
 			if (!YouTubeAdDetector.shouldScanHost(host)) return null
 			val parsedVideoId = raw?.let { VIDEO_ID.find(it)?.groupValues?.get(1) }
 			val isShort = raw?.contains("/shorts/", ignoreCase = true) == true
@@ -185,8 +185,8 @@ class UrlWatcherService : AccessibilityService() {
 
 	/**
 	 * The omnibox, by view id — stable across Chromium forks because Brave
-	 * inherits Chrome's layout. Falls back to the first focusable EditText,
-	 * which is what the omnibox is when a fork has renamed it.
+	 * inherits Chrome's layout. An arbitrary editable page field is not origin
+	 * evidence, so a missing address-bar node fails closed.
 	 */
 	private fun readUrlBar(root: AccessibilityNodeInfo, pkg: String): String? {
 		root.findAccessibilityNodeInfosByViewId("$pkg:id/url_bar")?.let { nodes ->
@@ -196,23 +196,6 @@ class UrlWatcherService : AccessibilityService() {
 				node.recycle()
 			}
 			if (!text.isNullOrBlank()) return text
-		}
-		return firstEditableText(root, depth = 0)
-	}
-
-	private fun firstEditableText(node: AccessibilityNodeInfo?, depth: Int): String? {
-		if (node == null || depth > MAX_DEPTH) return null
-		if (node.className == "android.widget.EditText") {
-			node.text?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
-		}
-		for (i in 0 until node.childCount) {
-			val child = node.getChild(i) ?: continue
-			val found = try {
-				firstEditableText(child, depth + 1)
-			} finally {
-				child.recycle()
-			}
-			if (found != null) return found
 		}
 		return null
 	}
@@ -246,19 +229,7 @@ class UrlWatcherService : AccessibilityService() {
 		return null
 	}
 
-	/**
-	 * The bar may hold a full URL, a bare host, or a search query. Accept the
-	 * first two shapes, reject the rest — same fail-closed rule the rest of
-	 * detection follows.
-	 */
-	private fun hostOf(value: String): String? {
-		val v = value.trim()
-		if (v.isEmpty() || v.contains(' ')) return null
-		return HOST.find(v)?.groupValues?.get(1)?.removePrefix("www.")?.lowercase()
-	}
-
 	companion object {
-		private const val MAX_DEPTH = 12
 		private const val AD_SCAN_MAX_DEPTH = 24
 		private const val AD_SCAN_MAX_NODES = 500
 		private const val REFRESH_INTERVAL_MS = 5_000L
@@ -281,9 +252,6 @@ class UrlWatcherService : AccessibilityService() {
 
 		/** `list=` — the playlist is what still identifies tracks once the bar goes quiet. */
 		private val PLAYLIST_ID = Regex("""[?&]list=([A-Za-z0-9_-]{2,})""")
-
-		private val HOST =
-			Regex("""(?:https?://)?((?:[a-z0-9-]+\.)+[a-z]{2,})""", RegexOption.IGNORE_CASE)
 
 		/** Whether the user has enabled this service in system settings. */
 		fun isEnabled(context: Context): Boolean {

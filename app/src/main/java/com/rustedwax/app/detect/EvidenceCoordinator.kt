@@ -58,6 +58,11 @@ class EvidenceCoordinator : EvidenceRun {
 			override val sourceSession: SourceSessionId,
 			val event: NativeShortsObserver.Event,
 		) : Event
+
+		data class NativeWatchAdObserved(
+			override val sourceSession: SourceSessionId,
+			val reading: NativeWatchAdParser.Reading,
+		) : Event
 	}
 
 	private data class SourceState(

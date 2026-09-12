@@ -85,6 +85,10 @@ A literal ad observation vetoes the item. Unknown or changing duration alone
 does not prove an ad; instead, the affected interval is quarantined while the
 organic measurement remains separate.
 
+In the native YouTube app, the ad and the video that follows it form one listen,
+so the watch player's ad label does not veto that listen. It removes only the
+labelled interval: none of that time counts toward the video.
+
 ## Automatic, manual, and shadow triggers
 
 All triggers use the same identity, enrichment, policy, privacy, and payload

@@ -1,6 +1,6 @@
 # Why RustedWax exists
 
-The problem RustedWax solves and the shape of the current v0.11.1 product.
+The problem RustedWax solves and the shape of the current v0.11.2 product.
 
 [← Back to the project README](../../README.md)
 

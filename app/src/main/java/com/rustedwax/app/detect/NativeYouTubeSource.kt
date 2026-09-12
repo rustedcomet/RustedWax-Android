@@ -35,6 +35,7 @@ abstract class NativeYouTubeSource(
 		publishesStructuredTransportDump = true,
 		scopedBySourceEpoch = true,
 		presentsForegroundShorts = true,
+		presentsWatchPlayerAdSurface = true,
 	)
 
 	override val profile: SourceProfile = SourceProfile.YOUTUBE.copy(
@@ -157,8 +158,10 @@ abstract class NativeYouTubeSource(
 	// ── host observations ──────────────────────────────────────────────────
 	//
 	// A browser's visible chrome says nothing about what this app is doing.
-	// `METADATA_KEY_ADVERTISEMENT` is the one ad route that does apply, and it
-	// arrives on the session's own bundle rather than through any of these.
+	// `METADATA_KEY_ADVERTISEMENT` arrives on the session's own bundle rather than
+	// through any of these, and so does the watch player's own ad state: it is read
+	// by the native observer and reaches the reducer as an interval, not as a veto
+	// on the whole listen — a pre-roll and the video after it are one listen here.
 
 	override fun bindVisibleAdEvidence(request: SourceVisibleAdRequest): SourceAdVerdict =
 		SourceAdVerdict.NONE

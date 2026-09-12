@@ -310,7 +310,7 @@ class ProbeParityTest {
 		listOf(
 			ParityStep.Metadata("Happy Song", durationMs = 236_981, mediaId = "aaaaaaaaaaa"),
 			playing(0),
-			ParityStep.Advance(240_000),
+			ParityStep.Advance(230_000),
 			ParityStep.Metadata("Happy Song", artist = "BMTH", mediaId = "aaaaaaaaaaa"),
 			ParityStep.Metadata("Next", durationMs = 100_000, mediaId = "bbbbbbbbbbb"),
 		),
@@ -807,9 +807,11 @@ class ProbeParityTest {
 			3_600_000L,
 			old.first().playedMs,
 		)
+		// The deadline fires after the grace, but the grace is waiting, not playing:
+		// nothing the transport published carries the clock past the item's end.
 		assertEquals(
-			"the idle deadline no longer stops at the item's own length plus grace",
-			186_000L + 30_000L,
+			"the idle deadline no longer stops at the item's own length",
+			186_000L,
 			new.first().playedMs,
 		)
 		// Everything else about the listen still has to agree: the divergence is a

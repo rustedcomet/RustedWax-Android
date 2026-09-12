@@ -73,6 +73,18 @@ sealed interface PlaybackEvent {
 	/** A fresh successful scan of the visible YouTube root. */
 	data class AccessibilityScan(val sawYouTubeRoot: Boolean) : PlaybackEvent
 
+	/**
+	 * The native watch player was looked at for its own advertisement UI.
+	 *
+	 * Distinct from [AdLabelObserved], which is a browser or Shorts veto on a
+	 * whole track: this says what the ordinary watch player showed at one
+	 * instant, and the reducer decides which interval that describes.
+	 */
+	data class PlayerAdSurfaceObserved(
+		val surface: PlayerAdSurface,
+		val label: String? = if (surface == PlayerAdSurface.VISIBLE) "Sponsored" else null,
+	) : PlaybackEvent
+
 	/** The native watch screen showed a playlist bar. */
 	data class NativePlaylistObserved(
 		val name: String,

@@ -15,10 +15,10 @@ locally on the Android device.
 
 ## Download
 
-The current public release is **RustedWax v0.11.1**.
+The current public release is **RustedWax v0.11.2**.
 
 1. Open the [latest GitHub Release](https://github.com/rustedcomet/RustedWax-Android/releases/latest).
-2. Download `rustedwax-v0.11.1.apk`.
+2. Download `rustedwax-v0.11.2-release.apk`.
 3. Optionally verify it against the published
    [release identity and checksum](Documentation/Product/RELEASE_VERIFICATION.md).
 4. Install it on Android 8.0 or newer and follow the
@@ -40,18 +40,19 @@ Regular users should install the signed release APK, not a debug build.
 ## Screenshots
 
 <p align="center">
-  <img src="Documentation/Assets/screenshots/now-v0111-light.png" alt="RustedWax Now screen" width="31%">
-  <img src="Documentation/Assets/screenshots/history-v0111-light.png" alt="RustedWax History screen" width="31%">
-  <img src="Documentation/Assets/screenshots/not-logged-v0111-light.png" alt="RustedWax Not logged screen" width="31%">
+	<img src="Documentation/Assets/screenshots/now-dark.png" alt="RustedWax Now screen in dark mode" width="31%">
+	<img src="Documentation/Assets/screenshots/history-light.png" alt="RustedWax History screen in light mode" width="31%">
+	<img src="Documentation/Assets/screenshots/not-logged-dark.png" alt="RustedWax Not logged screen in dark mode" width="31%">
 </p>
 
 <p align="center">
-  <img src="Documentation/Assets/screenshots/settings-v0111-light.png" alt="RustedWax settings in light mode" width="31%">
-  <img src="Documentation/Assets/screenshots/settings-v0111-dark.png" alt="RustedWax settings in dark mode" width="31%">
+	<img src="Documentation/Assets/screenshots/history-dark.png" alt="RustedWax History screen in dark mode" width="31%">
+	<img src="Documentation/Assets/screenshots/not-logged-light.png" alt="RustedWax Not logged screen in light mode" width="31%">
+	<img src="Documentation/Assets/screenshots/settings-light.png" alt="RustedWax settings in light mode" width="31%">
 </p>
 
-The gallery uses a clean installation and contains no account, key,
-transaction, or personal listening-history data.
+The gallery shows owner-approved real usage, including public Hive activity.
+It contains no passwords or key material.
 
 ## Account safety
 

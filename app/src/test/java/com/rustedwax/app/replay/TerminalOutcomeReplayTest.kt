@@ -338,7 +338,15 @@ class TerminalOutcomeReplayTest : ReplayScenarioTest() {
 		// payload" wording would have outlawed.
 		val harness = ReplayHarness(ReplaySource.BRAVE)
 		harness.env.facts.put(facts(song.first, song.second, song.third, 213))
-		harness.playSong(playedMs = 360_000)
+		// Genuine because the position proves it: 147 s in, a seek back to the start
+		// and the song through again. Silence past the song's end proves nothing.
+		harness.feed(
+			watching(song.first, song.second, song.third, 213_000)
+				+ PlaybackEvent.Advance(147_000)
+				+ PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 0)
+				+ PlaybackEvent.Advance(213_000)
+				+ PlaybackEvent.Finalized(),
+		)
 
 		val outcome = outcomeOf(harness)
 		assertTrue(outcome is FinalizationOutcome.Eligible)

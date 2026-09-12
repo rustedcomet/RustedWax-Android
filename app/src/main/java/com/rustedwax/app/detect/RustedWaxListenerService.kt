@@ -248,7 +248,7 @@ class RustedWaxListenerService : NotificationListenerService() {
 		val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
 
 		val hint = NotificationHints.Hint(
-			host = hostOf(subText) ?: hostOf(text),
+			host = BrowserOrigin.hostOf(subText),
 			subText = subText,
 			title = title,
 			text = text,
@@ -274,23 +274,7 @@ class RustedWaxListenerService : NotificationListenerService() {
 		evidenceCoordinator?.removeNotification(SourceSessionId(pkg, null), title)
 	}
 
-	/**
-	 * Pull a hostname out of whatever Chromium put in the field. It may be a
-	 * bare origin ("youtube.com"), a full URL, or free text — accept the first
-	 * two, reject the rest rather than guessing.
-	 */
-	private fun hostOf(value: String?): String? {
-		val v = value?.trim().orEmpty()
-		if (v.isEmpty()) return null
-		HOST.find(v)?.let { return it.groupValues[1].removePrefix("www.").lowercase() }
-		return null
-	}
-
 	companion object {
 		private const val TAG = "RustedWaxListener"
-
-		/** Matches a bare domain or the host part of a URL. */
-		private val HOST =
-			Regex("""(?:https?://)?((?:[a-z0-9-]+\.)+[a-z]{2,})""", RegexOption.IGNORE_CASE)
 	}
 }

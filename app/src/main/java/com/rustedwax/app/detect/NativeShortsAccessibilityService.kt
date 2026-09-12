@@ -14,6 +14,7 @@ import android.view.accessibility.AccessibilityEvent
 import com.rustedwax.app.storage.Settings as AppSettings
 import android.view.accessibility.AccessibilityNodeInfo
 import com.rustedwax.app.BuildConfig
+import com.rustedwax.core.PlayerAdSurface
 import com.rustedwax.core.SourceSessionId
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -72,6 +73,12 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 				silenceProbeDue
 			) {
 				requestObservation("bounded foreground refresh")
+			} else if (eligible() && NativeWatchAdObserver.watchPlaybackActive()) {
+				// A full observation above already reads the watch player on its way
+				// past. Otherwise a playing watch listen still needs the player looked
+				// at every second: an ad draws its label for as long as it runs, and
+				// YouTube emits no accessibility event while nothing on screen changes.
+				requestWatchAdObservation()
 			}
 			handler.postDelayed(this, REFRESH_INTERVAL_MS)
 		}
@@ -395,6 +402,9 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 				"RustedWax is foreground; native YouTube root not requested",
 				now,
 			)
+			NativeWatchAdObserver.observed(
+				NativeWatchAdParser.unobserved("RustedWax is foreground"),
+			)
 			observeNativePlaylist(
 				NativePlaylistParser.Result.Unobservable(
 					"RustedWax is foreground; native YouTube root not requested",
@@ -403,20 +413,14 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 			)
 			return
 		}
-		val root = AccessibilityRootFreshener.acquire(
-			clearCache = {
-				// API 33 added a service-wide cache invalidation. Older releases still
-				// get the per-root refresh below.
-				if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) clearCache()
-			},
-			obtain = { rootInActiveWindow },
-			refresh = { candidate -> runCatching { candidate.refresh() }.getOrDefault(false) },
-			recycle = AccessibilityNodeInfo::recycle,
-		)
+		val root = acquireFreshRoot()
 		if (root == null) {
 			reportSurfaceUnavailableDuringPossiblePip(
 				"no fresh active native YouTube accessibility root",
 				now,
+			)
+			NativeWatchAdObserver.observed(
+				NativeWatchAdParser.unobserved("no fresh active native YouTube accessibility root"),
 			)
 			// With the screen off this is ordinary. With the screen on it means
 			// the service cannot see any window at all, which is the most likely
@@ -435,13 +439,16 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 		}
 		val tree: NativeShortTree?
 		val playlistCapture: NativePlaylistCapture
+		val watchAdCapture: NativeWatchAdCapture
 		try {
 			reportShortSurface(root, now)
 			tree = captureTargeted(root)
 			playlistCapture = capturePlaylist(root)
+			watchAdCapture = captureWatchAd(root)
 		} finally {
 			root.recycle()
 		}
+		publishWatchAd(watchAdCapture, captureStartedElapsed)
 		// Independent of the Shorts result: the playlist bar belongs to the
 		// ordinary watch screen, which is exactly where captureTargeted finds
 		// nothing.
@@ -503,6 +510,121 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 				NativeShortsObserver.accepted(reading.result, now, reading.inferredPlaying)
 			}
 		}
+	}
+
+	private fun acquireFreshRoot(): AccessibilityNodeInfo? = AccessibilityRootFreshener.acquire(
+		clearCache = {
+			// API 33 added a service-wide cache invalidation. Older releases still
+			// get the per-root refresh below.
+			if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) clearCache()
+		},
+		obtain = { rootInActiveWindow },
+		refresh = { candidate -> runCatching { candidate.refresh() }.getOrDefault(false) },
+		recycle = AccessibilityNodeInfo::recycle,
+	)
+
+	/** A look at the watch player only, for a playing watch listen nothing else is observing. */
+	private fun requestWatchAdObservation() {
+		if (destroyed || !captureInFlight.compareAndSet(false, true)) return
+		captureHandler.post {
+			try {
+				observeWatchAd()
+			} finally {
+				captureInFlight.set(false)
+			}
+		}
+	}
+
+	private fun observeWatchAd() {
+		if (!eligible()) return
+		val startedElapsed = SystemClock.elapsedRealtime()
+		if (RustedWaxUiVisibility.isResumed) {
+			NativeWatchAdObserver.observed(NativeWatchAdParser.unobserved("RustedWax is foreground"))
+			return
+		}
+		val root = acquireFreshRoot() ?: run {
+			NativeWatchAdObserver.observed(
+				NativeWatchAdParser.unobserved("no fresh active native YouTube accessibility root"),
+			)
+			return
+		}
+		val capture = try {
+			captureWatchAd(root)
+		} finally {
+			root.recycle()
+		}
+		publishWatchAd(capture, startedElapsed)
+	}
+
+	private fun publishWatchAd(capture: NativeWatchAdCapture, captureStartedElapsed: Long) {
+		if (destroyed) return
+		NativeWatchAdObserver.observed(
+			if (SystemClock.elapsedRealtime() - captureStartedElapsed > MAX_CAPTURE_AGE_MS) {
+				// What the player showed that long ago may already describe the next
+				// presentation, and the reducer applies a look to what is installed now.
+				NativeWatchAdParser.unobserved("watch-player capture exceeded the freshness bound")
+			} else {
+				NativeWatchAdParser.parse(capture)
+			},
+		)
+	}
+
+	/**
+	 * The watch player's own ad controls, by exact view id.
+	 *
+	 * Ordered so the common cases cost least: a drawn label ends the look, and a
+	 * player that is not on screen needs nothing else asked of it. Only the node
+	 * itself is read — every control measured carries its label on that node.
+	 */
+	private fun captureWatchAd(root: AccessibilityNodeInfo): NativeWatchAdCapture {
+		val notYouTube = NativeWatchAdCapture(
+			packageName = null,
+			watchPlayerVisible = false,
+			otherPlayerSurfaceVisible = false,
+			adControlNodes = emptyList(),
+		)
+		if (!root.isVisibleToUser || root.packageName?.toString() != YouTubeProbe.YOUTUBE_PACKAGE) {
+			return notYouTube
+		}
+		fun visible(viewId: String): Boolean =
+			runCatching { root.findAccessibilityNodeInfosByViewId(ID_PREFIX + viewId) }
+				.getOrDefault(emptyList())
+				.let { matches ->
+					val any = matches.any { runCatching { it.isVisibleToUser }.getOrDefault(false) }
+					matches.forEach(AccessibilityNodeInfo::recycle)
+					any
+				}
+		val controls = mutableListOf<NativeShortNode>()
+		NativeWatchAdParser.AD_CONTROL_VIEW_IDS.forEach { viewId ->
+			val matches = runCatching { root.findAccessibilityNodeInfosByViewId(ID_PREFIX + viewId) }
+				.getOrDefault(emptyList())
+			try {
+				matches.take(MAX_MATCHES_PER_ID).forEach { match ->
+					controls += NativeShortNode(
+						packageName = match.packageName?.toString(),
+						resourceId = match.viewIdResourceName,
+						text = match.text?.toString(),
+						contentDescription = match.contentDescription?.toString(),
+						className = match.className?.toString(),
+						visible = match.isVisibleToUser,
+					)
+				}
+			} finally {
+				matches.forEach(AccessibilityNodeInfo::recycle)
+			}
+		}
+		val capture = NativeWatchAdCapture(
+			packageName = YouTubeProbe.YOUTUBE_PACKAGE,
+			watchPlayerVisible = false,
+			otherPlayerSurfaceVisible = false,
+			adControlNodes = controls,
+		)
+		if (NativeWatchAdParser.parse(capture).surface == PlayerAdSurface.VISIBLE) return capture
+		if (!visible(NativeWatchAdParser.WATCH_PLAYER_VIEW_ID)) return capture
+		return capture.copy(
+			watchPlayerVisible = true,
+			otherPlayerSurfaceVisible = NativeWatchAdParser.OTHER_PLAYER_SURFACE_VIEW_IDS.any(::visible),
+		)
 	}
 
 	private fun nativePlaylistSourceSession() = SourceSessionId(

@@ -228,6 +228,17 @@ data class SourceEvidenceCapabilities(
 	 * surface, so the two of them never see a suppression meant for the third.
 	 */
 	val presentsForegroundShorts: Boolean,
+
+	/**
+	 * This source's app draws its own advertisement controls over the player this
+	 * transport describes, and the separately granted native observer reads them.
+	 *
+	 * The label is what marks which interval of the transport's playback is an
+	 * advertisement, which its metadata cannot. False for a browser, whose ad
+	 * labels bind through its own id- and token-scoped route, and for YouTube
+	 * Music, whose player the observer cannot see at all.
+	 */
+	val presentsWatchPlayerAdSurface: Boolean = false,
 )
 
 /** What a host-lifecycle teardown does to a listen from this source. */

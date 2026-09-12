@@ -359,8 +359,25 @@ class SessionProbe(
 			is EvidenceCoordinator.Event.HostAdObserved -> handleHostAdObservation(event.observation)
 			is EvidenceCoordinator.Event.ScreenScanned -> handleScreenScan(event.scan)
 			is EvidenceCoordinator.Event.NativeShortObserved -> handleNativeShortEvent(event.event)
+			is EvidenceCoordinator.Event.NativeWatchAdObserved -> handleNativeWatchAd(event)
 		}
 		publish()
+	}
+
+	/**
+	 * The watch player's own ad state, to the listens it can describe.
+	 *
+	 * Which interval that state marks is the reducer's decision. The host's part is
+	 * only that the look was taken for this source and this switch generation.
+	 */
+	private fun handleNativeWatchAd(event: EvidenceCoordinator.Event.NativeWatchAdObserved) {
+		watches.values
+			.filter {
+				it.adapter.evidenceCapabilities.presentsWatchPlayerAdSurface &&
+					it.packageName == event.sourceSession.packageName &&
+					it.sourceEpoch == event.sourceSession.sourceEpoch
+			}
+			.forEach { it.notePlayerAdSurface(event.reading) }
 	}
 
 	private fun handleHostAdObservation(observation: MediaSessionAdEvidence.Observation) {
@@ -2171,6 +2188,16 @@ class SessionProbe(
 		/** The hint the probe is currently bound to, for the diagnostics card. */
 		private fun boundHint(md: MediaMetadata?): NotificationHints.Hint? =
 			adapter.hostNotificationHint(md?.asFields(), soleHostSession)
+
+		fun notePlayerAdSurface(reading: NativeWatchAdParser.Reading) {
+			dispatch(
+				PlaybackInput.PlayerAdSurfaceObserved(
+					surface = reading.surface,
+					signal = reading.signal,
+					elapsedRealtimeMs = SystemClock.elapsedRealtime(),
+				),
+			)
+		}
 
 		fun creditPipInference(nowMillis: Long, playing: Boolean) {
 			if (!acceptsLiveEvidence) return
