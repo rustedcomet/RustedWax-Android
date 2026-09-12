@@ -1,152 +1,112 @@
 # On-chain format
 
-The exact `custom_json` written to Hive, how artist and title are derived, and how `kind` is
-decided.
+RustedWax uses the shared Hive scrobbling schema. Matching field names and
+meaning matters for indexers; Android classification and metadata normalization
+need not be identical to the desktop extension.
 
 [← Back to the README](../../README.md)
 
----
+## Hive operation
 
-## On-chain format
+- Operation: `custom_json`.
+- ID: `hive_scrobble_ai`, shared with Hive Scrobbler.
+- Authority: `required_auths: []`, `required_posting_auths: [<username>]`.
+- `json`: the serialized scrobble payload below.
+- `app`: `rustedwax/<version>` identifies RustedWax independently of other clients.
 
-Identical to the extension — do not change these without changing the indexers:
+The shared [payload type](https://github.com/Holozing1/hivescrobble/blob/master/src/core/scrobbler/hive/hive.types.ts)
+provides interoperability context. Current RustedWax output is described here;
+not every optional field or feature of another client is implemented.
 
-- `custom_json` id: `hive_scrobble_ai` — **shared with Hive Scrobbler on purpose.**
-  The entries belong in the same feed and the same indexers should read both.
-- authority: `required_posting_auths: [<username>]`
-- `app`: `rustedwax/<version>`
-- Payload: [`HiveScrobblePayload`](https://github.com/Holozing1/hivescrobble/blob/master/src/core/scrobbler/hive/hive.types.ts)
+## Public payload fields
 
-The `app` value was `hivescrobblesai/1.0` up to v0.9.19 — byte-identical to Hive
-Scrobbler's, which made RustedWax entries indistinguishable from theirs on a
-ledger nobody can edit. That contradicted the README's unaffiliated positioning
-in the direction that matters: any RustedWax defect landed attributed to someone
-else's app, and they had no way to tell the two apart or to filter ours out.
-Only the authorship claim changed; the `custom_json` id deliberately did not.
+| Field | RustedWax meaning |
+| --- | --- |
+| `app` | `rustedwax/<version>` build attribution |
+| `kind` | `song`, `video`, `movie`, or `episode`, according to current classification |
+| `title` | Usable source or refined title; music parsing depends on source and kind |
+| `timestamp` | Logical listen start, formatted as ISO-8601 UTC with milliseconds |
+| `artist` | Best-effort artist credit for music; normally the uploader/channel for generic non-song entries |
+| `album` | Song release metadata when available; omitted for non-song kinds |
+| `duration` | Content duration as `m:ss`, with total minutes permitted above 59 |
+| `percent_played` | Integer percentage for this operation, capped at 100 |
+| `platform` | `youtube` for the currently supported sources |
+| `url` | `https://www.youtube.com/watch?v=<verified-video-id>`, including for Shorts |
 
-### Private scrobbles
+`app`, `kind`, `title`, and `timestamp` are required payload fields. Optional
+metadata is omitted when unavailable. The current YouTube write path also
+requires verified identity, canonical URL, and usable duration; the schema's
+optional fields do not bypass these eligibility checks. `now_playing` is never
+broadcast on-chain.
 
-> **Not currently offered in the app.** The four per-kind toggles were taken off
-> the settings menu in v0.11.1b because there is no present case for them. None
-> of the code below was removed — the stored settings, the cipher, the envelope
-> and the fail-closed behaviour are all unchanged, and every stored answer is
-> preserved — so this remains the format RustedWax writes the moment the toggles
-> are offered again.
+## Kinds, credits, and operation counts
 
-When a per-kind privacy toggle is on, the public payload is replaced by the
-extension's envelope, byte-compatible in both directions:
+YouTube Music supplies dedicated artist/title metadata, which RustedWax
+preserves where appropriate. MusicBrainz or canonical-page performer
+corroboration is not a universal write requirement. An uploader mismatch does
+not by itself veto a verified music-video row; exact ID, work, duration, and
+presentation checks still apply. Metadata can be wrong even when identity is
+correct.
+
+For generic sources, `Artist - Track` and related title parsing applies to
+`song` formatting. Description credits and optional MusicBrainz matches can
+refine that pair. If no meaningful split is established, an otherwise eligible
+listen can fall back to `video`. Generic non-song entries retain the whole
+cleaned title and channel credit. Native YouTube Music can retain its own
+artist/title fields even for a non-song result.
+
+Title cleaning can remove trailing hashtags and presentation markers; it is
+not guaranteed to match desktop normalization byte for byte. Song albums may
+come from native session metadata or structured Art Track metadata, rather
+than guesses from arbitrary descriptions.
+
+Music classification considers source context, structured music metadata,
+format evidence, category, optional MusicBrainz evidence, and conservative
+title/channel rules. Native YouTube Music is strong music context, but explicit
+podcast or non-music evidence can still produce `video`. A catalogue miss is
+not proof of non-music, and weak title formatting alone is insufficient for
+Shorts or long-form content. Without music evidence, the default is `video`.
+
+The current builder also recognizes structural movie and episode evidence.
+These kinds do not add `imdb_id`, `wikipedia_url`, `series_*`, or `poster_url`.
+There is no dedicated `podcast` classification path, although the schema and
+private-category mapping retain that kind for compatibility.
+
+All current kinds use the configured progress threshold (60% by default);
+there is no separate 80% movie/episode threshold. Non-song kinds and continuous
+Shorts viewings are capped at one operation. Songs can yield a second operation
+at one full duration plus the configured threshold (160% at the default), only
+with corroborated position and no loop evidence. Each operation's percentage
+is the remaining listened fraction, rounded and capped at 100. Duration floors,
+Shorts public-page proof, and deduplication remain mandatory; see
+[Eligibility](BEHAVIOR_CONTRACT.md#eligibility).
+
+## Private envelope compatibility
+
+**Private mode is not currently exposed in the app's settings.** Per-category
+preferences remain stored, default off, and are still honored by finalization.
+The envelope and cipher remain implemented for compatibility; this is not a
+currently offered setup feature.
+
+When a stored privacy preference applies, the public payload becomes:
 
 ```json
-{ "app": "…", "kind": "…", "timestamp": "…", "private": "<base64 blob>", "v": 1 }
+{ "app": "rustedwax/<version>", "kind": "song", "timestamp": "<UTC timestamp>", "private": "<base64 blob>", "v": 1 }
 ```
 
-`app`, `kind` and `timestamp` stay in the clear so an indexer can still count a
-listen and place it in time. Everything that says *what* was played — title,
-artist, album, url, duration, percent — is inside the blob: AES-256-GCM,
-`base64(IV‖ciphertext+tag)`, with a fresh 12-byte IV per call so a public block
-cannot reveal a replay of the same track without decrypting it. The key is
-SHA-256 of the posting key's deterministic signature over the fixed challenge
-`zingit:privacy-key:v1`, which is what lets the extension and RustedWax read
-each other's entries.
+`app`, `kind`, and `timestamp` remain public. The encrypted JSON contains title
+and any available artist, album, duration, percent, platform, and URL fields,
+using their public payload field names. Music, videos, movies/TV, and podcasts
+have separate stored categories; `movie` and `episode` share movies/TV, and an
+unknown kind uses the music category.
 
-If the key cannot be derived, the listen is **held back**, never broadcast in
-the clear.
+The v1 blob is AES-256-GCM: standard padded base64 of a fresh 12-byte IV followed
+by ciphertext and a 128-bit authentication tag. The 32-byte secret is SHA-256 of
+the raw deterministic compact signature bytes over the SHA-256 digest of the
+UTF-8 challenge `zingit:privacy-key:v1`, signed with the posting key. These
+formats and the challenge must remain compatible with clients reading v1
+entries; encrypted JSON key order is not a contract.
 
-Scrobble rules, from `hive-scrobbler.ts#finalize`, with one deliberate deviation:
-
-- **Song / video** — 1 tx at the configured threshold (60% by default). Mobile
-  has no dedicated podcast payload path.
-- **Songs only** — a 2nd tx at ≥160% (a genuine double-listen), capped at 2. Upstream doubles every
-  kind; RustedWax caps non-song kinds and every `/shorts/` viewing at one tx. The path cap matters
-  even when a music Short is correctly classified as `song`, because the browser still auto-loops it.
-- **Movie / episode** — 1 tx at ≥80%. *Not implemented on mobile* (see Limitations).
-- **Minimum length: 30 s**, or **10 s for a verified short**. Not upstream — added because YouTube
-  pre-roll ads publish their own media session carrying the *video's* title and a ~6-second
-  duration, which would otherwise scrobble the song on every ad. Pre-roll is a watch-page
-  phenomenon. Regression evidence showed the ordinary floor excluded legitimate Shorts without
-  affecting watch-path content, so verified Shorts get their own floor. See "Shorts" in
-  [SCROBBLE_RULES.md](SCROBBLE_RULES.md).
-- **A continuous looping video still produces at most one scrobble.** An observed playback-position
-  reset from the final 20% of an item to its first 20% is logged as a detected loop and caps that
-  continuous viewing to one transaction even when its payload kind is `song`. Progress above 125%
-  on a verified short remains a fallback probable-loop diagnostic. Neither signal erases the
-  qualifying first viewing. A separate later session earns its own new
-  scrobble; the inherited ≥160% branch only applies when no loop/reset evidence
-  was observed.
-- **Progress is measured in content, not clock time.** Played time is scaled by the playback rate,
-  because it's compared against `duration`. Watching a 76-second trailer to the end at 1.25× is
-  100%, not the 67% of wall-clock that elapsed — and at 2× a fully-watched video used to read 50%
-  and never scrobble at all.
-- `now_playing` is never broadcast on-chain.
-
-### Artist and title
-
-`Artist - Track` splitting is a **music** operation — it asserts the text left of the dash names a
-performer. So it only runs for `kind: song`. For a `kind: video` entry the **channel is the artist**
-and the **whole title is the title**, unsplit.
-
-That distinction is not cosmetic. Before v0.8.0 a film trailer went on-chain as
-`artist: "Fall 2: Deadpoint (2026) Official Trailer 2"` with `title: "Harriet Slater, Arsema
-Thomas"` — a film name in the artist field and a cast list in the title.
-
-A trailing run of hashtags is stripped from either kind (`Rüyamda seni gördüm #dizi #blutv` →
-`Rüyamda seni gördüm`). Interior hashtags are kept, because `Song #2 of the series` is doing work.
-Beyond tidiness: the tag run used to be part of the title, so the same clip reposted with different
-tags counted as a different listen and landed twice.
-
-Other shapes the parser understands, several adapted from the desktop extension: `Artist "Track"`,
-`Track (by Artist)`, a leading `[genre]` tag as noise, and album/vinyl track numbers (`03.`, `A1.`).
-A leading **CJK** bracket is the opposite — `【Bring Me The Horizon】…` names the *artist*, so the
-parser preserves it as identity rather than discarding it as a genre tag.
-
-`album` is populated for Art Tracks, read from the fixed shape of an auto-generated description
-(`Provided to YouTube by …` / `Song · Artist` / `Album`). Never guessed from a hand-written
-description, and never set on a video.
-
-### How `kind` is decided
-
-Evidence, strongest first — a stronger layer always beats a weaker one:
-
-0. **Auto-generated provenance** → song, above every title rule: music.youtube.com, a `- Topic`
-   channel, or a description beginning *"Provided to YouTube by …"*. These are distributor feeds —
-   the title is catalogue metadata, not a human description — so title heuristics don't apply.
-   It's why a game soundtrack's track called `Tutorial` or `Trailer 2` stays music.
-0b. **A title that is only hashtags** → video, whatever the category says. `#guitar #dubstep #fnaf`
-   names no work, and a song entry that names no track is permanent playlist debt. Below real
-   provenance because a distributor feed's title is catalogue metadata and never looks like this.
-1. **Format evidence** → video, beating even the category (uploaders do categorize tutorials and
-   music-news bulletins as *Music*): podcast / how-to / gameplay / review titles, `Official
-   Trailer`, music-news headlines (`… Releases New Single …`), TV episode numbering
-   (`Season 6 Ep 19`, `S06E19`, `11x24` — but not music's `EP 2`, nor `1920x1080`/`16x9`),
-   clip channels (`… Movies`, `… Cinema`),
-   game playthroughs without an instrument.
-2. **The YouTube Music catalogue** (needs YouTube scrobbling on) → song. Keyed by video id, so it
-   answers where a string-matched lookup cannot. Positive-only: indie, live and
-   personal-channel uploads may not be in the
-   catalogue, so absence is never evidence *against* music.
-   `MUSIC_VIDEO_TYPE_PODCAST_EPISODE` is explicitly excluded: being present in YouTube Music does
-   not turn a podcast—or a timer mislabelled as one—into a song.
-3. **YouTube's `Music` category** (needs YouTube scrobbling on) → song.
-4. **A MusicBrainz match** on artist + recording → song.
-5. **Commentary words that are also song titles** (`reaction`, `tutorial`, `interview`, `episode`,
-   `Trailer 2`) → video — below provenance and MusicBrainz on purpose, so "Chain Reaction" and a
-   soundtrack's "Tutorial" are rescued while the video formats are caught.
-6. **Cover / playthrough vocabulary** → song, when instrument-qualified. Below the words above,
-   because "Bass Cover Tutorial" is a tutorial about a cover, not a cover.
-7. **A decisive non-music category** → video: Film & Animation, Gaming, News, Sports, Education…
-   then **music vocabulary** → song: VEVO/label channels, lyrics / instrumental / remix /
-   live-performance / official-audio wording.
-8. **Weak evidence** — an `Artist - Track`-shaped title — is accepted only for ordinary videos of
-   unknown category, never for shorts, sub-90-second clips, `#shorts`-tagged titles, three-part
-   clip captions (`Blade II | Sewers of the Damned | ClipZone…`), **never above 8 minutes** without
-   a positive music signal, and never when a known category said not-music. The long-form gate
-   matters as much as the short one: a 45-minute podcast titled `Host - Guest Name` is not a song.
-9. **No evidence at all** → **video**. (Revised from the original song-default: two days of field
-   data showed every default-song hit was a news clip, movie scene or vlog. Real music virtually
-   always carries a signal above — and MusicBrainz is the safety net for untagged uploads.)
-
-The Now tab shows the final category without exposing the classifier's working
-evidence. When event logging is enabled, the bounded event log records the
-classification and identity evidence for diagnosis. Neither surface decides
-eligibility or constructs a payload: those remain owned by the one finalization
-boundary, because on-chain is forever.
+If derivation or encryption fails, nothing is sent. Plaintext is never a
+fallback. Retain the applicable posting key to decrypt its earlier entries;
+a different posting key derives a different secret.

@@ -19,8 +19,9 @@ the [project README](../../README.md#build-from-source).
 ## First-time setup
 
 1. Grant **Notification Access** when RustedWax asks. Android requires this
-   special access before an app can read active media sessions. RustedWax uses
-   it for YouTube, YouTube Music, Brave, and Chrome playback.
+   special access for RustedWax to read active media sessions. The Android
+   permission can expose notification content; RustedWax limits its use to
+   the media/session evidence described in [How it works](HOW_IT_WORKS.md#sources-and-notification-access).
 2. Open **Settings → Hive account → Connect**. Enter your Hive username and a
    **posting key** (a WIF beginning with `5…`), then tap **Validate & save**.
    RustedWax derives the public key locally and checks it against the account's
@@ -34,7 +35,9 @@ the [project README](../../README.md#build-from-source).
 5. Play something. **Now** shows the active platform, title, channel or artist,
    duration, progress, category, and a short status. **History** shows the
    newest 50 results for the current app process, including transaction IDs.
-   **Not logged** explains eligible identified tracks that RustedWax declined.
+   **Not logged** explains refusals for eligible user-facing targets, including
+   unidentified items without a link. Neither list guarantees a record of every
+   playback.
 
 The always-visible **Stop** button is stronger than Automatic scrobbling: Stop
 ends observation and discards the in-flight track. Turning Automatic scrobbling
@@ -85,7 +88,10 @@ finalization of real playback.
 | Event log | **Off** |
 | Disable Shorts | **On** |
 
-An update preserves stored choices.
+An update preserves stored choices. Private mode is not exposed in current
+settings; compatible stored privacy preferences remain honored. Fresh installs
+publish public scrobbles when automatic scrobbling is authorized. See
+[Private envelope compatibility](ON_CHAIN_FORMAT.md#private-envelope-compatibility).
 
 ## Protect your Hive account
 

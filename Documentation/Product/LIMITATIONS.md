@@ -26,8 +26,22 @@ RustedWax uses bounded inference only after a foreground Short has been latched
 and continuing YouTube audio/window evidence agrees. Missing or contradictory
 evidence stops inference.
 
+In split-screen, RustedWax can sometimes fail to detect the next Short while
+YouTube remains in split-screen.
+
 Shorts scrobbling is disabled by default. It also depends on optional Android
 access that can be revoked or disrupted by the operating system.
+
+## YouTube Music presentation and metadata
+
+Switching between Music and Video presentations can affect playback-progress
+continuity. This remains a known issue in v0.11.2; a verified item does not by
+itself prove that progress belongs to the current presentation.
+
+Artist/title metadata is best-effort and can be incorrect. Independent performer
+corroboration is not required for every song, but exact video identity and the
+required work, duration, and presentation evidence remain mandatory. See the
+[behavior contract](BEHAVIOR_CONTRACT.md#identity-and-metadata).
 
 ## Android background reliability
 
@@ -41,7 +55,7 @@ does not guarantee uninterrupted delivery or identification of every listen.
 Native apps may reuse one media session across content, ads, and interstitial
 screens. In the YouTube app, time under the watch player's own ad label is not
 measured, but only while the native accessibility service can see the player
-(see [Detection](DETECTION.md#native-watch-player-ads)). Otherwise RustedWax
+(see [How it works](HOW_IT_WORKS.md#native-watch-player-ads)). Otherwise RustedWax
 quarantines material duration replacements and excludes interstitial intervals.
 An unresolved duration conflict can cause a legitimate listen to be skipped.
 YouTube Music exposes no ad label that RustedWax can read.
@@ -62,9 +76,8 @@ than risk a newly signed duplicate.
 
 ## Local security
 
-The current sign-in WebView and local storage configuration have defense-in-
-depth work remaining. Review [the security policy](../../SECURITY.md) before
-using a high-value account or a device with an elevated threat model.
+See [the security policy](../../SECURITY.md) for the security model, known
+security limitations, account precautions, and vulnerability reporting.
 
 ## Not provided
 

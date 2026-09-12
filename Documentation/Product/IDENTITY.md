@@ -37,6 +37,13 @@ Native media sessions often omit the video ID. RustedWax may use:
 Each route has negative controls. A title similarity, channel name, duration,
 or ranking position alone is insufficient.
 
+When a browser omits duration, a recovery route may use an exact title plus
+canonical channel only if one item survives and the canonical page supplies
+the required duration. Playlist-sequence recovery requires two preceding
+verified IDs adjacent and in order, and one uniquely matching immediate
+successor across the candidate playlists. These bounded routes cannot choose
+between multiple plausible uploads.
+
 ## Corroboration
 
 A candidate may be compared using normalized title, owner/channel, duration,
@@ -56,8 +63,10 @@ typed source transition. RustedWax does not infer an ad from title, brand,
 duration, package, popularity, or unfamiliar metadata.
 
 Interstitial duration and position changes do not replace the organic
-identity. Organic progress is preserved separately while interstitial time is
-excluded.
+identity. Attributed organic progress is retained only where continuity evidence
+permits it; unrelated provisional progress is not rescued by a later identity
+match. Native watch-player ad labels exclude the ad presentation rather than
+vetoing the organic video that follows.
 
 ## Metadata refinement
 
@@ -66,8 +75,15 @@ duration, thumbnail, or content kind. Refinement cannot change the confirmed
 video ID or turn ambiguity into confirmation.
 
 Unsupported YouTube pages and metadata interfaces can change without notice.
-Markup failure produces a visible refusal or degraded optional metadata, never
-a fabricated ID.
+Markup failure can prevent a write or degrade optional metadata; it never
+permits a fabricated ID. Refusals are shown for eligible user-facing targets.
+
+Artist/performer quality is distinct from verified video/work identity.
+YouTube Music's source-published credits may remain best-effort; MusicBrainz
+and canonical-performer corroboration are not universal write prerequisites.
+Uploader differences alone do not veto a verified music-video row. Exact ID,
+work, duration, and presentation checks still apply, as defined by the
+[behavior contract](BEHAVIOR_CONTRACT.md#identity-and-metadata).
 
 ## Canonical link
 
@@ -75,5 +91,6 @@ The public payload and UI history use the confirmed item ID to build the
 canonical link. A row without a verified link is not presented as a successful
 video scrobble.
 
-See [Detection](DETECTION.md) for source evidence and
-[Scrobbling rules](SCROBBLE_RULES.md) for the next decision stage.
+See [How it works](HOW_IT_WORKS.md#sources-and-notification-access) for source
+evidence and [Eligibility](BEHAVIOR_CONTRACT.md#eligibility) for the next
+decision stage.

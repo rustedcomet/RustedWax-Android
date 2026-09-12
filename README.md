@@ -26,6 +26,10 @@ The current public release is **RustedWax v0.11.2**.
 
 Regular users should install the signed release APK, not a debug build.
 
+RustedWax supplies Android media observation and local signing for users who
+cannot use the desktop browser-extension flow on their phone. It uses the
+shared Hive scrobbling format with mobile-specific identity and playback rules.
+
 ## Features
 
 - Measures actual played time, including playback-speed changes.
@@ -52,7 +56,6 @@ Regular users should install the signed release APK, not a debug build.
 </p>
 
 The gallery shows owner-approved real usage, including public Hive activity.
-It contains no passwords or key material.
 
 ## Account safety
 
@@ -68,9 +71,8 @@ the device. Read the in-app disclosure before connecting it.
 
 - [Setup and permissions](Documentation/Product/SETUP.md)
 - [How RustedWax works](Documentation/Product/HOW_IT_WORKS.md)
-- [Detection sources](Documentation/Product/DETECTION.md)
 - [Identity and verification](Documentation/Product/IDENTITY.md)
-- [Scrobbling rules](Documentation/Product/SCROBBLE_RULES.md)
+- [Scrobbling rules](Documentation/Product/BEHAVIOR_CONTRACT.md#eligibility)
 - [On-chain format](Documentation/Product/ON_CHAIN_FORMAT.md)
 - [Known limitations](Documentation/Product/LIMITATIONS.md)
 - [Testing](Documentation/Testing/TESTING.md)

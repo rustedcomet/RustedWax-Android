@@ -9,9 +9,8 @@ the public tree.
 
 - [Setup](Product/SETUP.md)
 - [How it works](Product/HOW_IT_WORKS.md)
-- [Detection sources](Product/DETECTION.md)
 - [Identity and verification](Product/IDENTITY.md)
-- [Scrobbling rules](Product/SCROBBLE_RULES.md)
+- [Scrobbling rules](Product/BEHAVIOR_CONTRACT.md#eligibility)
 - [On-chain format](Product/ON_CHAIN_FORMAT.md)
 - [Known limitations](Product/LIMITATIONS.md)
 - [Release verification](Product/RELEASE_VERIFICATION.md)

@@ -1,107 +1,138 @@
 # How it works
 
-The detection pipeline, end to end.
+RustedWax is a best-effort Android scrobbler. It observes supported playback,
+measures played content, verifies the exact YouTube item, and signs eligible
+Hive operations on the device with the user's posting key.
 
 [← Back to the README](../../README.md)
 
----
+## Sources and Notification Access
 
-## How it works
+| Source | Base observation | Supporting evidence when available |
+| --- | --- | --- |
+| YouTube | Android media session | Native accessibility, playlist structure, watch history, public metadata |
+| YouTube Music | Android media session | Watch history and structured music metadata |
+| Brave or Chrome | Browser media session and media notification origin | Optional accessibility address bar and visible YouTube ad labels |
 
-1. You grant the app **Notification Access**. It's required twice over: Android gates
-   `MediaSessionManager.getActiveSessions()` behind it, and the browser's media notification is the
-   default source for the page's origin (`youtube.com`) when optional Browser evidence access is off.
-2. The notification listener — which the system keeps alive for as long as the grant is held — hosts
-   the session watcher. On Start, reconnect or process rebuild it first replays currently active
-   browser media notifications, then discovers sessions; an unchanged background notification does
-   not have to be posted a second time. No foreground service, no persistent notification.
-3. When an accepted browser or native YouTube package plays media, the OS
-   media session exposes title, artist, album, duration and playback position. The app accumulates
-   content played against the configured threshold (60% by default).
-4. When a track ends, the app first requires one verified YouTube video id—either the matching exact
-   id frozen while it played or one bounded lookup that uniquely corroborates the available
-   finalized fields. When Chromium omitted duration, one exact title plus the canonical page's exact
-   channel may qualify only if exactly one id survives. For playlist autoplay with neither a current
-   URL nor a history row, two immediately preceding verified ids can qualify public playlists only
-   where they appear adjacently and in playback order; exactly one id among the immediate next rows
-   must match the finalized fields. Multiple lists may corroborate the same next id, but two next ids
-   refuse. Browser visibility and accessibility coverage do not alter that identity
-   gate; a literal track-bound ad signal remains an independent veto. The app then builds the same
-   `custom_json` payload with its canonical watch link, signs it with your posting key on-device,
-   and broadcasts it. If **private scrobbles** are on for that kind, everything except `app`, `kind`
-   and `timestamp` is encrypted into the payload's `private` blob first — and if the key cannot be
-   derived, the listen is held back rather than broadcast in the clear. Before calling it a scrobble, it normally confirms that a
-   healthy independent node has included it in a block. A transaction seen relaying in an
-   independent healthy node's mempool is reported separately and is not retried, to avoid creating
-   a permanent duplicate. Acceptance with no available confirmation is also reported separately; see
-   [Scrobble rules](SCROBBLE_RULES.md#retry).
-   Definite failures and offline sends are queued. A queued send is retried when its
-   backoff has elapsed and usable connectivity returns, so a listen finished offline
-   does not sit waiting for you to open the app. That retry is an *observation* of the
-   network, not a background scheduler: it happens while RustedWax is running, or once
-   Android lets a suspended RustedWax run again, and a backoff deadline that passes
-   while the connection never changes waits for the next connectivity or startup event
-   rather than being woken on its own timer. Before an automatic attempt reaches a node,
-   its exact signed transaction and expiration are persisted. A later retry either
-   rebroadcasts those same bytes and transaction id or first obtains independent
-   `expired_irreversible` status for the saved expiration. Bare `unknown`, old,
-   reversible-expiration, malformed, or unavailable status remains fail-closed.
-   A storage failure while settling or clearing the operation therefore cannot
-   produce a newly signed duplicate.
-5. When it *doesn't* broadcast, the reason lands in the **Not logged** tab. A scrobbler that
-   silently declines things is indistinguishable from a broken one. That includes a listen whose
-   exact video was never identified — offline, the identification routes that need the network are
-   unavailable, though a browser listen whose exact address RustedWax already read stays
-   identified — which is listed with its reason but without a link, because nothing is guessed to
-   make one. One exception, added in
-   v0.10.0: a session never proven to be YouTube is not listed there either. "Why wasn't this
-   scrobbled" does not need answering about a site the app never scrobbles, and listing its title
-   would rebuild the browsing record the event log stopped keeping.
+Android **Notification Access is a broad platform permission that can expose
+notification content**. RustedWax uses it to read active media-session metadata
+and playback state, plus supported browser media-notification fields needed
+for source and ad evidence. Its posted-notification handler filters to supported
+browser packages and media-session notifications; this is app-level
+minimization, not a restriction on what Android grants.
 
-**Stop** cuts all of that off. It tears down the session watcher, stops reading notification and
-address-bar callbacks, and clears notification, URL, playlist, and carried-progress evidence —
-nothing is observed while it's stopped, and the track playing when you press it is discarded rather
-than scrobbled on the way out. Scrobbles already earned remain in the
-offline queue and are eligible to send the next time the queue is flushed. Automatic scrobbling is
-a separate, inner switch: turning *it* off leaves the app watching, which is how you check what a
-title would have parsed to without writing anything to the chain. It is also a temporal write
-boundary, not a finalization-time preference. Every logical listen is stamped with the exact
-continuous ON/OFF generation in which it began. A listen first seen while Automatic Scrobbling was
-off can never become writable because the switch is enabled later. After eligibility and the dedup
-claim, the target must atomically commit its complete ordered payload batch against that same
-generation before transport owns it. If OFF wins that ordering, the claim is released and no key,
-signature, queue entry or broadcast is attempted. If commitment wins, the batch is already-authorized
-transport work and a later OFF does not cancel half of it. The shared commit section contains no
-payload serialization, posting-key, network or signing work, so the UI never waits for Hive.
-MediaSession recreation, long continuation, and foreground-Short resume keep the original stamp.
-Already-serialized retry-queue
-work remains owed transport work and does not re-enter this decision.
+The notification listener hosts observation and rechecks active sessions and
+browser media notifications when it starts or reconnects. RustedWax does not
+use a foreground service or persistent monitoring notification. Notification
+Access does not guarantee that Android keeps the process alive or delivers
+every callback. See [Known limitations](LIMITATIONS.md).
 
-```
-Brave (playing) ──▶ Android MediaSession ─────┐
-       media notification (origin) ───────────┼──▶ RustedWaxListenerService
-       browser evidence (optional: url, id, ad UI) ┘   │  SessionProbe
-                                                       │  track ends (last active evidence frozen)
-                                          prefilter — reject what no lookup could rescue,
-                                          so a shorts feed doesn't fetch per finalize
-                                                       │
-                                     verified-id recovery when needed, then
-                                     enrichment (optional): YouTube Music catalogue,
-                                     watch-page category + length + description
-                                     credits, MusicBrainz
-                                                       │
-                                     ScrobbleRules (configured %, +160% songs only, length floor)
-                                                       │
-                                     MusicClassifier → kind: song / video
-                                                       │
-                                          DedupLedger + MutedVideos
-                                                       │
-                                       HiveScrobblePayload  ◀── same schema as extension
-                                                       │
-                                       local secp256k1 signing (posting key)
-                                                       │
-                                  broadcast to a node proven current,
-                                  then confirm the tx reached a block
-                                                       │  not confirmed / rate-limited
-                                                BroadcastQueue ──▶ retry w/ backoff
-```
+Unsupported packages cannot become supported sources by publishing similar
+metadata. Optional access and fresh-install defaults are in [Setup](SETUP.md).
+
+## Measuring a listen
+
+RustedWax accumulates content played from observed position changes and
+playback rate, then compares it with the verified content duration. Pauses,
+seeks, interstitials, and uncorroborated gaps do not earn time. Playback before
+RustedWax begins observing is not credited simply because the player reports
+an advanced position.
+
+Compatible session recreation or a brief source transition may continue one
+logical listen. Observations remain bound to their source session and lifecycle
+generation; stale callbacks cannot authorize a successor. Required identity,
+duration, and presentation evidence must remain compatible before progress can
+be carried. YouTube Music Music/Video switching can still interrupt continuity.
+
+For native Shorts, optional YouTube-only accessibility reads the foreground
+surface and progress when available. Picture-in-picture inference requires a
+previously latched Short and continuing YouTube window/audio evidence. Inferred
+time is bounded, stops when evidence is missing or contradictory, and cannot
+be transferred to another track. Shorts scrobbling is off by default.
+
+## Native watch-player ads
+
+YouTube can publish a pre-roll using the upcoming video's metadata. The native
+accessibility service checks the watch player for supported ad controls paired
+with exact visible ad labels. Labelled intervals earn no playback time; a
+presentation observed as an ad from its start earns none of that presentation's
+time. This excludes the ad interval without vetoing the organic video that
+follows in the same listen.
+
+An absent ad label is evidence only when the full-size player is observable.
+The current organic-presentation check requires three seconds of observed
+unlabelled playback. An unreadable player is not proof that an ad ended; a
+supported ad control on a minimized player still counts as positive evidence.
+YouTube Music has no equivalent ad label that RustedWax can read. Duration and
+presentation checks still apply; see [Known limitations](LIMITATIONS.md#ads-and-duration-churn).
+
+## Verifying identity
+
+A write requires one verified YouTube video ID and its canonical public link.
+A browser URL must parse as HTTPS on an exact supported YouTube host and route,
+with a valid item ID that agrees with other exact evidence. The optional browser
+accessibility service is scoped to Brave and Chrome. Foreign origins,
+contradictory IDs, and unresolved tab ambiguity cause refusal.
+
+Native sessions often omit the ID. Recovery may use a uniquely matching
+playlist entry, signed-in history row, public lookup corroborated by watch-page
+facts, or structured YouTube Music metadata. Title similarity, uploader name,
+length, or search rank alone is insufficient. Missing, ambiguous, or
+contradictory identity produces no write. [Identity and verification](IDENTITY.md)
+defines those boundaries.
+
+The optional watch-history connection stores its session encrypted on the
+device and sends session cookies only to the configured YouTube history route
+over HTTPS. A route fault means history is not currently trustworthy; a
+candidate miss means readable history did not identify this listen. Neither
+permits a guessed ID.
+
+## Metadata and classification
+
+Verified video/work identity and artist quality are separate concerns.
+YouTube Music's source-published artist and title are preserved as best-effort
+metadata where appropriate, even if a canonical page names a different uploader.
+MusicBrainz may enrich generic music metadata; it is not a required independent
+performer check for every YouTube Music song. Incorrect artist metadata remains
+possible.
+
+Generic metadata that cannot establish a meaningful artist/title split can
+produce a `video` entry instead of a `song`, preserving an otherwise eligible
+verified listen. Classification and metadata cannot replace an unverified ID.
+See the [behavior contract](BEHAVIOR_CONTRACT.md#identity-and-metadata) and
+[on-chain format](ON_CHAIN_FORMAT.md) for the rules and field meanings.
+
+## Finalization and delivery
+
+When a listen ends or reaches a supported finalization boundary, the app checks
+identity, duration, measured progress, classification, mute state, and
+deduplication. Eligible authorized operations are serialized and signed locally.
+The shared payload format uses the `hive_scrobble_ai` custom JSON identifier,
+with `rustedwax/<version>` identifying this app.
+
+Automatic transport persists the exact signed transaction before sending and
+seeks independent block or mempool evidence. Acceptance without confirmation
+is reported separately. Retry uses saved transport work, with bounded backoff
+and fail-closed reconciliation; it does not guess whether a possibly accepted
+transaction failed. Connectivity or app lifecycle events can resume due work
+while Android lets the process run. Retry deadlines are not independent
+background wakeups. See [Transport](BEHAVIOR_CONTRACT.md#transport).
+
+**History** shows successful or accepted operations. **Not logged** explains
+refusals for eligible user-facing targets, including unidentified items without
+a guessed link. Unsupported or unproven-source sessions are omitted. These
+bounded UI lists are not a complete record of everything played or every
+callback Android might have missed.
+
+Private mode is not exposed in current settings. Stored privacy preferences
+and the compatible encrypted envelope remain implemented; see
+[Private envelope compatibility](ON_CHAIN_FORMAT.md#private-envelope-compatibility).
+
+## Stop and Automatic scrobbling
+
+**Stop** ends observation, clears live evidence, and discards the current track.
+**Automatic scrobbling** separately controls authorization: a listen first
+observed while it was off cannot become writable by turning it on later.
+Turning it off before transport commitment prevents that listen's automatic
+write. Already committed batches and queued transport work remain authorized;
+neither switch cancels work already handed to transport.
