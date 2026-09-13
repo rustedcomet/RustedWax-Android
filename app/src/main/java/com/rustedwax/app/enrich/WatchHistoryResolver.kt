@@ -9,6 +9,8 @@ import com.rustedwax.app.detect.EventLog
 import com.rustedwax.app.storage.YouTubeSessionVault
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.Reader
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -253,14 +255,14 @@ class WatchHistoryResolver private constructor(
 				"youtube.com redirected the request to a sign-in page",
 			)
 		}
-		val blob = WatchPageParser.extractJson(page.body, INITIAL_DATA)
+		val blob = historyJson(page.body)
 			?: return Probe.Faulted(
 				WatchHistoryParser.Reason.MARKUP_CHANGED,
-				"the history page did not contain $INITIAL_DATA",
+				"the history page carried no $INITIAL_DATA and the browse route did not answer",
 			)
 		val label = accountLabel(page.body)
 		if (commitVaultMutations) vault.rememberAccountLabel(label)
-		return when (val parsed = WatchHistoryParser.parse(blob)) {
+		return when (val parsed = withContext(Dispatchers.Default) { parseFeed(blob) }) {
 			is WatchHistoryParser.Result.Feed -> {
 				cached = CachedFeed(parsed.entries, parsed.shorts, System.currentTimeMillis())
 				Probe.Working(
@@ -272,8 +274,11 @@ class WatchHistoryResolver private constructor(
 			}
 
 			is WatchHistoryParser.Result.Unreadable -> {
-				if (parsed.reason == WatchHistoryParser.Reason.EMPTY) {
-					EventLog.append("history", shapeReport(page.body))
+				if (parsed.reason == WatchHistoryParser.Reason.EMPTY ||
+					parsed.reason == WatchHistoryParser.Reason.MARKUP_CHANGED
+				) {
+					val report = withContext(Dispatchers.Default) { shapeReport(page.body) }
+					EventLog.append("history", report)
 				}
 				Probe.Faulted(parsed.reason, parsed.detail)
 			}
@@ -410,22 +415,23 @@ class WatchHistoryResolver private constructor(
 			return Feed.Unavailable("watch history is not being used: ${health.refusedBecause}")
 		}
 
-		val blob = WatchPageParser.extractJson(page.body, INITIAL_DATA) ?: run {
+		val blob = historyJson(page.body) ?: run {
 			health.recordUnavailable(
 				WatchHistoryParser.Reason.MARKUP_CHANGED,
-				"$INITIAL_DATA not found in ${page.body.length} bytes",
+				"$INITIAL_DATA not found in ${page.body.length} bytes and the " +
+					"browse route did not answer",
 				nowMillis,
 				accountEvidence = accountEvidence,
 			)
 			EventLog.append(
 				"history",
-				"EXTRACTION FAILED — $INITIAL_DATA not found in the watch-history page " +
-					"(${page.body.length} bytes). YouTube markup may have changed.",
+				"EXTRACTION FAILED — neither an embedded $INITIAL_DATA assignment " +
+					"(${page.body.length} bytes) nor the browse route produced a feed.",
 			)
 			return Feed.Unavailable("watch history is not being used: ${health.refusedBecause}")
 		}
 
-		return when (val parsed = WatchHistoryParser.parse(blob)) {
+		return when (val parsed = withContext(Dispatchers.Default) { parseFeed(blob) }) {
 			is WatchHistoryParser.Result.Feed -> {
 				// A response that fetched and parsed is the route working, whoever
 				// asked for it. That is exactly what ends a declared route fault —
@@ -456,6 +462,126 @@ class WatchHistoryResolver private constructor(
 					EventLog.append("history", shapeReport(page.body))
 				}
 				Feed.Unavailable(reason)
+			}
+		}
+	}
+
+	/** Pure seam so the large parse can be moved off the caller's thread. */
+	private fun parseFeed(json: String) = WatchHistoryParser.parse(json)
+
+	/**
+	 * The feed JSON, however this page is built.
+	 *
+	 * A server-rendered page carries the whole feed in an `ytInitialData`
+	 * assignment and is read exactly as it always was. A client-rendered one
+	 * carries no assignment at all — the entries arrive over the same InnerTube
+	 * call the page's own script makes — so the call is made here rather than
+	 * guessing at markup that is not there. Absence of the assignment is the
+	 * only thing that reaches the second route; nothing else changes.
+	 */
+	private suspend fun historyJson(html: String): String? =
+		selectHistoryJson(html, ::browseHistory)
+
+	/**
+	 * `POST /youtubei/v1/browse` for `FEhistory`, as the web client makes it.
+	 *
+	 * The key, client name and client version are read from the page that was
+	 * just fetched rather than compiled in, so a client-version roll cannot
+	 * silently strand this route. Cookies alone are answered `loggedOut`, so the
+	 * request also carries the `SAPISIDHASH` authorization the web client
+	 * computes; the verdict is still the parser's, never the status code.
+	 */
+	private suspend fun browseHistory(html: String): String? {
+		val cookie = vault.secretCookieHeader() ?: return null
+		val config = innertubeConfig(html) ?: run {
+			EventLog.append(
+				"history",
+				"the history page carried no InnerTube configuration; not attempting browse",
+			)
+			return null
+		}
+		val authorization = sapisidAuthorization(
+			cookie,
+			System.currentTimeMillis() / 1000,
+		)?.second ?: run {
+			EventLog.append(
+				"history",
+				"the session carried no APISID cookie; not attempting browse",
+			)
+			return null
+		}
+		val url = URL(BROWSE_URL + "?key=" + config.apiKey)
+		// The authorization and cookie may only reach the exact origin they bind.
+		if (!isExactOrigin(url)) {
+			EventLog.append("history", "refusing to attach the session to ${url.host}")
+			return null
+		}
+		val body = JSONObject()
+			.put(
+				"context",
+				JSONObject().put(
+					"client",
+					JSONObject()
+						.put("clientName", config.clientName)
+						.put("clientVersion", config.clientVersion)
+						.put("hl", "en")
+						.put("gl", "US"),
+				),
+			)
+			.put("browseId", HISTORY_BROWSE_ID)
+			.toString()
+
+		return withContext(Dispatchers.IO) {
+			runCatching {
+				val connection = url.openConnection() as HttpURLConnection
+				try {
+					connection.apply {
+						requestMethod = "POST"
+						connectTimeout = TIMEOUT_MS
+						readTimeout = BROWSE_READ_TIMEOUT_MS
+						instanceFollowRedirects = false
+						doOutput = true
+						setRequestProperty("Content-Type", "application/json")
+						setRequestProperty("Cookie", cookie)
+						setRequestProperty("User-Agent", VideoIdResolver.USER_AGENT)
+						setRequestProperty("Accept-Language", "en-US,en;q=0.9")
+						setRequestProperty("Origin", ORIGIN)
+						setRequestProperty("Referer", HISTORY_URL)
+						setRequestProperty("X-YouTube-Client-Name", WEB_CLIENT_ID)
+						setRequestProperty("X-YouTube-Client-Version", config.clientVersion)
+						setRequestProperty("Authorization", authorization)
+						setRequestProperty("X-Goog-AuthUser", "0")
+					}
+					connection.outputStream.use {
+						it.write(body.toByteArray(Charsets.UTF_8))
+					}
+					val code = connection.responseCode
+					if (commitVaultMutations) {
+						rotatedCookies(connection)?.let(vault::mergeRotatedCookies)
+					}
+					if (code != 200) {
+						EventLog.append("history", "browse route answered HTTP $code")
+						return@runCatching null
+					}
+					connection.inputStream.bufferedReader().use { reader ->
+						readBounded(reader)
+					}.also { response ->
+						if (response == null) {
+							EventLog.append(
+								"history",
+								"browse route response exceeded the safe size limit",
+							)
+						}
+					}
+				} finally {
+					connection.disconnect()
+				}
+			}.getOrElse {
+				EventLog.append(
+					"history",
+					"browse route failed: ${it.javaClass.simpleName}",
+				)
+				null
 			}
 		}
 	}
@@ -623,6 +749,31 @@ class WatchHistoryResolver private constructor(
 	}
 
 	internal companion object {
+		internal fun isExactOrigin(url: URL): Boolean =
+			url.protocol == "https" && url.host == "www.youtube.com" && url.port == -1
+
+		/** Legacy embedded data wins; only its absence may invoke the browse route. */
+		internal suspend fun selectHistoryJson(
+			html: String,
+			browse: suspend (String) -> String?,
+		): String? = WatchPageParser.extractJson(html, INITIAL_DATA) ?: browse(html)
+
+		/** Reads an external response without allowing unbounded memory growth. */
+		internal fun readBounded(
+			reader: Reader,
+			maxChars: Int = MAX_BROWSE_RESPONSE_CHARS,
+		): String? {
+			require(maxChars > 0)
+			val out = StringBuilder(minOf(8_192, maxChars))
+			val buffer = CharArray(minOf(8_192, maxChars))
+			while (true) {
+				val count = reader.read(buffer)
+				if (count < 0) return out.toString()
+				if (out.length > maxChars - count) return null
+				out.append(buffer, 0, count)
+			}
+		}
+
 		/** Pure title-selection seam for production-shaped history regressions. */
 		internal fun shortIdsMatchingTitle(
 			shorts: List<WatchHistoryParser.ShortEntry>,
@@ -643,6 +794,82 @@ class WatchHistoryResolver private constructor(
 			Regex(""""channelHandle":\{"simpleText":"(@[^"]{1,60})""""),
 			Regex(""""CHANNEL_HANDLE":"(@[^"]{1,60})""""),
 		)
+
+		/** What the page's own script sends; see [browseHistory]. */
+		internal data class InnertubeConfig(
+			val apiKey: String,
+			val clientName: String,
+			val clientVersion: String,
+		)
+
+		/**
+		 * The InnerTube handshake values the page publishes about itself.
+		 *
+		 * Read from the response rather than compiled in: the client version
+		 * rolls every week or so, and a stale constant would be refused with no
+		 * way to tell that from a real breakage. Absence is not an error here —
+		 * it means this page cannot support the browse route, and the caller
+		 * refuses rather than sending a half-formed request with a credential on
+		 * it.
+		 */
+		internal fun innertubeConfig(html: String): InnertubeConfig? {
+			fun field(name: String): String? =
+				Regex("\"" + name + "\":\"([^\"]{1,120})\"").find(html)
+					?.groupValues?.getOrNull(1)
+					?.takeIf { it.isNotBlank() }
+
+			val apiKey = field("INNERTUBE_API_KEY") ?: return null
+			val clientVersion = field("INNERTUBE_CONTEXT_CLIENT_VERSION")
+				?: field("INNERTUBE_CLIENT_VERSION")
+				?: return null
+			val clientName = field("INNERTUBE_CLIENT_NAME") ?: DEFAULT_CLIENT_NAME
+			return InnertubeConfig(apiKey, clientName, clientVersion)
+		}
+
+		/**
+		 * The `Authorization` value the web client computes for its own API.
+		 *
+		 * SHA-1 over "<seconds> <APISID cookie> <origin>", presented as
+		 * `SAPISIDHASH <seconds>_<hex>`. Returns the cookie *name* alongside it
+		 * so a caller can say which one was used without ever naming its value;
+		 * the value, the hash and the header are secrets and are never logged,
+		 * persisted or exported.
+		 */
+		internal fun sapisidAuthorization(
+			cookieHeader: String,
+			seconds: Long,
+		): Pair<String, String>? {
+			fun value(name: String): String? = cookieHeader.split(';').asSequence()
+				.map { it.trim() }
+				.firstOrNull { it.startsWith("$name=") }
+				?.substringAfter('=')
+				?.takeIf { it.isNotBlank() }
+
+			val name = APISID_COOKIES.firstOrNull { value(it) != null } ?: return null
+			val secret = value(name) ?: return null
+			val hex = java.security.MessageDigest.getInstance("SHA-1")
+				.digest("$seconds $secret $ORIGIN".toByteArray(Charsets.UTF_8))
+				.joinToString("") { String.format("%02x", it) }
+			return name to "SAPISIDHASH ${seconds}_$hex"
+		}
+
+		/** Tried in the order the web client tries them. */
+		private val APISID_COOKIES =
+			listOf("SAPISID", "__Secure-3PAPISID", "__Secure-1PAPISID")
+
+		const val ORIGIN = "https://www.youtube.com"
+		const val BROWSE_URL = "https://www.youtube.com/youtubei/v1/browse"
+		const val HISTORY_BROWSE_ID = "FEhistory"
+		const val WEB_CLIENT_ID = "1"
+		private const val DEFAULT_CLIENT_NAME = "WEB"
+
+		/**
+		 * The browse response carries the whole feed and can be materially larger
+		 * than the HTML shell. The short page timeout would cut that off on anything
+		 * but a fast link.
+		 */
+		const val BROWSE_READ_TIMEOUT_MS = 20_000
+		const val MAX_BROWSE_RESPONSE_CHARS = 32 * 1024 * 1024
 
 		const val HISTORY_URL = "https://www.youtube.com/feed/history"
 		const val INITIAL_DATA = "ytInitialData"

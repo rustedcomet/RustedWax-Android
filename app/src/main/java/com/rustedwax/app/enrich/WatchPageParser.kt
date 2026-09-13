@@ -21,10 +21,7 @@ object WatchPageParser {
 	 * first `}` inside a description would truncate it.
 	 */
 	fun extractJson(html: String, name: String): String? {
-		val marker = html.indexOf(name)
-		if (marker < 0) return null
-		val start = html.indexOf('{', marker)
-		if (start < 0) return null
+		val start = assignmentBrace(html, name) ?: return null
 
 		var depth = 0
 		var inString = false
@@ -44,6 +41,28 @@ object WatchPageParser {
 			}
 		}
 		return null
+	}
+
+	/**
+	 * The `{` that opens a real *assignment* of [name], or null.
+	 *
+	 * The page mentions these names more than once: the assignment that carries
+	 * the data, and bare references inside the bootstrap script that runs after
+	 * it. Taking the first mention and brace-matching from there reads
+	 * JavaScript as if it were data — on a client-rendered history page, where
+	 * no assignment exists at all, that produced a brace-balanced fragment of
+	 * code which then failed to parse and was reported as changed markup.
+	 *
+	 * Requiring `= {` makes absence distinguishable from breakage, which is the
+	 * difference between refusing and guessing.
+	 */
+	private fun assignmentBrace(html: String, name: String): Int? {
+		val assignment = Regex(
+			"""(?<![A-Za-z0-9_$])(?:var\s+|window\s*\[\s*["']|window\s*\.\s*)""" +
+				Regex.escape(name) +
+				"""(?:["']\s*\])?\s*=\s*\{""",
+		)
+		return assignment.find(html)?.range?.last
 	}
 
 	fun localizedTitle(json: String): String? {
