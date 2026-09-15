@@ -85,7 +85,7 @@ class UrlWatcherService : AccessibilityService() {
 				(expectedPackage != null && expectedPackage != rootPackage)
 			) return null
 			val raw = readUrlBar(root, rootPackage)
-			val host = BrowserOrigin.hostOf(raw)
+			val host = BrowserOrigin.hostOfAddressBar(raw)
 			if (!YouTubeAdDetector.shouldScanHost(host)) return null
 			val parsedVideoId = raw?.let { VIDEO_ID.find(it)?.groupValues?.get(1) }
 			val isShort = raw?.contains("/shorts/", ignoreCase = true) == true

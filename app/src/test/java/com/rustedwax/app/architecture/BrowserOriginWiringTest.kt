@@ -24,7 +24,7 @@ class BrowserOriginWiringTest {
 		val watcher = code("UrlWatcherService.kt")
 		val listener = code("RustedWaxListenerService.kt")
 
-		assertTrue("address-bar evidence bypasses BrowserOrigin", "BrowserOrigin.hostOf(raw)" in watcher)
+		assertTrue("address-bar evidence bypasses BrowserOrigin", "BrowserOrigin.hostOfAddressBar(raw)" in watcher)
 		assertTrue(
 			"notification origin bypasses BrowserOrigin",
 			"host = BrowserOrigin.hostOf(subText)" in listener,

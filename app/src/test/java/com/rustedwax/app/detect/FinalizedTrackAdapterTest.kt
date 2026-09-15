@@ -3,6 +3,7 @@ package com.rustedwax.app.detect
 import com.rustedwax.core.*
 import com.rustedwax.core.TrackInstanceId
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -159,10 +160,25 @@ class FinalizedTrackAdapterTest {
 
 		val shared = declaredState()
 			.filter { it.name != "packageName" && it.name != "appLabel" }
+			// Presentation only, and deliberately not carried. A finalized track is
+			// by definition no longer waiting for anything to come back, so
+			// `FinalizedTrack` has no field for this one and the losslessness check
+			// must not demand it grow one. The test below pins that it is dropped.
+			.filter { it.name != "awaitingContinuation" }
 			.filter { it.get(populated) == it.get(minimal) }
 			.map { it.name }
 
 		assertEquals(emptyList<String>(), shared)
+	}
+
+	@Test
+	fun `a waiting row's presentation flag does not survive finalization`() {
+		val waiting = fullyPopulated().copy(awaitingContinuation = true)
+
+		assertFalse(
+			"a finalized listen came back still claiming to be waiting to resume",
+			FinalizedTrack.from(waiting).toSessionSnapshot().awaitingContinuation,
+		)
 	}
 
 	@Test
