@@ -237,6 +237,88 @@ class NowCardTest {
 		assertNull(NowCard.durationText(null))
 	}
 
+	/**
+	 * A listen nobody is playing must not be described as one that is counting.
+	 *
+	 * Said ahead of identification and the threshold on purpose: those answer
+	 * "will this count", and while playback is stopped the answer that matters
+	 * first is that nothing is being measured right now.
+	 */
+	@Test
+	fun `a paused listen says so`() {
+		val card = NowCard.from(
+			session = session("Song", "Band", 240_000, 90_000).copy(
+				isPlaying = false,
+				playbackState = "PAUSED",
+			),
+			durationMs = 240_000,
+			identified = true,
+			kind = HiveScrobblePayload.KIND_SONG,
+			thresholdPercent = 60,
+			autoScrobble = true,
+		)
+
+		assertEquals("Paused", card.status)
+	}
+
+	@Test
+	fun `a listen whose session went says it is waiting to resume`() {
+		val card = NowCard.from(
+			session = session("Song", "Band", 240_000, 90_000).copy(
+				isPlaying = false,
+				playbackState = "PAUSED",
+				awaitingContinuation = true,
+			),
+			durationMs = 240_000,
+			identified = true,
+			kind = HiveScrobblePayload.KIND_SONG,
+			thresholdPercent = 60,
+			autoScrobble = true,
+		)
+
+		assertEquals("Paused — waiting to resume", card.status)
+		assertEquals("38%", card.percentText)
+	}
+
+	/**
+	 * Visibility is not eligibility. A listen already past the threshold that is
+	 * merely paused still reads as paused, and the row stays.
+	 */
+	@Test
+	fun `a paused listen past the threshold still reads as paused`() {
+		val card = NowCard.from(
+			session = session("Song", "Band", 240_000, 200_000).copy(
+				isPlaying = false,
+				awaitingContinuation = true,
+			),
+			durationMs = 240_000,
+			identified = true,
+			kind = HiveScrobblePayload.KIND_SONG,
+			thresholdPercent = 60,
+			autoScrobble = true,
+		)
+
+		assertEquals("Paused — waiting to resume", card.status)
+	}
+
+	/** An advertisement is refused whatever the transport says. */
+	@Test
+	fun `an advertisement still outranks a paused transport`() {
+		val card = NowCard.from(
+			session = session("Song", "Band", 240_000, 90_000, adSignal = "Ad · 0:15").copy(
+				isPlaying = false,
+				awaitingContinuation = true,
+			),
+			durationMs = 240_000,
+			identified = true,
+			kind = HiveScrobblePayload.KIND_SONG,
+			thresholdPercent = 60,
+			autoScrobble = true,
+		)
+
+		assertEquals("Advertisement — not counted", card.status)
+	}
+
 	private fun session(
 		title: String?,
 		artist: String?,

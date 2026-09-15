@@ -113,6 +113,19 @@ data class SessionSnapshot(
 	/** Automatic-write authority frozen when this logical listen began. */
 	val automaticWriteAuthorization: AutomaticWriteAuthorization =
 		AutomaticWriteAuthorization.LegacyEnabled,
+	/**
+	 * This row is a listen whose MediaSession is gone while its continuation is
+	 * still open — frozen at the moment the session vanished, and shown so Now
+	 * can say "paused, waiting to resume" instead of dropping a listen the app
+	 * still intends to take back.
+	 *
+	 * Presentation only. Nothing measures, scores, resolves or broadcasts from a
+	 * snapshot carrying this flag: it is a copy taken once, so its [playedMs]
+	 * cannot advance while nobody is watching playback, and the listen it
+	 * describes is still owned by [com.rustedwax.app.detect.TrackProgressCarry]
+	 * and finalized by the continuation timer exactly as before.
+	 */
+	val awaitingContinuation: Boolean = false,
 ) {
 	val confirmed: YouTubeProbe.Identity.Confirmed?
 		get() = identity as? YouTubeProbe.Identity.Confirmed
