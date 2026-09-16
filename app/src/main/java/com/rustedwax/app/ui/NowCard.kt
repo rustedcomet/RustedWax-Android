@@ -127,7 +127,15 @@ internal data class NowCard(
 		): String = when {
 			session.explicitAdSignal != null -> "Advertisement — not counted"
 			session.title.isNullOrBlank() -> "Reading what's playing…"
-			!session.isPlaying -> "Paused"
+			// A Short playing in picture-in-picture publishes no position, so the
+			// transport cannot say "playing" for it and this branch used to claim
+			// it was paused while inference credited it a second per second
+			// (#12). Narrowed rather than relabelled: the actively inferred case
+			// falls through to the ordinary statuses below, which still say what
+			// would stop this listen counting, and a real PiP pause — where the
+			// authorization is withdrawn and nothing is credited — still lands
+			// here.
+			!session.isPlaying && !session.pipInferredPlaying -> "Paused"
 			!identified -> "Identifying video…"
 			durationMs == null -> "Waiting for the length…"
 			!autoScrobble -> "Automatic scrobbling is off"

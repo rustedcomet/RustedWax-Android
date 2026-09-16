@@ -90,6 +90,7 @@ internal object Phase3Telemetry {
 			"duration=${snapshot.durationMs ?: -1}",
 			"rate=${playbackRate?.let { String.format(Locale.US, "%.3f", it) } ?: "-"}",
 			"playing=${snapshot.isPlaying}",
+			"pipInferred=${snapshot.pipInferredPlaying}",
 			"progressLost=${snapshot.foregroundProgressLost}",
 			"proof=${snapshot.sourceProof.name}",
 			"finalized=$finalized",

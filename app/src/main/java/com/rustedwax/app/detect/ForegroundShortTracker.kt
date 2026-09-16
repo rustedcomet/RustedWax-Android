@@ -98,6 +98,24 @@ class ForegroundShortTracker(
 		abstract val progressSurfaceLost: Boolean
 
 		/**
+		 * Bounded picture-in-picture inference is crediting this Short *now*.
+		 *
+		 * Exactly the `surfaceLost && inferredPlaying` predicate that authorizes
+		 * the credit, kept rather than recomputed, so presentation can tell an
+		 * actively inferred PiP stretch from a real pause. Both freeze the
+		 * seekbar and both set [frozenForMissingProof], which is why the two
+		 * collapsed into one paused-looking value before (#12).
+		 *
+		 * Presentation only — nothing here is scored, and it must never be
+		 * derived from [inferredMillis], which says inference *happened*, not
+		 * that it is happening. It follows the inference anchor: set when a
+		 * step is credited, cleared by the same evidence that drops the anchor,
+		 * and left alone by a refusal that carries no playback evidence either
+		 * way.
+		 */
+		abstract val pipInferenceActive: Boolean
+
+		/**
 		 * Wall-clock credited by [PipPlaybackInference] while the seekbar was
 		 * gone. Kept apart from [playedSeconds] all the way to the snapshot so a
 		 * listen can always say how much of it was measured and how much
@@ -124,6 +142,7 @@ class ForegroundShortTracker(
 			override val loopDetected: Boolean = false,
 			override val frozenForMissingProof: Boolean = false,
 			override val progressSurfaceLost: Boolean = false,
+			override val pipInferenceActive: Boolean = false,
 			override val inferredMillis: Long = 0,
 			/** Inferred time already covering movement since [currentSeconds]. */
 			val inferredSincePositionMillis: Long = 0,
@@ -147,6 +166,7 @@ class ForegroundShortTracker(
 			override val loopDetected: Boolean = false,
 			override val frozenForMissingProof: Boolean = false,
 			override val progressSurfaceLost: Boolean = false,
+			override val pipInferenceActive: Boolean = false,
 			override val inferredMillis: Long = 0,
 		) : Active()
 	}
@@ -750,6 +770,7 @@ class ForegroundShortTracker(
 		active = current.copy(
 			observedAtMillis = observation.observedAtMillis,
 			frozenForMissingProof = false,
+			pipInferenceActive = false,
 			progressSurfaceLost = true,
 			inferredMillis = inferredMillis,
 			inferredSincePositionMillis = current.inferredSincePositionMillis + credited,
@@ -862,6 +883,13 @@ class ForegroundShortTracker(
 		// every scroll into watch time.
 		val inferring = surfaceLost && inferredPlaying
 		var credited = 0L
+		// Follows the anchor, for the same reasons and in the same branches. Set
+		// where a step is credited; cleared where the anchor is dropped, which is
+		// the evidence that actually says "not playing"; and left alone by a
+		// refusal that says nothing either way, so the once-a-second watchdog
+		// cannot flicker the card between playing and paused between two real
+		// PiP observations.
+		var pipInferenceActive = current.pipInferenceActive
 		if (inferring) {
 			val running = inference ?: PipPlaybackInference(
 				durationMs = current.totalSeconds * 1000,
@@ -874,12 +902,14 @@ class ForegroundShortTracker(
 			val step = running.observe(nowMillis, playing = true, rate = playbackRate ?: 1.0)
 			inference = step.next
 			credited = step.creditedMs
+			pipInferenceActive = true
 		} else if (progressSurfaceLost || pipWindowPresent) {
 			// This capture is the PiP signature, or the window standing there with
 			// its audio stopped, and either way the evidence said not playing. That
 			// is a genuine pause: drop the anchor so the paused interval cannot be
 			// back-filled as playback when it resumes.
 			inference = inference?.observe(nowMillis, playing = false)?.next
+			pipInferenceActive = false
 		}
 		// Any other refusal — the 1s freshness watchdog, a stale capture, a
 		// scroll reset — carries no evidence about playback either way, so it
@@ -893,6 +923,7 @@ class ForegroundShortTracker(
 			is Active.Organic -> current.copy(
 				frozenForMissingProof = true,
 				progressSurfaceLost = surfaceLost,
+				pipInferenceActive = pipInferenceActive,
 				inferredMillis = inferredMillis,
 				inferredSincePositionMillis =
 					current.inferredSincePositionMillis + credited,
@@ -900,6 +931,7 @@ class ForegroundShortTracker(
 			is Active.Ad -> current.copy(
 				frozenForMissingProof = true,
 				progressSurfaceLost = surfaceLost,
+				pipInferenceActive = pipInferenceActive,
 				inferredMillis = inferredMillis,
 			)
 		}
@@ -1042,6 +1074,7 @@ class ForegroundShortTracker(
 				totalSeconds = observation.totalSeconds,
 				observedAtMillis = observation.observedAtMillis,
 				frozenForMissingProof = false,
+				pipInferenceActive = false,
 				progressSurfaceLost = false,
 				inferredSincePositionMillis = 0,
 			)
@@ -1074,6 +1107,7 @@ class ForegroundShortTracker(
 				observedAtMillis = observation.observedAtMillis,
 				playedSeconds = current.playedSeconds + handback,
 				frozenForMissingProof = false,
+				pipInferenceActive = false,
 				progressSurfaceLost = false,
 				inferredSincePositionMillis = 0,
 			)
@@ -1162,6 +1196,7 @@ class ForegroundShortTracker(
 				currentSeconds = observation.currentSeconds,
 				observedAtMillis = observation.observedAtMillis,
 				frozenForMissingProof = false,
+				pipInferenceActive = false,
 				progressSurfaceLost = false,
 			)
 		}
@@ -1258,6 +1293,11 @@ class ForegroundShortTracker(
 				else -> "FOREGROUND_SHORT"
 			},
 			isPlaying = !finalized && !proofMissing,
+			// Gated on the freeze that produced it as well as on the flag, so a
+			// value left over from an earlier PiP stretch cannot outlive the
+			// stretch: the moment a readable seekbar or a finalize returns, this
+			// is false whatever the carried field still says.
+			pipInferredPlaying = !finalized && proofMissing && state.pipInferenceActive,
 			foregroundProgressLost = surfaceLost,
 			inferredPlayedMs = inferredMs,
 			// Unknown until the resolver reads a length off the video's own page.

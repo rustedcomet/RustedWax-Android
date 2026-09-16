@@ -279,6 +279,81 @@ class NowCardTest {
 		assertEquals("Paused", card.status)
 	}
 
+	/**
+	 * A Short playing in picture-in-picture is not a paused one.
+	 *
+	 * Its seekbar is gone, so the transport cannot say "playing" and
+	 * [SessionSnapshot.isPlaying] is false while bounded inference credits it a
+	 * second per second. Reading that as a pause is #12. The card falls through
+	 * to the ordinary statuses instead of gaining a picture-in-picture label of
+	 * its own, so what would stop this listen counting is still what it says.
+	 */
+	@Test
+	fun `active inferred picture-in-picture playback does not read as paused`() {
+		val card = NowCard.from(
+			session = session("Song", "Band", 240_000, 90_000).copy(
+				isPlaying = false,
+				pipInferredPlaying = true,
+				playbackState = "FOREGROUND_PROOF_MISSING",
+			),
+			durationMs = 240_000,
+			identified = true,
+			kind = HiveScrobblePayload.KIND_SONG,
+			thresholdPercent = 60,
+			autoScrobble = true,
+		)
+
+		assertEquals("Scrobbles at 60% played", card.status)
+	}
+
+	/**
+	 * The live authorization is what speaks, not the accumulated total.
+	 *
+	 * A Short paused in picture-in-picture keeps every inferred millisecond it
+	 * earned before the pause, so a card that read progress instead of the
+	 * current tick's authorization would call a pause playback for as long as
+	 * it lasted.
+	 */
+	@Test
+	fun `a pause in picture-in-picture still reads as paused despite inferred time`() {
+		val card = NowCard.from(
+			session = session("Song", "Band", 240_000, 90_000).copy(
+				isPlaying = false,
+				pipInferredPlaying = false,
+				inferredPlayedMs = 45_000,
+				playbackState = "FOREGROUND_PROOF_MISSING",
+			),
+			durationMs = 240_000,
+			identified = true,
+			kind = HiveScrobblePayload.KIND_SONG,
+			thresholdPercent = 60,
+			autoScrobble = true,
+		)
+
+		assertEquals("Paused", card.status)
+	}
+
+	/**
+	 * Narrowing the pause branch may not promote a listen past the questions
+	 * that decide whether it counts at all.
+	 */
+	@Test
+	fun `inferred picture-in-picture playback still waits on identification`() {
+		val card = NowCard.from(
+			session = session("Song", "Band", 240_000, 90_000).copy(
+				isPlaying = false,
+				pipInferredPlaying = true,
+			),
+			durationMs = 240_000,
+			identified = false,
+			kind = null,
+			thresholdPercent = 60,
+			autoScrobble = true,
+		)
+
+		assertEquals("Identifying video…", card.status)
+	}
+
 	/** An advertisement is refused whatever the transport says. */
 	@Test
 	fun `an advertisement still outranks a paused transport`() {

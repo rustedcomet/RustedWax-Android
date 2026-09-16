@@ -71,6 +71,7 @@ class FinalizedTrackAdapterTest {
 		foregroundProgressLost = true,
 		inferredPlayedMs = 12_000,
 		isPlaying = true,
+		pipInferredPlaying = true,
 		percentPlayed = 0.915,
 		identity = YouTubeProbe.Identity.Confirmed(
 			videoId = "dQw4w9WgXcQ",
