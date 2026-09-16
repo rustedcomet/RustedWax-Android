@@ -55,6 +55,7 @@ class NativeShortsAdapter {
 					playing = event.inferredPlaying,
 					playbackRate = event.playbackRate,
 					displayOff = event.displayOff,
+					pipWindowPresent = event.pipWindowPresent,
 				),
 			)
 			// A Short opened and sent straight to PiP may never give the
@@ -123,6 +124,7 @@ class NativeShortsAdapter {
 			inferredPlaying = result.progressSurfaceLost &&
 				if (speedChip != null) capture.inferenceEnabled else capture.pipEvidence.playing,
 			playbackRate = speedChip,
+			pipWindowPresent = capture.pipEvidence.pausedButPresent,
 		)
 	}
 
@@ -169,6 +171,24 @@ class NativeShortsAdapter {
 			)
 		}
 	}
+
+	/**
+	 * Whether native YouTube genuinely owns a picture-in-picture window.
+	 *
+	 * The whole of the picture-in-picture question, and deliberately nothing
+	 * more. It was once answered by asking which package had resumed most
+	 * recently; Android's multi-resume meant split-screen and a pop-up over
+	 * fullscreen YouTube both answered "picture-in-picture" on a physical A36
+	 * while the platform reported zero pinned tasks. Only Android's own window
+	 * list can settle it, so this reads that and draws no inferences of its own.
+	 *
+	 * Fails closed in every direction: an empty list, a window whose owner cannot
+	 * be established, and a picture-in-picture window belonging to another app
+	 * are all "no". Saying no costs the ordinary missing-proof grace, which is
+	 * what happened before this signal existed at all.
+	 */
+	fun readPictureInPictureWindows(windows: List<ShortsWindowFact>): Boolean =
+		windows.any { it.inPictureInPictureMode && it.ownerPackage() == packageName }
 
 	/**
 	 * Interpret a missing/unavailable Android surface from framework primitives.
@@ -219,6 +239,7 @@ class NativeShortsAdapter {
 		inferredPlaying = inferredPlaying,
 		playbackRate = null,
 		displayOff = displayOff,
+		pipWindowPresent = pipEvidence.pausedButPresent,
 	)
 
 	private fun parsed(
@@ -317,19 +338,52 @@ data class ShortsSurfaceCapture(
 			inferenceEnabled = pipPlaying,
 			mediaAudioStarted = pipPlaying,
 			visiblePinnedWindow = pipPlaying,
+			pinnedWindowPresent = pipPlaying,
 		),
 		inferenceEnabled,
 	)
 }
+
+/**
+ * One open window, reduced to the only facts picture-in-picture identification
+ * needs.
+ *
+ * No bounds, no title, no layer, no contents — there is no reason to carry them
+ * and every reason not to.
+ */
+data class ShortsWindowFact(
+	val inPictureInPictureMode: Boolean,
+	/**
+	 * The window's owner package, or null where Android does not let this
+	 * service read it.
+	 *
+	 * A function rather than a value so a window that is not in
+	 * picture-in-picture is never asked who owns it: the narrow read is part of
+	 * the contract, not an implementation detail of the caller.
+	 */
+	val ownerPackage: () -> String?,
+)
 
 /** Primitive public evidence used for surface-less playback. */
 data class ShortsPipEvidence(
 	val inferenceEnabled: Boolean,
 	val mediaAudioStarted: Boolean,
 	val visiblePinnedWindow: Boolean,
+	/** Android reports a picture-in-picture window whose root package is YouTube. */
+	val pinnedWindowPresent: Boolean = false,
 ) {
 	val playing: Boolean
 		get() = inferenceEnabled && mediaAudioStarted && visiblePinnedWindow
+
+	/**
+	 * The picture-in-picture window is still there and its audio has stopped.
+	 *
+	 * This is a paused Short, not a Short that went away, and the difference is
+	 * the whole of §PiP-pause: it earns nothing, and it must not be finalized
+	 * while the window it is playing in is still on screen.
+	 */
+	val pausedButPresent: Boolean
+		get() = inferenceEnabled && pinnedWindowPresent && !mediaAudioStarted
 }
 
 enum class ShortsSurfaceUnavailableKind {
@@ -372,5 +426,7 @@ sealed interface ShortsSurfaceReading {
 		val playbackRate: Double?,
 		val displayOff: Boolean = false,
 		val stabilityPending: Boolean = false,
+		/** A paused-but-present picture-in-picture window; see [ShortsPipEvidence]. */
+		val pipWindowPresent: Boolean = false,
 	) : ShortsSurfaceReading
 }

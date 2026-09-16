@@ -1,9 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android enforces this component's exact native-YouTube-only visibility. -->
+<!--
+	Android confines this component's accessibility event stream to native YouTube.
+
+	`flagRetrieveInteractiveWindows` is present for one reason: it is the only way
+	to ask Android whether native YouTube genuinely owns a picture-in-picture
+	window. Without it `getWindows()` is empty, and the alternative — guessing PiP
+	from which app resumed last — reports picture-in-picture for split-screen and
+	pop-up windows that are nothing of the kind. `packageNames` confines delivered
+	events, while the code reads only the root package of windows already marked
+	PiP and discards it after the exact YouTube comparison.
+-->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
 	android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged|typeViewScrolled"
 	android:accessibilityFeedbackType="feedbackGeneric"
-	android:accessibilityFlags="flagDefault|flagReportViewIds|flagIncludeNotImportantViews"
+	android:accessibilityFlags="flagDefault|flagReportViewIds|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
 	android:canRetrieveWindowContent="true"
 	android:description="@string/native_shorts_accessibility_description"
 	android:notificationTimeout="200"

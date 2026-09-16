@@ -356,6 +356,7 @@ class ForegroundShortTracker(
 				inferredPlaying = input.playing,
 				playbackRate = input.playbackRate,
 				displayOff = input.displayOff,
+				pipWindowPresent = input.pipWindowPresent,
 			)
 		}
 
@@ -840,6 +841,12 @@ class ForegroundShortTracker(
 		playbackRate: Double? = null,
 
 		displayOff: Boolean = false,
+
+		/**
+		 * The source's picture-in-picture window is still on screen and its audio
+		 * has stopped: the viewer paused, they did not leave.
+		 */
+		pipWindowPresent: Boolean = false,
 	): Update {
 		val current = active ?: return Update(diagnostic = reason)
 		if (missingSinceMillis == null) missingSinceMillis = nowMillis
@@ -867,10 +874,11 @@ class ForegroundShortTracker(
 			val step = running.observe(nowMillis, playing = true, rate = playbackRate ?: 1.0)
 			inference = step.next
 			credited = step.creditedMs
-		} else if (progressSurfaceLost) {
-			// This capture *is* the PiP signature and the evidence still said not
-			// playing, so it is a genuine pause: drop the anchor and let the grace
-			// run as usual.
+		} else if (progressSurfaceLost || pipWindowPresent) {
+			// This capture is the PiP signature, or the window standing there with
+			// its audio stopped, and either way the evidence said not playing. That
+			// is a genuine pause: drop the anchor so the paused interval cannot be
+			// back-filled as playback when it resumes.
 			inference = inference?.observe(nowMillis, playing = false)?.next
 		}
 		// Any other refusal — the 1s freshness watchdog, a stale capture, a
@@ -913,6 +921,36 @@ class ForegroundShortTracker(
 					"credited ${credited}ms of inferred wall-clock" +
 					(playbackRate?.let { " at ${it}\u00d7 off YouTube's own speed chip" } ?: "") +
 					" (inferred total ${inferredMillis / 1000}s, measured ${current.playedSeconds}s)",
+			)
+		}
+		// A Short paused in picture-in-picture has not gone anywhere: its own
+		// window is still on screen and only the audio stopped. Hold the same
+		// listen open — crediting nothing, keeping its token, its measured
+		// seconds and its inference ledger — for exactly as long as that window
+		// lasts, so resuming continues this listen instead of needing fullscreen
+		// to rebuild one from scratch.
+		//
+		// No timeout is invented here and the generic grace is untouched: the
+		// moment the window goes, this is false again and the ordinary grace runs
+		// and finalizes exactly as it always did. The anchor was already dropped
+		// above, so the paused interval cannot be back-filled when it resumes.
+		//
+		// Deliberately not also requiring the surface-lost signature: a Short
+		// paused in the very first moments of picture-in-picture never earned one,
+		// and that is the case this exists for. The window evidence is specific
+		// enough on its own — it is false whenever YouTube is the app in front, so
+		// a swipe, a scroll or a trip back to the feed still finalizes as before.
+		//
+		// Excludes a listen already banked at its full length: that one is scored,
+		// and holding it open would keep a finished viewing on screen forever.
+		if (pipWindowPresent && !inferring && !current.alreadyFinalized) {
+			missingSinceMillis = nowMillis
+			return Update(
+				active = snapshot(active ?: current, finalized = false),
+				completeForegroundProof = false,
+				diagnostic = "$reason; Short paused in picture-in-picture with its window " +
+					"still on screen — holding the same listen and crediting nothing " +
+					"(inferred total ${inferredMillis / 1000}s, measured ${current.playedSeconds}s)",
 			)
 		}
 		// The screen going off drops the paired audio + visible-window evidence for
