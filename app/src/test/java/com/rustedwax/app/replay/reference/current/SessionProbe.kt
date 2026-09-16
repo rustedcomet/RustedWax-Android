@@ -1552,8 +1552,16 @@ class SessionProbe(
 							continuationToken = null
 							continuationTrackIdentity = null
 							finalizeCurrent("session continuation expired")
+							// This tick owns one listen, not the package. A sibling
+							// continuation under the same package is another listen still
+							// inside its own window, and the package-wide reset below would
+							// take its carry with it — finalizing nothing and losing a real
+							// listen in silence. Deferred rather than skipped: whichever
+							// continuation is last to expire finds no sibling here and
+							// performs the reset then, so a genuine teardown still happens.
 							if (adapter.teardownPolicy == SourceTeardownPolicy.DISCARD_AND_RESET &&
-								watches.values.none { it.packageName == packageName }
+								watches.values.none { it.packageName == packageName } &&
+								!TrackProgressCarry.hasPackage(packageName)
 							) {
 								clearPackageState(packageName)
 							}
