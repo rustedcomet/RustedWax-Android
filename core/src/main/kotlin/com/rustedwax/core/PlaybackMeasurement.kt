@@ -42,6 +42,16 @@ data class PlaybackMeasurement(
 	/** Playing continued with no progress source of any kind left to read. */
 	val progressSurfaceLost: Boolean = false,
 	val isPlaying: Boolean = false,
+	/**
+	 * Bounded picture-in-picture inference was crediting at the instant this was
+	 * taken.
+	 *
+	 * Carried so the snapshot adapter stays total, not because anything scored
+	 * reads it: presentation is its only consumer, and a finalized listen always
+	 * publishes it false. Distinct from [inferredPlayedMs], which is a total that
+	 * outlives the stretch that earned it.
+	 */
+	val pipInferredPlaying: Boolean = false,
 	/** The transport state's own name, for the log and the diagnostics card. */
 	val transportState: String,
 	/** When this listen began, frozen once and carried across session restarts. */

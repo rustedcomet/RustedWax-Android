@@ -74,6 +74,18 @@ data class SessionSnapshot(
 	 */
 	val inferredPlayedMs: Long = 0,
 	val isPlaying: Boolean,
+	/**
+	 * Bounded picture-in-picture inference is crediting this listen right now.
+	 *
+	 * Presentation only, and strictly narrower than "there is inferred time":
+	 * [inferredPlayedMs] is a total that survives a pause, this is the live
+	 * authorization behind the current tick. A Short playing in PiP publishes no
+	 * position at all, so [isPlaying] — which means the source's own transport
+	 * says playing — is false for both an actively inferred stretch and a real
+	 * pause. Read this to tell those apart; it never widens [isPlaying], and
+	 * nothing scored consults it.
+	 */
+	val pipInferredPlaying: Boolean = false,
 	/** playedMs / durationMs; null when duration is unknown. */
 	val percentPlayed: Double?,
 	val identity: YouTubeProbe.Identity,

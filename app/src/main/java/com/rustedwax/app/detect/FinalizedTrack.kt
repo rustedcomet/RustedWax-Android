@@ -63,6 +63,7 @@ data class FinalizedTrack(
 		foregroundProgressLost = measurement.progressSurfaceLost,
 		inferredPlayedMs = measurement.inferredPlayedMs,
 		isPlaying = measurement.isPlaying,
+		pipInferredPlaying = measurement.pipInferredPlaying,
 		percentPlayed = measurement.percentPlayed,
 		// The compatibility boundary, named rather than hidden.
 		//
@@ -133,6 +134,7 @@ data class FinalizedTrack(
 				loopDetected = snapshot.loopDetected,
 				progressSurfaceLost = snapshot.foregroundProgressLost,
 				isPlaying = snapshot.isPlaying,
+				pipInferredPlaying = snapshot.pipInferredPlaying,
 				transportState = snapshot.playbackState,
 				startedAtEpochSec = snapshot.trackStartedAtEpochSec,
 				percentPlayed = snapshot.percentPlayed,
