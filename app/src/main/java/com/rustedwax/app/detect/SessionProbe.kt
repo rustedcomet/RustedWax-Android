@@ -165,81 +165,6 @@ class SessionProbe(
 
 	private val watches = mutableMapOf<String, AndroidSessionBinding>()
 
-	/**
-	 * Listens whose MediaSession has gone while their continuation is still open.
-	 *
-	 * Frozen [SessionSnapshot]s, not live objects: the AndroidSessionBinding that
-	 * produced one has already been disposed and its callbacks unregistered, so
-	 * nothing here is a session being kept alive for the UI, and nothing here can
-	 * accrue play time. The listen itself is still owned by [TrackProgressCarry]
-	 * and still finalized by the continuation timer; this map only lets Now say
-	 * that the app is waiting, instead of showing nothing at all.
-	 */
-	private val pendingContinuations = LinkedHashMap<String, PendingContinuation>()
-
-	/**
-	 * One waiting row, and which listen owns it.
-	 *
-	 * The key is the carry's own key — package and semantic track — so two
-	 * separate viewings of the same item share it, and a delayed callback
-	 * belonging to the first would otherwise collect the second one's row. The
-	 * owner travels with the snapshot so removal can ask "is this still *my*
-	 * row", the same question [TrackProgressCarry] answers with its token,
-	 * rather than "is there a row under this key".
-	 */
-	private data class PendingContinuation(
-		/** The continuation whose wait this row is showing. */
-		val continuationToken: Long,
-		val snapshot: SessionSnapshot,
-	)
-
-	/** One pending row per package and semantic track, matching the carry's own key. */
-	private fun continuationRowKey(packageName: String, semanticKey: String) =
-		"$packageName\u0000$semanticKey"
-
-	/**
-	 * Drop this continuation's own waiting row, if it is still the one on Now.
-	 *
-	 * Returns whether anything was removed, so a caller can publish only when the
-	 * row set actually changed.
-	 */
-	private fun forgetPendingContinuation(
-		packageName: String,
-		trackIdentity: TrackIdentity,
-		continuationToken: Long,
-	): Boolean = forgetPendingContinuation(packageName, trackIdentity) {
-		it.continuationToken == continuationToken
-	}
-
-	/**
-	 * Drop the waiting row for the listen a replacement has just claimed back.
-	 *
-	 * A claim names no continuation token — it consumes the carry and returns
-	 * only the progress — so ownership is proven here by the listen instance both
-	 * the carry and the frozen row were stamped with. A carry with no instance of
-	 * its own proves nothing either way, and removal falls back to the key, which
-	 * is what every caller did before ownership was checked at all.
-	 */
-	private fun forgetPendingContinuation(
-		packageName: String,
-		trackIdentity: TrackIdentity,
-		claimed: TrackProgressCarry.Progress,
-	): Boolean = forgetPendingContinuation(packageName, trackIdentity) { pending ->
-		claimed.trackInstanceToken?.let { it == pending.snapshot.trackInstanceToken } ?: true
-	}
-
-	private fun forgetPendingContinuation(
-		packageName: String,
-		trackIdentity: TrackIdentity,
-		owns: (PendingContinuation) -> Boolean,
-	): Boolean {
-		val key = continuationRowKey(packageName, trackIdentity.semanticKey)
-		val pending = pendingContinuations[key] ?: return false
-		if (!owns(pending)) return false
-		pendingContinuations.remove(key)
-		return true
-	}
-
 	private val destroyedTokens = object : LinkedHashMap<String, Unit>(16, 0.75f, false) {
 		override fun removeEldestEntry(eldest: Map.Entry<String, Unit>): Boolean =
 			size > MAX_REMEMBERED_DESTROYED_TOKENS
@@ -569,7 +494,6 @@ class SessionProbe(
 			if (discards) clearPackageState(watch.packageName)
 		}
 		watches.clear()
-		pendingContinuations.clear()
 		// A vanished epoch-scoped controller may still have a pending continuation
 		// even though no AndroidSessionBinding remains in the map. Reconnect/Stop clears it too.
 		SourceRegistry.epochScopedPackages.forEach(::clearPackageState)
@@ -764,7 +688,6 @@ class SessionProbe(
 
 	private fun clearPackageState(packageName: String) {
 		TrackProgressCarry.clearPackage(packageName)
-		pendingContinuations.keys.removeAll { it.startsWith("$packageName\u0000") }
 		// Which package-scoped observation state a reset clears belongs to the source
 		// that owns it: the native watch screen's playlist bar is the YouTube app's,
 		// and YouTube Music must neither read it nor discard it.
@@ -777,42 +700,10 @@ class SessionProbe(
 		val mediaSessions = watches.values
 			.filter {
 				!it.suppressedByForegroundShort && it.acceptsLiveEvidence &&
-					it.hasPresentableIdentity
+					!it.sessionDestroyed && it.hasPresentableIdentity
 			}
 			.map { it.snapshot() }
-		// A package that is presenting something live has answered the question a
-		// pending row exists to ask, and the answer does not expire.
-		//
-		// Dropped rather than hidden, and keyed on the listen rather than the
-		// package, so the two cases stay apart. A live row carrying the *same*
-		// instance token is the waiting listen itself, come back and claimed —
-		// that row is kept out of the list below so one listen is not shown twice,
-		// but it is still owed its place if this session goes again. A live row
-		// carrying a *different* token is a different listen, and the waiting one
-		// has stopped being what this app is about: it is removed here, once, so
-		// that when the newer listen later ends — leaving no live session, and
-		// whether or not it left a continuation of its own — the older one cannot
-		// walk back onto Now with nobody having resumed it.
-		//
-		// Presentation only, in both directions. The removed listen keeps its
-		// carry entry, its timer and its finalization exactly as before.
-		//
-		// The foreground Short is presentation in exactly the same sense, and is
-		// counted here as one: it is a native listen this app is showing right
-		// now, under the same package as the watch screen a waiting row came
-		// from. Leaving it out let a Short play beside an older native-watch row
-		// that nobody had resumed. Nothing about how a Short is measured,
-		// finalized or scrobbled is touched by being counted as a presented row.
-		val shortRow = foregroundShortSnapshot
-		val presenting = (listOfNotNull(shortRow) + mediaSessions).groupBy { it.packageName }
-		pendingContinuations.values.removeAll { pending ->
-			val live = presenting[pending.snapshot.packageName]
-			live != null && live.none { it.trackInstance == pending.snapshot.trackInstance }
-		}
-		val waiting = pendingContinuations.values
-			.filter { it.snapshot.packageName !in presenting.keys }
-			.map { it.snapshot }
-		_sessions.value = listOfNotNull(shortRow) + mediaSessions + waiting
+		_sessions.value = listOfNotNull(foregroundShortSnapshot) + mediaSessions
 	}
 
 	private fun handleNativeShortEvent(event: NativeShortsObserver.Event) {
@@ -962,6 +853,20 @@ class SessionProbe(
 
 		/** A finished track stays tombstoned in [watches], but owns no live surface. */
 		val acceptsLiveEvidence: Boolean get() = !listen.finalized
+
+		/**
+		 * This controller's session has been destroyed.
+		 *
+		 * Android orders `onSessionDestroyed` and the active-session-list callback
+		 * that drops this binding from [watches] independently, so between the two
+		 * the binding is still in the map while the session behind it is gone. A
+		 * row for it would be a playback session this app can no longer see, so it
+		 * stops being presented the moment the callback lands rather than whenever
+		 * the list happens to catch up. Presentation only: the continuation, its
+		 * carry and its finalization are untouched and still owned by the timer.
+		 */
+		var sessionDestroyed: Boolean = false
+			private set
 
 		/** Empty native Shorts controllers are transport noise, not a Now item. */
 		val hasPresentableIdentity: Boolean get() = trackIdentity.isUsable
@@ -1381,6 +1286,7 @@ class SessionProbe(
 				// Before anything else: this token is spent, whatever the active
 				// session list says next.
 				noteSessionDestroyed(sessionKey)
+				sessionDestroyed = true
 				dispatch(
 					PlaybackInput.SessionDestroyed(
 						elapsedRealtimeMs = SystemClock.elapsedRealtime(),
@@ -1493,20 +1399,6 @@ class SessionProbe(
 			continuationAccessibilityCoverage = frozenCoverage
 			continuationToken = token
 			continuationTrackIdentity = identityKey
-			// Frozen here, once, while this AndroidSessionBinding still knows what it was
-			// playing. Taken as a copy so the row cannot count time nobody observed.
-			if (hasPresentableIdentity && !suppressedByForegroundShort) {
-				// One waiting row per app. A second listen reaching this point means
-				// the app moved on from the first, so the first is no longer what
-				// Now is about — its carry entry, its timer and its finalization are
-				// untouched, and only the row stops being shown.
-				pendingContinuations.keys.removeAll { it.startsWith("$packageName\u0000") }
-				pendingContinuations[continuationRowKey(packageName, identityKey.semanticKey)] =
-					PendingContinuation(
-						continuationToken = token,
-						snapshot = snapshot().copy(isPlaying = false, awaitingContinuation = true),
-					)
-			}
 			// Whether position will be allowed to speak for this one, which is the
 			// same predicate the claim will apply — asked here against the carry's
 			// own stopping point so the log states the wait it will actually keep.
@@ -1540,8 +1432,6 @@ class SessionProbe(
 				override fun run() {
 					val expired = TrackProgressCarry.expire(packageName, identityKey, token)
 					if (expired != null) {
-						forgetPendingContinuation(packageName, identityKey, token)
-						publish()
 						if (continuationToken == token && !finalized) {
 							continuationToken = null
 							continuationTrackIdentity = null
@@ -1562,18 +1452,10 @@ class SessionProbe(
 						}
 						return
 					}
-					// Nothing to collect and nothing still waiting: this
-					// continuation is gone — claimed by a replacement, cancelled,
-					// or pruned by someone else's `remember` before this poll
-					// reached it. The row it was showing outlives it either way,
-					// and a row that no continuation stands behind is a listen
-					// Now claims is waiting to resume when nothing is. Only this
-					// continuation's own row goes; a newer one under the same key
-					// is another listen's, still owed its wait.
-					if (!TrackProgressCarry.isPending(packageName, identityKey, token)) {
-						if (forgetPendingContinuation(packageName, identityKey, token)) publish()
-						return
-					}
+					// Claimed by a replacement, cancelled, or pruned by someone
+					// else's `remember` before this poll reached it: this
+					// continuation is gone and nothing is owed another tick.
+					if (!TrackProgressCarry.isPending(packageName, identityKey, token)) return
 					if (continuationToken == token && !finalized) {
 						handler.postDelayed(this, TrackProgressCarry.TTL_MS)
 					}
@@ -1588,7 +1470,6 @@ class SessionProbe(
 			val token = continuationToken ?: return
 			val identityKey = continuationTrackIdentity ?: trackIdentity
 			TrackProgressCarry.cancel(packageName, identityKey, token)
-			forgetPendingContinuation(packageName, identityKey, token)
 			continuationToken = null
 			continuationTrackIdentity = null
 			continuationAccessibilityCoverage = null
@@ -1617,8 +1498,6 @@ class SessionProbe(
 				resumeVideoId = (lastStableIdentity as? YouTubeProbe.Identity.Confirmed)?.videoId
 					?: latchedVideo?.videoId,
 			) ?: return
-			// This listen is live again on this AndroidSessionBinding; the waiting row was it.
-			forgetPendingContinuation(packageName, trackIdentity, carried)
 			trackAutomaticWriteAuthorization = carried.automaticWriteAuthorization
 			// Deactivated on the *outgoing* instance and re-activated on the one the
 			// carry establishes, so the order around the token change is load-bearing

@@ -261,25 +261,6 @@ class NowCardTest {
 		assertEquals("Paused", card.status)
 	}
 
-	@Test
-	fun `a listen whose session went says it is waiting to resume`() {
-		val card = NowCard.from(
-			session = session("Song", "Band", 240_000, 90_000).copy(
-				isPlaying = false,
-				playbackState = "PAUSED",
-				awaitingContinuation = true,
-			),
-			durationMs = 240_000,
-			identified = true,
-			kind = HiveScrobblePayload.KIND_SONG,
-			thresholdPercent = 60,
-			autoScrobble = true,
-		)
-
-		assertEquals("Paused — waiting to resume", card.status)
-		assertEquals("38%", card.percentText)
-	}
-
 	/**
 	 * Visibility is not eligibility. A listen already past the threshold that is
 	 * merely paused still reads as paused, and the row stays.
@@ -287,10 +268,7 @@ class NowCardTest {
 	@Test
 	fun `a paused listen past the threshold still reads as paused`() {
 		val card = NowCard.from(
-			session = session("Song", "Band", 240_000, 200_000).copy(
-				isPlaying = false,
-				awaitingContinuation = true,
-			),
+			session = session("Song", "Band", 240_000, 200_000).copy(isPlaying = false),
 			durationMs = 240_000,
 			identified = true,
 			kind = HiveScrobblePayload.KIND_SONG,
@@ -298,7 +276,7 @@ class NowCardTest {
 			autoScrobble = true,
 		)
 
-		assertEquals("Paused — waiting to resume", card.status)
+		assertEquals("Paused", card.status)
 	}
 
 	/** An advertisement is refused whatever the transport says. */
@@ -307,7 +285,6 @@ class NowCardTest {
 		val card = NowCard.from(
 			session = session("Song", "Band", 240_000, 90_000, adSignal = "Ad · 0:15").copy(
 				isPlaying = false,
-				awaitingContinuation = true,
 			),
 			durationMs = 240_000,
 			identified = true,

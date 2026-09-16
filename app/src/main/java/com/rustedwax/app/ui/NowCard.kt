@@ -127,11 +127,6 @@ internal data class NowCard(
 		): String = when {
 			session.explicitAdSignal != null -> "Advertisement — not counted"
 			session.title.isNullOrBlank() -> "Reading what's playing…"
-			// Said before anything about identification or the threshold, because
-			// it is the thing that changed and the only one someone can act on:
-			// nothing is counting, and the measured progress below is what the
-			// listen has, not what it is still gaining.
-			session.awaitingContinuation -> "Paused — waiting to resume"
 			!session.isPlaying -> "Paused"
 			!identified -> "Identifying video…"
 			durationMs == null -> "Waiting for the length…"
