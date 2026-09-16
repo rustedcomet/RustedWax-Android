@@ -13,6 +13,7 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import com.rustedwax.app.storage.Settings as AppSettings
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import com.rustedwax.app.BuildConfig
 import com.rustedwax.core.PlayerAdSurface
 import com.rustedwax.core.SourceSessionId
@@ -175,6 +176,7 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 		inferredPlaying: Boolean = false,
 		playbackRate: Double? = null,
 		displayOff: Boolean? = null,
+		pipWindowPresent: Boolean = false,
 	) {
 		NativeShortsObserver.missing(
 			reason,
@@ -183,6 +185,7 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 			inferredPlaying,
 			playbackRate,
 			displayOff = displayOff ?: !displayInteractive(),
+			pipWindowPresent = pipWindowPresent,
 		)
 	}
 
@@ -190,6 +193,7 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 		inferenceEnabled = false,
 		mediaAudioStarted = false,
 		visiblePinnedWindow = false,
+		pinnedWindowPresent = false,
 	)
 
 	private fun reportUnavailable(
@@ -231,6 +235,7 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 					inferredPlaying = reading.inferredPlaying,
 					playbackRate = reading.playbackRate,
 					displayOff = reading.displayOff,
+					pipWindowPresent = reading.pipWindowPresent,
 				)
 			}
 		}
@@ -369,12 +374,63 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 			}
 			return noPipEvidence()
 		}
-		val evidence = pipProbe.evidence(nowMillis)
+		val evidence = pipProbe.evidence(nowMillis, youTubePictureInPictureWindow())
 		return ShortsPipEvidence(
 			inferenceEnabled = true,
 			mediaAudioStarted = evidence.mediaAudioStarted,
 			visiblePinnedWindow = evidence.visiblePinnedWindow,
+			pinnedWindowPresent = evidence.pinnedWindowPresent,
 		)
+	}
+
+	/**
+	 * Whether native YouTube genuinely owns a picture-in-picture window.
+	 *
+	 * Android is the only thing that knows this. The previous answer was deduced
+	 * from which package had resumed most recently, and Android's multi-resume
+	 * made that wrong in the ordinary way people use a phone: on a physical A36,
+	 * split-screen and a pop-up window over fullscreen YouTube both reported
+	 * picture-in-picture while `dumpsys` showed zero pinned tasks.
+	 *
+	 * Reads the least it can. Windows are examined for one flag each; only a
+	 * window that already says it is in picture-in-picture is asked for its root,
+	 * and only that root's package name is read — no child is visited, and no
+	 * tree is walked. `packageNames` confines delivered accessibility events to
+	 * YouTube; the interactive-window list itself is broader, so a PiP window's
+	 * root package may identify another app and is compared only to YouTube's
+	 * package before being discarded. Only the resulting boolean can reach
+	 * debug-only telemetry; no package name or other window metadata is retained.
+	 *
+	 * Fails closed: an empty list, a denied list, or a picture-in-picture window
+	 * whose owner cannot be established all return false, which leaves the
+	 * ordinary missing-proof grace to finalize exactly as it did before.
+	 */
+	private fun youTubePictureInPictureWindow(): Boolean = runCatching {
+		val open: List<AccessibilityWindowInfo> = windows ?: return false
+		shorts.readPictureInPictureWindows(
+			open.map { window ->
+				ShortsWindowFact(
+					inPictureInPictureMode = window.isInPictureInPictureMode,
+					ownerPackage = { window.ownerPackageOrNull() },
+				)
+			},
+		)
+	}.getOrDefault(false)
+
+	/**
+	 * The one fact read off a picture-in-picture window: who owns it.
+	 *
+	 * Asks for the window's root node and reads its package name. No child is
+	 * visited and no tree is walked. Android may return another app's package
+	 * here; the caller uses it only for the exact YouTube comparison.
+	 */
+	private fun AccessibilityWindowInfo.ownerPackageOrNull(): String? {
+		val node = runCatching { root }.getOrNull() ?: return null
+		return try {
+			node.packageName?.toString()
+		} finally {
+			node.recycle()
+		}
 	}
 
 	private fun observeForeground(reason: String) {
@@ -503,6 +559,7 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 				progressSurfaceLost = reading.progressSurfaceLost,
 				inferredPlaying = reading.inferredPlaying,
 				playbackRate = reading.playbackRate,
+				pipWindowPresent = reading.pipWindowPresent,
 			)
 
 			is ShortsSurfaceReading.Proven -> {

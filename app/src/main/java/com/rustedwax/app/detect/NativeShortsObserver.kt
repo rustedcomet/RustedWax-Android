@@ -49,6 +49,8 @@ object NativeShortsObserver {
 			val playbackRate: Double? = null,
 			/** The display was not interactive when this observation was taken. */
 			val displayOff: Boolean = false,
+			/** A paused Short whose picture-in-picture window is still on screen. */
+			val pipWindowPresent: Boolean = false,
 		) : Event
 		data class Disconnected(val reason: String) : Event
 	}
@@ -141,6 +143,7 @@ object NativeShortsObserver {
 		inferredPlaying: Boolean = false,
 		playbackRate: Double? = null,
 		displayOff: Boolean = false,
+		pipWindowPresent: Boolean = false,
 	) {
 		_status.value = _status.value.copy(
 			connected = true,
@@ -161,6 +164,7 @@ object NativeShortsObserver {
 				inferredPlaying,
 				playbackRate,
 				displayOff,
+				pipWindowPresent,
 			),
 		)
 	}

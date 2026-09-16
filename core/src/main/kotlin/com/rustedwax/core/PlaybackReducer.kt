@@ -2707,6 +2707,14 @@ sealed interface PlaybackInput {
 		val discard: Boolean = false,
 		/** The display was not interactive when this observation was taken. */
 		val displayOff: Boolean = false,
+		/**
+		 * The source still has a window on screen that it does not own the screen
+		 * with, and its audio has stopped: a paused picture-in-picture player.
+		 *
+		 * Neutral vocabulary on purpose — it says what was observed, not what a
+		 * lifecycle should do about it.
+		 */
+		val pipWindowPresent: Boolean = false,
 	) : ForegroundSurface
 
 	/** The separately granted observer connected; no playback state changed. */

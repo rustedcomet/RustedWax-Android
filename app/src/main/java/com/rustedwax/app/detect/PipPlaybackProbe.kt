@@ -24,6 +24,21 @@ class PipPlaybackProbe(private val context: Context) {
 	data class Evidence(
 		val mediaAudioStarted: Boolean,
 		val visiblePinnedWindow: Boolean,
+		/**
+		 * Native YouTube genuinely owns a picture-in-picture window right now.
+		 *
+		 * Supplied by the accessibility service from Android's own window list —
+		 * see `NativeShortsAccessibilityService.youTubePictureInPictureWindow`.
+		 * It is *not* derived here, and deliberately so: this was once inferred
+		 * from which package resumed most recently, and Android's multi-resume
+		 * meant split-screen and pop-up windows — neither of which is
+		 * picture-in-picture — reported true on a physical A36 with zero pinned
+		 * tasks on the device. Only the framework can answer this question.
+		 *
+		 * Used to keep a paused Short alive, never to credit one — crediting
+		 * still takes the audio pair.
+		 */
+		val pinnedWindowPresent: Boolean = false,
 	) {
 		val playing: Boolean get() = mediaAudioStarted && visiblePinnedWindow
 	}
@@ -53,23 +68,34 @@ class PipPlaybackProbe(private val context: Context) {
 		}.getOrDefault(false)
 	}
 
-	/**
-	 * True when YouTube has a visible window *and* media audio is started.
-	 *
-	 * Order matters only for cost: the audio check is a cheap local call, the
-	 * usage query is not, so a silent device short-circuits before asking.
-	 */
+	/** True when YouTube has a visible window *and* media audio is started. */
 	fun youTubePlayingWithoutSurface(nowMillis: Long): Boolean {
-		return evidence(nowMillis).playing
+		// Crediting never depended on the picture-in-picture window fact — it is
+		// the audio pair that authorizes it — so this caller has nothing to say
+		// about windows and passes the answer it does not have.
+		return evidence(nowMillis, pictureInPictureWindow = false).playing
 	}
 
-	/** Capture the two independent framework facts without interpreting their pair. */
-	fun evidence(nowMillis: Long): Evidence {
+	/**
+	 * Capture the independent framework facts without interpreting their pair.
+	 *
+	 * [pictureInPictureWindow] is the accessibility service's answer to "does
+	 * native YouTube own a picture-in-picture window right now"; this class does
+	 * not and cannot work that out from usage events. It is passed through rather
+	 * than combined with anything here, so that a false answer can only ever come
+	 * from the framework, never from arithmetic done in this file.
+	 */
+	fun evidence(nowMillis: Long, pictureInPictureWindow: Boolean): Evidence {
 		if (!SUPPORTED) return Evidence(false, false)
 		val audio = mediaAudioStarted()
+		// Order matters only for cost: the audio check is a cheap local call, the
+		// usage query is not, so a silent device short-circuits before asking.
+		// Safe again now that the paused case is answered by the window list
+		// instead of by this sweep — `visiblePinnedWindow` only ever gates
+		// crediting, and crediting already requires audio.
 		val window = if (audio) youTubeWindowVisible(nowMillis) else false
-		Phase3Telemetry.pipEvidence(nowMillis, audio, window)
-		return Evidence(audio, window)
+		Phase3Telemetry.pipEvidence(nowMillis, audio, window, pictureInPictureWindow)
+		return Evidence(audio, window, pictureInPictureWindow)
 	}
 
 	private fun mediaAudioStarted(): Boolean = runCatching {

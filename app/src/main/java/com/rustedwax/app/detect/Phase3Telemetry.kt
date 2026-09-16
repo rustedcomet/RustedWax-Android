@@ -44,12 +44,14 @@ internal object Phase3Telemetry {
 		observedAtMillis: Long,
 		mediaAudioStarted: Boolean,
 		youTubeWindowVisible: Boolean,
+		pinnedWindowPresent: Boolean = false,
 	) {
 		if (!BuildConfig.DEBUG) return
 		Log.i(
 			TAG,
 			"kind=pip-evidence observedAt=$observedAtMillis " +
 				"audio=$mediaAudioStarted window=$youTubeWindowVisible " +
+				"pinned=$pinnedWindowPresent " +
 				"paired=${mediaAudioStarted && youTubeWindowVisible}",
 		)
 	}
