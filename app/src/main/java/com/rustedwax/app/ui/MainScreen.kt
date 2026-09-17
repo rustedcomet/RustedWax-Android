@@ -68,7 +68,10 @@ import com.rustedwax.app.R
 import com.rustedwax.app.scrobble.FinalizationRuntime
 import com.rustedwax.app.ui.snaps.DiscardSnapDialog
 import com.rustedwax.app.ui.snaps.SnapComposer
+import com.rustedwax.app.snaps.SnapMedia
 import com.rustedwax.app.ui.snaps.SnapComposerState
+import com.rustedwax.app.ui.snaps.SnapPostController
+import com.rustedwax.app.ui.snaps.SnapPostStatus
 import com.rustedwax.app.ui.snaps.SnapText
 import com.rustedwax.app.detect.ScrobbleBuilder
 import com.rustedwax.app.detect.SessionSnapshot
@@ -144,6 +147,7 @@ fun MainScreen(
 	 * the tab changes, and a half-typed Snap must survive that.
 	 */
 	snaps: SnapComposerState,
+	posts: SnapPostController,
 	tracksWithoutVideoId: Int,
 	queuedCount: Int,
 	youTubeAccount: YouTubeSessionVault.Session?,
@@ -356,7 +360,7 @@ fun MainScreen(
 						// Thumbnails ride the YouTube switch: they are a request
 						// to i.ytimg.com keyed to an already-identified video,
 						// which is part of the same pipeline that switch governs.
-						HistoryList(recent, mutedIds, youTubeScrobbling, snaps, onOpenVideo, onMute)
+						HistoryList(recent, mutedIds, youTubeScrobbling, snaps, posts, onOpenVideo, onMute)
 
 					Destination.NOT_LOGGED -> SkippedList(skipped, youTubeScrobbling, onOpenVideo)
 
@@ -1104,6 +1108,7 @@ private fun HistoryList(
 	mutedIds: Set<String>,
 	thumbnails: Boolean,
 	snaps: SnapComposerState,
+	posts: SnapPostController,
 	onOpenVideo: (String) -> Unit,
 	onMute: (FinalizationRuntime.ScrobbleRecord) -> Unit,
 ) {
@@ -1223,6 +1228,7 @@ private fun HistoryList(
 						record = r,
 						muted = id in mutedIds,
 						snaps = snaps,
+						posts = posts,
 						onMute = { onMute(r) },
 					)
 				}
@@ -1241,11 +1247,23 @@ private fun HistoryList(
  *
  * Nothing in here can post. Stage 1 draws the Post state and stops.
  */
+/** A short line under the composer explaining the last attempt. */
+@Composable
+private fun SnapNotice(message: String) {
+	Text(
+		message,
+		style = MaterialTheme.typography.bodySmall,
+		color = if (LocalWaxDark.current) Wax.AmberLight else Wax.Amber,
+		modifier = Modifier.padding(top = 6.dp),
+	)
+}
+
 @Composable
 private fun SnapActionRow(
 	record: FinalizationRuntime.ScrobbleRecord,
 	muted: Boolean,
 	snaps: SnapComposerState,
+	posts: SnapPostController,
 	onMute: () -> Unit,
 ) {
 	val key = snaps.key(record.eventId)
@@ -1257,9 +1275,11 @@ private fun SnapActionRow(
 	// it does not rely on that alone: tie it to the key and a reused slot
 	// cannot carry a live "Discard Snap?" onto a different event's draft.
 	var confirmDiscard by remember(key) { mutableStateOf(false) }
-	// Cleared whenever the composer is reopened, so last session's notice does
-	// not hang around under a fresh draft.
-	var postNotice by remember(key, open) { mutableStateOf(false) }
+	val status = posts.status(key)
+	// History membership is the eligibility gate. The Snap carries the row's
+	// verified video id and nothing else about the media — no title, no artist,
+	// no kind, and no re-judging of a row the engine already finalized.
+	val media = SnapMedia(videoId = record.videoId)
 
 	// Expands from the Snap area, downward, with a short fade — and entirely
 	// inside the card, which is why it is a child of the card's own column.
@@ -1277,16 +1297,42 @@ private fun SnapActionRow(
 					if (draft.isEmpty()) snaps.collapse() else confirmDiscard = true
 				},
 			)
-			if (postNotice) {
-				Text(
-					"Posting isn't built yet — this is the Stage 1 interface only. " +
-						"Your draft has been kept.",
-					style = MaterialTheme.typography.bodySmall,
-					color = if (LocalWaxDark.current) Wax.AmberLight else Wax.Amber,
-					modifier = Modifier.padding(top = 6.dp),
-				)
+			// Whatever the last attempt said. Failure and ambiguity read
+			// differently on purpose: one invites another go, the other explicitly
+			// does not.
+			when (val st = status) {
+				is SnapPostStatus.Failed -> SnapNotice(st.message)
+				is SnapPostStatus.Uncertain -> SnapNotice(st.message)
+				else -> Unit
 			}
 			Spacer(Modifier.height(8.dp))
+		}
+	}
+
+	// Posted. Per the spec this shows *only* what the user typed — the YouTube
+	// link and the hashtags RustedWax appends are real on chain, and deliberately
+	// not shown back here.
+	(status as? SnapPostStatus.Posted)?.let { posted ->
+		Column(modifier = Modifier.padding(bottom = 6.dp)) {
+			Row(verticalAlignment = Alignment.CenterVertically) {
+				Icon(
+					WaxIcons.SpeechBubble,
+					contentDescription = null,
+					tint = if (LocalWaxDark.current) Wax.AmberLight else Wax.Amber,
+					modifier = Modifier.size(13.dp),
+				)
+				Spacer(Modifier.width(5.dp))
+				Text(
+					"Snapped to Hive",
+					style = MaterialTheme.typography.labelMedium,
+					color = if (LocalWaxDark.current) Wax.AmberLight else Wax.Amber,
+				)
+			}
+			Text(
+				posted.contentId,
+				style = MaterialTheme.typography.labelSmall,
+				color = MaterialTheme.colorScheme.onSurfaceVariant,
+			)
 		}
 	}
 
@@ -1313,19 +1359,46 @@ private fun SnapActionRow(
 	}
 
 	Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-		if (open) {
-			WaxOutlinedButton(
-				onClick = { postNotice = true },
-				// Exists, looks like itself, and refuses an invalid draft the way
-				// it will when it can post — but it reaches nothing.
-				enabled = SnapText.isValid(draft),
+		when {
+			// One root Snap per History event. Once it is on chain this card
+			// stops offering to make another.
+			status is SnapPostStatus.Posted -> WaxOutlinedButton(
+				onClick = {},
+				enabled = false,
+				icon = WaxIcons.SpeechBubble,
+				modifier = Modifier.weight(1f),
+			) {
+				Text("Snapped")
+			}
+
+			// Unknown outcome. The only thing offered is another *read* — posting
+			// again could duplicate a comment that is already live.
+			status is SnapPostStatus.Uncertain -> WaxOutlinedButton(
+				onClick = { posts.recheck(key, record.eventId) },
 				icon = WaxIcons.Send,
 				modifier = Modifier.weight(1f),
 			) {
-				Text("Post")
+				Text("Check again")
 			}
-		} else {
-			WaxOutlinedButton(
+
+			open -> WaxOutlinedButton(
+				onClick = {
+					posts.post(key, record.eventId, media, draft) {
+						// The draft is only destroyed once Hive has confirmed the
+						// Snap — never optimistically.
+						snaps.discard(key)
+					}
+				},
+				// Locked while in flight, so a second tap cannot start a second
+				// broadcast.
+				enabled = SnapText.isValid(draft) && !posts.isBusy(key),
+				icon = WaxIcons.Send,
+				modifier = Modifier.weight(1f),
+			) {
+				Text(if (posts.isBusy(key)) "Posting…" else "Post")
+			}
+
+			else -> WaxOutlinedButton(
 				onClick = { snaps.open(key) },
 				selected = true,
 				icon = WaxIcons.SpeechBubble,

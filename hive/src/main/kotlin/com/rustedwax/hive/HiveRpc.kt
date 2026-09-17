@@ -127,6 +127,38 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 		}
 	}
 
+	/**
+	 * Posts authored by an account, via Hivemind's `bridge` API.
+	 *
+	 * `sort` matters more than it looks: the Snap containers RustedWax needs are
+	 * returned by **`posts`** and not by `blog`, which answers with an empty list
+	 * for `@peak.snaps`. Verified against the live chain on 2026-09-17.
+	 */
+	fun getAccountPosts(account: String, sort: String, limit: Int): List<JSONObject> {
+		val params = JSONObject()
+			.put("sort", sort)
+			.put("account", account)
+			.put("limit", limit)
+		val result = callObject("bridge.get_account_posts", params) as? JSONArray
+			?: throw RpcException("unexpected get_account_posts response")
+		return (0 until result.length()).mapNotNull { result.optJSONObject(it) }
+	}
+
+	/**
+	 * One comment or post by `author/permlink`, or null when the chain has none.
+	 *
+	 * This is the *content* half of Snap reconciliation. Transaction evidence
+	 * alone cannot clear an ambiguous Snap: a transaction that expired without
+	 * inclusion and a transaction that was never sent look identical, while the
+	 * comment either exists under that permlink or it does not. Hive returns a
+	 * populated object with an empty `author` for content it does not have.
+	 */
+	fun getContent(author: String, permlink: String): JSONObject? {
+		val params = JSONArray().put(author).put(permlink)
+		val result = call("condenser_api.get_content", params) as? JSONObject ?: return null
+		return result.takeIf { it.optString("author").isNotBlank() }
+	}
+
 	fun broadcast(
 		signedTx: JSONObject,
 		expectedTxId: String? = null,
@@ -361,7 +393,11 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 
 	// ── internals ──────────────────────────────────────────────────────
 
-	private fun call(method: String, params: JSONArray): Any? {
+	private fun callObject(method: String, params: JSONObject): Any? = callAny(method, params)
+
+	private fun call(method: String, params: JSONArray): Any? = callAny(method, params)
+
+	private fun callAny(method: String, params: Any): Any? {
 		var lastError: Exception? = null
 		for (node in nodes) {
 			try {
