@@ -53,6 +53,16 @@ fun WaxOutlinedButton(
 	enabled: Boolean = true,
 	selected: Boolean = false,
 	icon: ImageVector? = null,
+	/**
+	 * Holds the glyph at one colour while the label travels.
+	 *
+	 * Null keeps the original behaviour — icon and label are the same colour and
+	 * move together — which is what every caller outside the History action row
+	 * wants. Don't scrobble is the exception the mockup draws: a pink mark
+	 * against a plain label, so the destructive one is legible as itself without
+	 * being shouted in pink from end to end.
+	 */
+	iconTint: Color? = null,
 	content: @Composable RowScope.() -> Unit,
 ) {
 	val dark = LocalWaxDark.current
@@ -97,7 +107,11 @@ fun WaxOutlinedButton(
 		contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
 	) {
 		if (icon != null) {
-			Icon(icon, contentDescription = null, modifier = Modifier.size(17.dp))
+			if (iconTint != null && enabled) {
+				Icon(icon, contentDescription = null, tint = iconTint, modifier = Modifier.size(17.dp))
+			} else {
+				Icon(icon, contentDescription = null, modifier = Modifier.size(17.dp))
+			}
 			Spacer(Modifier.size(7.dp))
 		}
 		content()

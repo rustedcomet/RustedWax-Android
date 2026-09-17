@@ -218,6 +218,12 @@ class OfflineRecoveryReplayTest : ReplayScenarioTest() {
 		val entry = FinalizationRuntime.recent.value.first()
 		assertEquals(videoId, entry.videoId)
 		assertTrue("the drained entry did not record a transaction", entry.txId != null)
+		// One listen, one video, two rows — and the UI has to tell them apart.
+		// Every other field they share can repeat, so the row's own identity is
+		// the only thing that can carry a draft or an open dialog.
+		val ids = FinalizationRuntime.recent.value.map { it.eventId }
+		assertEquals("two History rows shared one identity", 2, ids.toSet().size)
+		assertTrue("a row was created without an identity", ids.none { it.isBlank() })
 		assertEquals(emptyList<ReplayHarness.Refusal>(), harness.refusals)
 	}
 

@@ -48,6 +48,7 @@ import com.rustedwax.app.enrich.VerifiedIdentityCandidateCache
 import com.rustedwax.app.enrich.WatchHistoryResolver
 import com.rustedwax.app.enrich.YouTubePageResolver
 import com.rustedwax.app.storage.YouTubeSessionVault
+import java.util.UUID
 
 /**
  * Turns finished tracks into on-chain scrobbles.
@@ -146,6 +147,19 @@ object FinalizationRuntime {
 		 * surface, so an entry that cannot prove this value is not a history row.
 		 */
 		val videoId: String,
+		/**
+		 * This row's own identity, opaque and minted once when the row is made.
+		 *
+		 * Nothing else here identifies a row. Video plus second collides: two
+		 * queued attempts on one video inside the same second produce rows that
+		 * are equal in every field, and `txId` is null for exactly those rows.
+		 * A UI keyed on a colliding value hands one row's state — an open
+		 * "Discard Snap?", a typed draft — to a different row.
+		 *
+		 * Deliberately has no default. A default would mint identity anywhere a
+		 * record is built, which is how a missing one stops being noticed.
+		 */
+		val eventId: String,
 	)
 
 	/**
@@ -2324,6 +2338,9 @@ object FinalizationRuntime {
 					txId = txId,
 					queued = queued,
 					videoId = linkedVideoId,
+					// Once, here, for this row. Every other field is shared with
+					// the listen and can repeat; this one cannot.
+					eventId = UUID.randomUUID().toString(),
 				),
 			) + _recent.value
 			).take(50)

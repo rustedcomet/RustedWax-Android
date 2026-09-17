@@ -41,6 +41,12 @@ import com.rustedwax.app.ui.LoadingScreen
 import com.rustedwax.app.ui.MainScreen
 import com.rustedwax.app.ui.RustedWaxWindow
 import com.rustedwax.app.ui.ThemeChoice
+import com.rustedwax.app.ui.snaps.SharedPreferencesSnapDraftStore
+import com.rustedwax.app.snaps.HiveSnapPort
+import com.rustedwax.app.snaps.SharedPreferencesPendingSnapStore
+import com.rustedwax.app.snaps.SnapPublisher
+import com.rustedwax.app.ui.snaps.SnapComposerState
+import com.rustedwax.app.ui.snaps.SnapPostController
 import com.rustedwax.app.ui.Thumbnails
 import com.rustedwax.app.ui.YouTubeSignInActivity
 
@@ -201,6 +207,36 @@ class MainActivity : ComponentActivity() {
 		// Handed in by the warm-up, which already paid for the Keystore unlock.
 		// Reading it again here would repeat that on the main thread.
 		var account by remember { mutableStateOf(startupAccount) }
+		// History Snap drafts and the one open composer. Held here rather than in
+		// History itself, which is destroyed and rebuilt on every tab change, and
+		// keyed by account so one Hive user never sees another's unsent text.
+		val snaps = remember {
+			SnapComposerState(
+				store = SharedPreferencesSnapDraftStore(applicationContext),
+				account = { account?.username },
+			)
+		}
+		// Root Snap publication. Deliberately assembled here and nowhere near the
+		// scrobble engine: this path shares the signing primitives and nothing
+		// else, and in particular never touches the broadcast queue.
+		val posts = remember {
+			val publisher = SnapPublisher(
+				// The key is read inside the port at signing time, so it is never
+				// held by the publisher and an account switch changes it.
+				hive = HiveSnapPort(loadKey = { vault.loadKey() }),
+				store = SharedPreferencesPendingSnapStore(applicationContext),
+			)
+			SnapPostController(
+				scope = lifecycleScope,
+				publisher = { publisher },
+				// Read late, at the moment of acting, so switching accounts with a
+				// composer open cannot act under the previous account's draft key.
+				account = { account?.username },
+			)
+		}
+		// Anything that was still in flight when the process last died gets
+		// settled against the chain on the way in. This reconciles; it never sends.
+		LaunchedEffect(account?.username) { posts.resumePending() }
 		var autoScrobble by remember { mutableStateOf(settings.autoScrobble) }
 		// Re-read on every poll: the session is written by the sign-in
 		// activity, and the refusal by the resolver on a background
@@ -303,6 +339,8 @@ class MainActivity : ComponentActivity() {
 			recent = recent,
 			skipped = skipped,
 			mutedIds = mutedIds,
+			snaps = snaps,
+			posts = posts,
 			tracksWithoutVideoId = quietBar,
 			queuedCount = queued,
 			youTubeAccount = youTubeAccount,
