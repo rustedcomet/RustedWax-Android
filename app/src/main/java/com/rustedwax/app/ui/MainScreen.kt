@@ -1,5 +1,11 @@
 package com.rustedwax.app.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -35,6 +41,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -59,6 +66,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.rustedwax.app.R
 import com.rustedwax.app.scrobble.FinalizationRuntime
+import com.rustedwax.app.ui.snaps.DiscardSnapDialog
+import com.rustedwax.app.ui.snaps.SnapComposer
+import com.rustedwax.app.ui.snaps.SnapComposerState
+import com.rustedwax.app.ui.snaps.SnapText
 import com.rustedwax.app.detect.ScrobbleBuilder
 import com.rustedwax.app.detect.SessionSnapshot
 import com.rustedwax.app.detect.NativeShortsObserver
@@ -126,6 +137,13 @@ fun MainScreen(
 	recent: List<FinalizationRuntime.ScrobbleRecord>,
 	skipped: List<FinalizationRuntime.SkipRecord>,
 	mutedIds: Set<String>,
+	/**
+	 * Open-composer and draft state for History Snaps.
+	 *
+	 * Owned above this screen because History is torn down and rebuilt every time
+	 * the tab changes, and a half-typed Snap must survive that.
+	 */
+	snaps: SnapComposerState,
 	tracksWithoutVideoId: Int,
 	queuedCount: Int,
 	youTubeAccount: YouTubeSessionVault.Session?,
@@ -338,7 +356,7 @@ fun MainScreen(
 						// Thumbnails ride the YouTube switch: they are a request
 						// to i.ytimg.com keyed to an already-identified video,
 						// which is part of the same pipeline that switch governs.
-						HistoryList(recent, mutedIds, youTubeScrobbling, onOpenVideo, onMute)
+						HistoryList(recent, mutedIds, youTubeScrobbling, snaps, onOpenVideo, onMute)
 
 					Destination.NOT_LOGGED -> SkippedList(skipped, youTubeScrobbling, onOpenVideo)
 
@@ -1085,9 +1103,26 @@ private fun HistoryList(
 	recent: List<FinalizationRuntime.ScrobbleRecord>,
 	mutedIds: Set<String>,
 	thumbnails: Boolean,
+	snaps: SnapComposerState,
 	onOpenVideo: (String) -> Unit,
 	onMute: (FinalizationRuntime.ScrobbleRecord) -> Unit,
 ) {
+	// An open composer belongs to History being on screen, not to the session.
+	//
+	// The draft and the *choice of which card is open* are held above the tab
+	// switch on purpose — that is what stops a half-typed Snap dying when you
+	// look at Settings. But the expansion is a view state, and nothing was
+	// telling it that History had gone away, so coming back re-drew the
+	// composer still open on top of a card you left minutes ago.
+	//
+	// Collapsing here ties it to the one thing it should follow: this list
+	// being composed. `collapse` flushes before it clears, so the draft is
+	// saved by leaving rather than lost by it, and the card comes back with its
+	// Draft mark, waiting for Snap. Above the empty-list return so that leaving
+	// an empty History collapses too.
+	DisposableEffect(Unit) {
+		onDispose { snaps.collapse() }
+	}
 	if (recent.isEmpty()) {
 		Text(
 			"No scrobbles yet.\n\nWith automatic scrobbling on, a track is " +
@@ -1139,7 +1174,18 @@ private fun HistoryList(
 			)
 		}
 		LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-			items(recent) { r ->
+			// Keyed by the row's own identity, because rows are *prepended*: a
+			// new scrobble lands at index 0 and shifts every existing row down
+			// one. Identified by position, Compose hands the composition that
+			// was showing row N — and whatever it remembers — to the different
+			// record that now sits at N. An open "Discard Snap?" would move to
+			// another card that way, and answering it would delete a draft the
+			// user never opened.
+			//
+			// `eventId` rather than video-plus-second: that pair can repeat
+			// across two queued attempts on one video inside a single second,
+			// and a duplicate key here is the same bug wearing a better name.
+			items(recent, key = { it.eventId }) { r ->
 				SettingCard {
 					VideoLink(r.videoId, thumbnails, onOpenVideo) { titleModifier ->
 						Text(
@@ -1173,20 +1219,152 @@ private fun HistoryList(
 					// it's clear this can't undo the entry above it — nothing can.
 					val id = r.videoId
 					Spacer(Modifier.height(6.dp))
-					if (id in mutedIds) {
-						Text(
-							"Muted — this video won't scrobble again",
-							style = MaterialTheme.typography.bodySmall,
-							color = MaterialTheme.colorScheme.primary,
-						)
-					} else {
-						WaxOutlinedButton(onClick = { onMute(r) }) {
-							Text("Never scrobble this again")
-						}
-					}
+					SnapActionRow(
+						record = r,
+						muted = id in mutedIds,
+						snaps = snaps,
+						onMute = { onMute(r) },
+					)
 				}
 			}
 		}
+	}
+}
+
+/**
+ * The bottom of a History card: the composer when it is open, then the actions.
+ *
+ * Both halves of the row are additions *around* the existing mute control, not a
+ * change to it. Don't scrobble is the same one-way call on the same record with
+ * the same wording once taken — only its label and its icon are new, because the
+ * mockup needs room for a second action beside it.
+ *
+ * Nothing in here can post. Stage 1 draws the Post state and stops.
+ */
+@Composable
+private fun SnapActionRow(
+	record: FinalizationRuntime.ScrobbleRecord,
+	muted: Boolean,
+	snaps: SnapComposerState,
+	onMute: () -> Unit,
+) {
+	val key = snaps.key(record.eventId)
+	val open = snaps.isExpanded(key)
+	val draft = snaps.draft(key)
+	// Bound to the draft it is asking about, the same as [postNotice] below.
+	// The list key above already stops a composition being handed to another
+	// record, but this dialog is the one control that destroys typed text, so
+	// it does not rely on that alone: tie it to the key and a reused slot
+	// cannot carry a live "Discard Snap?" onto a different event's draft.
+	var confirmDiscard by remember(key) { mutableStateOf(false) }
+	// Cleared whenever the composer is reopened, so last session's notice does
+	// not hang around under a fresh draft.
+	var postNotice by remember(key, open) { mutableStateOf(false) }
+
+	// Expands from the Snap area, downward, with a short fade — and entirely
+	// inside the card, which is why it is a child of the card's own column.
+	AnimatedVisibility(
+		visible = open,
+		enter = fadeIn(tween(140)) + expandVertically(tween(180)),
+		exit = fadeOut(tween(110)) + shrinkVertically(tween(150)),
+	) {
+		Column {
+			SnapComposer(
+				text = draft,
+				onTextChange = { snaps.edit(key, it) },
+				onClose = {
+					// Empty closes at once; anything typed gets asked about.
+					if (draft.isEmpty()) snaps.collapse() else confirmDiscard = true
+				},
+			)
+			if (postNotice) {
+				Text(
+					"Posting isn't built yet — this is the Stage 1 interface only. " +
+						"Your draft has been kept.",
+					style = MaterialTheme.typography.bodySmall,
+					color = if (LocalWaxDark.current) Wax.AmberLight else Wax.Amber,
+					modifier = Modifier.padding(top = 6.dp),
+				)
+			}
+			Spacer(Modifier.height(8.dp))
+		}
+	}
+
+	// The subtle mark on a collapsed card that still holds typed text. Deliberately
+	// quiet: it is a reminder, not a call to action.
+	if (!open && draft.isNotEmpty()) {
+		Row(
+			verticalAlignment = Alignment.CenterVertically,
+			modifier = Modifier.padding(bottom = 6.dp),
+		) {
+			Icon(
+				WaxIcons.SpeechBubble,
+				contentDescription = null,
+				tint = MaterialTheme.colorScheme.onSurfaceVariant,
+				modifier = Modifier.size(13.dp),
+			)
+			Spacer(Modifier.width(5.dp))
+			Text(
+				"Draft",
+				style = MaterialTheme.typography.labelMedium,
+				color = MaterialTheme.colorScheme.onSurfaceVariant,
+			)
+		}
+	}
+
+	Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+		if (open) {
+			WaxOutlinedButton(
+				onClick = { postNotice = true },
+				// Exists, looks like itself, and refuses an invalid draft the way
+				// it will when it can post — but it reaches nothing.
+				enabled = SnapText.isValid(draft),
+				icon = WaxIcons.Send,
+				modifier = Modifier.weight(1f),
+			) {
+				Text("Post")
+			}
+		} else {
+			WaxOutlinedButton(
+				onClick = { snaps.open(key) },
+				selected = true,
+				icon = WaxIcons.SpeechBubble,
+				modifier = Modifier.weight(1f),
+			) {
+				Text("Snap")
+			}
+		}
+
+		if (muted) {
+			// Unchanged from before Snaps: the same sentence, in the same place
+			// in the flow, once the video has been muted.
+			Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+				Text(
+					"Muted — this video won't scrobble again",
+					style = MaterialTheme.typography.bodySmall,
+					color = MaterialTheme.colorScheme.primary,
+				)
+			}
+		} else {
+			WaxOutlinedButton(
+				onClick = onMute,
+				icon = WaxIcons.Blocked,
+				iconTint = MaterialTheme.colorScheme.primary,
+				modifier = Modifier.weight(1f),
+			) {
+				Text("Don't scrobble")
+			}
+		}
+	}
+
+	if (confirmDiscard) {
+		DiscardSnapDialog(
+			onKeepEditing = { confirmDiscard = false },
+			onDiscard = {
+				confirmDiscard = false
+				snaps.discard(key)
+			},
+		)
 	}
 }
 

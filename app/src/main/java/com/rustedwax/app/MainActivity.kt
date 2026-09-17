@@ -41,6 +41,8 @@ import com.rustedwax.app.ui.LoadingScreen
 import com.rustedwax.app.ui.MainScreen
 import com.rustedwax.app.ui.RustedWaxWindow
 import com.rustedwax.app.ui.ThemeChoice
+import com.rustedwax.app.ui.snaps.SharedPreferencesSnapDraftStore
+import com.rustedwax.app.ui.snaps.SnapComposerState
 import com.rustedwax.app.ui.Thumbnails
 import com.rustedwax.app.ui.YouTubeSignInActivity
 
@@ -201,6 +203,15 @@ class MainActivity : ComponentActivity() {
 		// Handed in by the warm-up, which already paid for the Keystore unlock.
 		// Reading it again here would repeat that on the main thread.
 		var account by remember { mutableStateOf(startupAccount) }
+		// History Snap drafts and the one open composer. Held here rather than in
+		// History itself, which is destroyed and rebuilt on every tab change, and
+		// keyed by account so one Hive user never sees another's unsent text.
+		val snaps = remember {
+			SnapComposerState(
+				store = SharedPreferencesSnapDraftStore(applicationContext),
+				account = { account?.username },
+			)
+		}
 		var autoScrobble by remember { mutableStateOf(settings.autoScrobble) }
 		// Re-read on every poll: the session is written by the sign-in
 		// activity, and the refusal by the resolver on a background
@@ -303,6 +314,7 @@ class MainActivity : ComponentActivity() {
 			recent = recent,
 			skipped = skipped,
 			mutedIds = mutedIds,
+			snaps = snaps,
 			tracksWithoutVideoId = quietBar,
 			queuedCount = queued,
 			youTubeAccount = youTubeAccount,

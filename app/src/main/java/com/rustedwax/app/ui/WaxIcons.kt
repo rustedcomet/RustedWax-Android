@@ -149,6 +149,40 @@ object WaxIcons {
 		fills = listOf("M12 15.1a1.2 1.2 0 1 0 0 2.4 1.2 1.2 0 0 0 0-2.4z"),
 	)
 
+	/** Snap: the speech bubble from the Snaps mockup. Not a globe. */
+	val SpeechBubble = stroked(
+		"M12 4.8a7.0 6.0 0 1 0 0 12.0 7.0 6.0 0 0 0 0-12.0z",
+		"M9.8 16.5 8.0 19.3 11.8 16.7",
+	)
+
+	/** Don't scrobble: the same circle-slash the mockup puts beside Snap. */
+	val Blocked = stroked(
+		"M12 3.8a8.2 8.2 0 1 0 0 16.4 8.2 8.2 0 0 0 0-16.4z",
+		"M6.2 6.2 17.8 17.8",
+	)
+
+	/** Post: a Snap on its way out. */
+	val Send = stroked(
+		"M20.6 3.4 2.9 10.6l7.4 3.1 3.1 7.4z",
+		"M20.6 3.4 10.3 13.7",
+	)
+
+	/** Close the composer. Small, borderless, and the only way out of it. */
+	val Close = stroked(
+		"M6.6 6.6 17.4 17.4",
+		"M17.4 6.6 6.6 17.4",
+	)
+
+	/** The quick-emoji strip's handle. */
+	val EmojiFace = stroked(
+		"M12 3.8a8.2 8.2 0 1 0 0 16.4 8.2 8.2 0 0 0 0-16.4z",
+		"M8.2 13.4a4.6 4.6 0 0 0 7.6 0",
+		fills = listOf(
+			"M9.3 9.2a1.05 1.05 0 1 0 0 2.1 1.05 1.05 0 0 0 0-2.1z",
+			"M14.7 9.2a1.05 1.05 0 1 0 0 2.1 1.05 1.05 0 0 0 0-2.1z",
+		),
+	)
+
 	/**
 	 * Builds a 24dp icon from SVG path data.
 	 *

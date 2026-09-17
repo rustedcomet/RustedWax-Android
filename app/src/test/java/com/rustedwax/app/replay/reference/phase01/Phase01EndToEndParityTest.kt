@@ -93,6 +93,10 @@ class Phase01EndToEndParityTest : ReplayScenarioTest() {
 		.replace(Regex("\\d{2}:\\d{2}:\\d{2}\\.\\d{3}"), "<t>")
 		.replace(Regex("start(ed)?=\\d+"), "start=<n>")
 		.replace(Regex("\\b17\\d{8}\\b"), "<epoch>")
+		// A History row's eventId is minted per row, so it differs between any two
+		// runs by design — the same reason atEpochSec is erased above. Parity is
+		// about what the row claims about the world, not which row object it was.
+		.replace(Regex("eventId=[0-9a-fA-F-]{36}"), "eventId=<id>")
 
 	private fun outcomeOf(outcome: FinalizationOutcome): String = when (outcome) {
 		is FinalizationOutcome.Ignored -> "Ignored(${outcome.reason})"
