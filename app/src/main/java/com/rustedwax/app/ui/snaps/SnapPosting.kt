@@ -2,6 +2,8 @@ package com.rustedwax.app.ui.snaps
 
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.mutableStateMapOf
+import com.rustedwax.app.snaps.PostedSnap
+import com.rustedwax.app.snaps.PostedSnaps
 import com.rustedwax.app.snaps.SnapMedia
 import com.rustedwax.app.snaps.SnapPublisher
 import kotlinx.coroutines.CoroutineDispatcher
@@ -54,11 +56,29 @@ class SnapPostController(
 	private val publisher: () -> SnapPublisher?,
 	private val account: () -> String?,
 	private val io: CoroutineDispatcher = Dispatchers.IO,
+	/**
+	 * Read-only view of what has already been posted, for the card's posted
+	 * state. Null-tolerant: without it the card still knows a Snap is on chain
+	 * from its status, it just has no words to show.
+	 */
+	private val postedSnaps: () -> PostedSnaps? = { null },
 ) {
 
 	private val statuses = mutableStateMapOf<String, SnapPostStatus>()
 
+	/**
+	 * The posted card's content, keyed exactly as [statuses] is.
+	 *
+	 * Keyed by draft key rather than by event means the account is part of the
+	 * key, so one Hive user's posted Snap cannot be read out under another's —
+	 * the same isolation drafts and statuses already have, for the same reason.
+	 */
+	private val posted = mutableStateMapOf<String, PostedSnap>()
+
 	fun status(key: String): SnapPostStatus = statuses[key] ?: SnapPostStatus.Idle
+
+	/** What this card's posted Snap says, once there is one to show. */
+	fun posted(key: String): PostedSnap? = posted[key]
 
 	/** True while this card must not accept another Post tap. */
 	fun isBusy(key: String): Boolean = statuses[key] == SnapPostStatus.Posting
@@ -82,7 +102,10 @@ class SnapPostController(
 				}
 			}
 			statuses[key] = outcome.toStatus()
-			if (outcome is SnapPublisher.Outcome.Published) onPublished(outcome.contentId)
+			if (outcome is SnapPublisher.Outcome.Published) {
+				onPublished(outcome.contentId)
+				capturePosted(key, eventId)
+			}
 		}
 	}
 
@@ -106,6 +129,7 @@ class SnapPostController(
 				}
 			}
 			statuses[key] = outcome.toStatus()
+			if (outcome is SnapPublisher.Outcome.Published) capturePosted(key, eventId)
 		}
 	}
 
@@ -148,6 +172,45 @@ class SnapPostController(
 			resolved.forEach { (eventId, outcome) ->
 				statuses[SnapDraftKey.of(who, eventId)] = outcome.toStatus()
 			}
+			// Second pass, and only over what came back published: restoring the
+			// *state* is the publisher's job above, and restoring what the card
+			// *says* is this one. Reads only — see [capturePosted].
+			resolved.forEach { (eventId, outcome) ->
+				if (outcome is SnapPublisher.Outcome.Published) {
+					capturePosted(SnapDraftKey.of(who, eventId), eventId)
+				}
+			}
+		}
+	}
+
+	/**
+	 * Fill in a posted card, locally first and then from the chain.
+	 *
+	 * Two steps on purpose. The local record already holds everything the card
+	 * needs, so the Snap appears the moment it is confirmed rather than after a
+	 * round trip — and a device with no signal shows the same card, permanently,
+	 * rather than an empty space waiting for a refresh that will not come. The
+	 * chain read that follows can only *improve* it: the canonical body and the
+	 * real creation time, and on any failure the local version simply stays.
+	 *
+	 * Nothing here writes. [PostedSnaps] holds a reader and a store it only
+	 * reads from, so no path through this function can mint a permlink, send a
+	 * transaction, or move a Snap's stored state — recovery of the display is
+	 * not recovery of the write.
+	 */
+	private suspend fun capturePosted(key: String, eventId: String) {
+		val who = account()?.takeIf { it.isNotBlank() } ?: return
+		// The same ownership rule the write path uses, for the same reason: this
+		// writes into a map the card reads by key, and filling another account's
+		// key would put one user's words on another user's screen.
+		if (key != SnapDraftKey.of(who, eventId)) return
+		val source = postedSnaps() ?: return
+
+		withContext(io) { source.local(who, eventId) }?.let {
+			if (account() == who) posted[key] = it
+		}
+		withContext(io) { runCatching { source.refreshed(who, eventId) }.getOrNull() }?.let {
+			if (account() == who) posted[key] = it
 		}
 	}
 
