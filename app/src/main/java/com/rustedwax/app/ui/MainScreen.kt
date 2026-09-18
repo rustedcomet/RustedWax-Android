@@ -67,6 +67,7 @@ import androidx.compose.ui.unit.sp
 import com.rustedwax.app.R
 import com.rustedwax.app.scrobble.FinalizationRuntime
 import com.rustedwax.app.ui.snaps.DiscardSnapDialog
+import com.rustedwax.app.ui.snaps.PostedSnapCard
 import com.rustedwax.app.ui.snaps.SnapComposer
 import com.rustedwax.app.snaps.SnapMedia
 import com.rustedwax.app.ui.snaps.SnapComposerState
@@ -1309,31 +1310,23 @@ private fun SnapActionRow(
 		}
 	}
 
-	// Posted. Per the spec this shows *only* what the user typed — the YouTube
-	// link and the hashtags RustedWax appends are real on chain, and deliberately
-	// not shown back here.
-	(status as? SnapPostStatus.Posted)?.let { posted ->
-		Column(modifier = Modifier.padding(bottom = 6.dp)) {
-			Row(verticalAlignment = Alignment.CenterVertically) {
-				Icon(
-					WaxIcons.SpeechBubble,
-					contentDescription = null,
-					tint = if (LocalWaxDark.current) Wax.AmberLight else Wax.Amber,
-					modifier = Modifier.size(13.dp),
-				)
-				Spacer(Modifier.width(5.dp))
-				Text(
-					"Snapped to Hive",
-					style = MaterialTheme.typography.labelMedium,
-					color = if (LocalWaxDark.current) Wax.AmberLight else Wax.Amber,
-				)
-			}
-			Text(
-				posted.contentId,
-				style = MaterialTheme.typography.labelSmall,
-				color = MaterialTheme.colorScheme.onSurfaceVariant,
-			)
-		}
+	// Posted. The real Snap, as it exists on Hive: avatar, handle, age, and only
+	// what the user typed. The YouTube link and the hashtags RustedWax appends
+	// are genuinely on chain and deliberately not shown back.
+	//
+	// Drawn only when there is a Snap that has been checked against the account
+	// signed in now. A confirmed row RustedWax cannot vouch for — a stored author
+	// that is not this account, a body that is not a v1 Snap body — shows no card
+	// at all rather than a handle and words it cannot stand behind. The Thread
+	// state below still says the row has been Snapped.
+	(status as? SnapPostStatus.Posted)?.let { posts.posted(key) }?.let { published ->
+		PostedSnapCard(
+			posted = published,
+			// Read in composition rather than driven by a timer of its own. This
+			// list already recomposes about once a second, which is far finer
+			// than the coarsest thing the age can say.
+			nowEpochSec = System.currentTimeMillis() / 1000,
+		)
 	}
 
 	// The subtle mark on a collapsed card that still holds typed text. Deliberately
@@ -1360,15 +1353,21 @@ private fun SnapActionRow(
 
 	Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
 		when {
-			// One root Snap per History event. Once it is on chain this card
-			// stops offering to make another.
+			// One root Snap per History event. Once it is on chain the action
+			// stops being Snap and becomes the thread that Snap started.
+			//
+			// Inert in Stage 3, and drawn as state rather than as an invitation.
+			// Opening a thread means replies, reply composition and a screen to
+			// show them on — Stage 4's architecture, none of which exists yet —
+			// and a control that looked live and did nothing would be a worse
+			// answer than one that plainly shows where the card has got to.
 			status is SnapPostStatus.Posted -> WaxOutlinedButton(
 				onClick = {},
 				enabled = false,
 				icon = WaxIcons.SpeechBubble,
 				modifier = Modifier.weight(1f),
 			) {
-				Text("Snapped")
+				Text("Thread")
 			}
 
 			// Unknown outcome. The only thing offered is another *read* — posting

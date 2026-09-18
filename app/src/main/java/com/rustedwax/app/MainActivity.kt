@@ -42,7 +42,9 @@ import com.rustedwax.app.ui.MainScreen
 import com.rustedwax.app.ui.RustedWaxWindow
 import com.rustedwax.app.ui.ThemeChoice
 import com.rustedwax.app.ui.snaps.SharedPreferencesSnapDraftStore
+import com.rustedwax.app.snaps.HivePostedSnapReader
 import com.rustedwax.app.snaps.HiveSnapPort
+import com.rustedwax.app.snaps.PostedSnaps
 import com.rustedwax.app.snaps.SharedPreferencesPendingSnapStore
 import com.rustedwax.app.snaps.SnapPublisher
 import com.rustedwax.app.ui.snaps.SnapComposerState
@@ -220,11 +222,14 @@ class MainActivity : ComponentActivity() {
 		// scrobble engine: this path shares the signing primitives and nothing
 		// else, and in particular never touches the broadcast queue.
 		val posts = remember {
+			// One store, shared by the two halves that need it: the publisher,
+			// which writes it, and the posted-Snap view, which only ever reads it.
+			val pendingSnaps = SharedPreferencesPendingSnapStore(applicationContext)
 			val publisher = SnapPublisher(
 				// The key is read inside the port at signing time, so it is never
 				// held by the publisher and an account switch changes it.
 				hive = HiveSnapPort(loadKey = { vault.loadKey() }),
-				store = SharedPreferencesPendingSnapStore(applicationContext),
+				store = pendingSnaps,
 			)
 			SnapPostController(
 				scope = lifecycleScope,
@@ -232,6 +237,12 @@ class MainActivity : ComponentActivity() {
 				// Read late, at the moment of acting, so switching accounts with a
 				// composer open cannot act under the previous account's draft key.
 				account = { account?.username },
+				// What a confirmed card shows. Built from a store read and a chain
+				// *read* — there is no key and no broadcaster behind it, so no
+				// posted card can ever cause a second publication.
+				postedSnaps = {
+					PostedSnaps(store = pendingSnaps, reader = HivePostedSnapReader())
+				},
 			)
 		}
 		// Anything that was still in flight when the process last died gets

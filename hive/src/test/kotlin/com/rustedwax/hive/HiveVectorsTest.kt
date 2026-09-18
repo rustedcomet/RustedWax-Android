@@ -159,6 +159,43 @@ class HiveVectorsTest {
 		assertTrue(payload.toJson().contains("\"app\":\"rustedwax/"))
 	}
 
+	/**
+	 * The app version that goes on chain is a real version, not Gradle's default.
+	 *
+	 * Every other assertion in this suite reads [HiveScrobblePayload.APP_NAME]
+	 * symbolically, which is correct — the version must stay dynamic — but it
+	 * means they all pass whatever it happens to contain. They did: for a while
+	 * `BUILD_VERSION` was generated as `unspecified`, because
+	 * `hive/build.gradle.kts` read `project.version` at execution time, which the
+	 * configuration cache does not support. Scrobbles and Snap metadata went to
+	 * Hive announcing `"app":"rustedwax/unspecified"`, permanently and publicly,
+	 * and the whole suite stayed green.
+	 *
+	 * This is the one assertion that looks at the value itself. It deliberately
+	 * does **not** name a version: pinning `0.11.4` here would have to be edited
+	 * on every release and would turn a real invariant into a chore, and the
+	 * version has exactly one authority — `allprojects { version = … }` in the
+	 * root build script, which reaches this constant through the generated
+	 * `BUILD_VERSION`. What is asserted is only that the generation *worked*.
+	 */
+	@Test
+	fun `the generated build version is a real version, not Gradle's default`() {
+		assertTrue("BUILD_VERSION is blank — version generation produced nothing", BUILD_VERSION.isNotBlank())
+		assertFalse(
+			"BUILD_VERSION is Gradle's default: `project.version` was not read at " +
+				"configuration time, so every Hive payload would claim to come from " +
+				"`rustedwax/unspecified`",
+			BUILD_VERSION == "unspecified",
+		)
+		assertTrue(
+			"BUILD_VERSION `$BUILD_VERSION` has no digit in it, so it is not a version",
+			BUILD_VERSION.any { it.isDigit() },
+		)
+		// And the constant the payloads actually carry is still composed from it,
+		// so the check above cannot be satisfied by a value nothing uses.
+		assertEquals("rustedwax/$BUILD_VERSION", HiveScrobblePayload.APP_NAME)
+	}
+
 	@Test
 	fun `does not escape forward slashes like JSON stringify does not`() {
 		val json = HiveScrobblePayload(
