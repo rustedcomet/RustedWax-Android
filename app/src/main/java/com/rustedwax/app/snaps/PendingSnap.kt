@@ -117,6 +117,16 @@ data class PendingSnap(
 		const val KIND_ROOT_SNAP = "root_snap"
 
 		/**
+		 * A reply comment, parented on another comment rather than on the Snap
+		 * container.
+		 *
+		 * Stored in a store of its own rather than beside root Snaps — see
+		 * [SharedPreferencesPendingSnapStore] — so this string is a label on the
+		 * record and never the thing that keeps the two apart.
+		 */
+		const val KIND_REPLY = "reply"
+
+		/**
 		 * Parse a stored record, or null if it is unreadable.
 		 *
 		 * Fails to null rather than throwing: a record this code cannot read is
@@ -163,18 +173,29 @@ data class PendingSnap(
  */
 object SnapPermlink {
 
-	private const val PREFIX = "rustedwax-snap"
+	const val SNAP_PREFIX = "rustedwax-snap"
+
+	/**
+	 * Replies get their own prefix.
+	 *
+	 * Cosmetic on the chain and useful everywhere else: a permlink in a log, a
+	 * store key or a block explorer says which of the two write paths produced
+	 * it without anyone having to look up the record it came from.
+	 */
+	const val REPLY_PREFIX = "rustedwax-reply"
+
 	private const val SUFFIX_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
 	private const val SUFFIX_LENGTH = 6
 
 	fun generate(
 		nowEpochSec: Long,
 		random: java.util.Random = SecureRandom(),
+		prefix: String = SNAP_PREFIX,
 	): String {
 		val suffix = (1..SUFFIX_LENGTH)
 			.map { SUFFIX_CHARS[random.nextInt(SUFFIX_CHARS.length)] }
 			.joinToString("")
-		return "$PREFIX-$nowEpochSec-$suffix"
+		return "$prefix-$nowEpochSec-$suffix"
 	}
 }
 
@@ -217,13 +238,35 @@ internal object PendingSnapIntegrity {
 		return locked
 	}
 
-	/** Records whose identity matches their key exactly. Everything else is locked. */
-	fun valid(account: String, entries: Map<String, String>): List<PendingSnap> =
-		entries.mapNotNull { (keyEventId, raw) ->
+	/**
+	 * Records that are safe to enumerate: identity matching their own key, **and
+	 * an event nothing else has implicated**.
+	 *
+	 * The second half is the part that is easy to miss. Agreeing with your own
+	 * key is not enough, because a row is locked by what *other* rows say about
+	 * it: a damaged entry filed under A that claims B locks B as well, and the
+	 * well-formed record genuinely stored under B is, on its own, perfectly
+	 * self-consistent. Judging it alone would let it through.
+	 *
+	 * It must not get through, for the same reason [lockedEventIds] locks it.
+	 * When two entries both claim event B, RustedWax does not know which of them
+	 * describes the comment that may already be on chain — and a caller handed
+	 * the tidy-looking one would act on a record it cannot prove belongs to that
+	 * event. So the answer is the same one [PendingSnapStore.read] gives for B:
+	 * nothing usable.
+	 *
+	 * Computed against the whole map before anything is returned, so which entry
+	 * the iteration happens to reach first cannot change the outcome.
+	 */
+	fun valid(account: String, entries: Map<String, String>): List<PendingSnap> {
+		val locked = lockedEventIds(account, entries)
+		return entries.mapNotNull { (keyEventId, raw) ->
+			if (keyEventId in locked) return@mapNotNull null
 			PendingSnap.fromJson(raw)?.takeIf {
 				it.account == account && it.eventId == keyEventId
 			}
 		}
+	}
 }
 
 /**
@@ -249,19 +292,39 @@ interface PendingSnapStore {
 
 	fun clear(account: String, eventId: String)
 
-	/** Every readable record for one account, plus the event ids that are corrupt. */
+	/**
+	 * Every record for this account that [read] would hand back as `Present`.
+	 *
+	 * The two must agree. An event [read] refuses to answer — because some other
+	 * stored row also claims it — is an event this list leaves out, so no caller
+	 * can enumerate its way past a lock that a direct read would have enforced.
+	 * The implicated ids are still reportable through [corruptEventIds]; they are
+	 * simply never handed over as usable records.
+	 */
 	fun all(account: String): List<PendingSnap>
 
 	/** Rows whose stored state could not be parsed. These are locked, not retried. */
 	fun corruptEventIds(account: String): Set<String>
 }
 
+/**
+ * @param prefsName which preference file this store owns.
+ *
+ * Root Snaps and replies get **separate files**, and the separation is the
+ * point rather than a tidiness preference. Both are keyed by `account|eventId`,
+ * and [PendingSnapIntegrity] locks an entire account's rows when any one record
+ * disagrees with the key it is filed under — so a single file would let one
+ * unreadable reply record lock a root Snap that has nothing to do with it, and
+ * `restore` on either path would walk the other's records. Two files, one shape,
+ * no shared blast radius.
+ */
 internal class SharedPreferencesPendingSnapStore(
 	context: Context,
+	prefsName: String = ROOT_SNAPS,
 ) : PendingSnapStore {
 
 	private val prefs: SharedPreferences =
-		context.getSharedPreferences("rustedwax_pending_snaps", Context.MODE_PRIVATE)
+		context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
 
 	override fun read(account: String, eventId: String): PendingSnapRead {
 		// Checked first, and across the whole account rather than just this key:
@@ -323,4 +386,9 @@ internal class SharedPreferencesPendingSnapStore(
 	}
 
 	private fun key(account: String, eventId: String) = "$account|$eventId"
+
+	companion object {
+		const val ROOT_SNAPS = "rustedwax_pending_snaps"
+		const val REPLIES = "rustedwax_pending_snap_replies"
+	}
 }

@@ -166,20 +166,62 @@ class SnapPostController(
 	fun resumePending() {
 		scope.launch {
 			val who = account()?.takeIf { it.isNotBlank() } ?: return@launch
+
+			// ── Phase one: what is already proven, from disk, before a single
+			// byte of network. ────────────────────────────────────────────────
+			//
+			// This is what stops a reopened app looking like it has forgotten
+			// what it published. Everything a posted card needs — author,
+			// permlink, body, time — is already in the pending store, proven and
+			// durable, so none of it has any business waiting on Hive.
+			//
+			// It is a *separate* enumeration from the reconciling one on purpose.
+			// `restore` decides confirmed and unresolved rows in one pass, and it
+			// reads the chain to do it, so one row whose outcome is genuinely
+			// unknown — a node that hangs, a device with no signal — used to hold
+			// back every row whose outcome was never in doubt. A Snap known to be
+			// on chain must not sit blank behind a different Snap's uncertainty.
+			//
+			// Nothing here asserts anything the disk does not already say:
+			// `restoreLocal` returns confirmed rows only, and makes no RPC and no
+			// write of its own.
+			val confirmed = withContext(io) { publisher()?.restoreLocal(who).orEmpty() }
+			// Re-check the account: it can change while a restore is running.
+			if (account() != who) return@launch
+			confirmed.forEach { (eventId, outcome) ->
+				statuses[SnapDraftKey.of(who, eventId)] = outcome.toStatus()
+			}
+			confirmed.forEach { (eventId, _) ->
+				captureLocal(SnapDraftKey.of(who, eventId), eventId)
+			}
+
+			// ── Phase two: reconciliation, exactly as before. ─────────────────
+			//
+			// Unchanged behaviour, and still the only thing that decides an
+			// unresolved row. It may now take as long as it takes.
 			val resolved = withContext(io) { publisher()?.restore(who).orEmpty() }
-			// Re-check the account: it can change while the restore is running.
 			if (account() != who) return@launch
 			resolved.forEach { (eventId, outcome) ->
 				statuses[SnapDraftKey.of(who, eventId)] = outcome.toStatus()
 			}
-			// Second pass, and only over what came back published: restoring the
-			// *state* is the publisher's job above, and restoring what the card
-			// *says* is this one. Reads only — see [capturePosted].
-			resolved.forEach { (eventId, outcome) ->
-				if (outcome is SnapPublisher.Outcome.Published) {
-					capturePosted(SnapDraftKey.of(who, eventId), eventId)
+
+			// The chain refresh, each row on its own coroutine so one slow or
+			// failing lookup delays nobody else. Order is irrelevant here — the
+			// rows phase one drew are already on screen, and a read can only
+			// improve one.
+			val drawn = confirmed.mapTo(mutableSetOf()) { it.first }
+			resolved.asSequence()
+				.filter { it.second is SnapPublisher.Outcome.Published }
+				.forEach { (eventId, _) ->
+					val key = SnapDraftKey.of(who, eventId)
+					scope.launch {
+						// A row phase one could not draw — reconciliation has only
+						// just proved it — still gets its local read first, so it
+						// survives a chain read that fails.
+						if (eventId !in drawn) captureLocal(key, eventId)
+						refreshPosted(key, eventId)
+					}
 				}
-			}
 		}
 	}
 
@@ -199,16 +241,40 @@ class SnapPostController(
 	 * not recovery of the write.
 	 */
 	private suspend fun capturePosted(key: String, eventId: String) {
+		captureLocal(key, eventId)
+		refreshPosted(key, eventId)
+	}
+
+	/**
+	 * Draw this card from the stored record alone. Disk only — never the chain.
+	 *
+	 * The record is already proven: `CONFIRMED` means the comment is on Hive and
+	 * the body beside it is the body that went there. Rendering it costs a
+	 * preference read, and nothing about it can be improved by waiting.
+	 */
+	private suspend fun captureLocal(key: String, eventId: String) {
 		val who = account()?.takeIf { it.isNotBlank() } ?: return
 		// The same ownership rule the write path uses, for the same reason: this
 		// writes into a map the card reads by key, and filling another account's
 		// key would put one user's words on another user's screen.
 		if (key != SnapDraftKey.of(who, eventId)) return
 		val source = postedSnaps() ?: return
-
 		withContext(io) { source.local(who, eventId) }?.let {
 			if (account() == who) posted[key] = it
 		}
+	}
+
+	/**
+	 * Improve an already-drawn card with what the chain says.
+	 *
+	 * Strictly an upgrade: the canonical body and the real creation time. On any
+	 * failure the locally drawn card simply stays, which is why this may run
+	 * late, concurrently, or not at all without costing the user anything.
+	 */
+	private suspend fun refreshPosted(key: String, eventId: String) {
+		val who = account()?.takeIf { it.isNotBlank() } ?: return
+		if (key != SnapDraftKey.of(who, eventId)) return
+		val source = postedSnaps() ?: return
 		withContext(io) { runCatching { source.refreshed(who, eventId) }.getOrNull() }?.let {
 			if (account() == who) posted[key] = it
 		}

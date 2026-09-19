@@ -73,6 +73,10 @@ import com.rustedwax.app.snaps.SnapMedia
 import com.rustedwax.app.ui.snaps.SnapComposerState
 import com.rustedwax.app.ui.snaps.SnapPostController
 import com.rustedwax.app.ui.snaps.SnapPostStatus
+import com.rustedwax.app.ui.snaps.SnapThreadController
+import com.rustedwax.app.ui.snaps.SnapThreadPreviewStrip
+import com.rustedwax.app.ui.snaps.SnapThreadSheet
+import com.rustedwax.app.snaps.SnapReplyTarget
 import com.rustedwax.app.ui.snaps.SnapText
 import com.rustedwax.app.detect.ScrobbleBuilder
 import com.rustedwax.app.detect.SessionSnapshot
@@ -149,6 +153,8 @@ fun MainScreen(
 	 */
 	snaps: SnapComposerState,
 	posts: SnapPostController,
+	/** Reply threads: reading them, drafting replies, and publishing them. */
+	threads: SnapThreadController,
 	tracksWithoutVideoId: Int,
 	queuedCount: Int,
 	youTubeAccount: YouTubeSessionVault.Session?,
@@ -361,7 +367,16 @@ fun MainScreen(
 						// Thumbnails ride the YouTube switch: they are a request
 						// to i.ytimg.com keyed to an already-identified video,
 						// which is part of the same pipeline that switch governs.
-						HistoryList(recent, mutedIds, youTubeScrobbling, snaps, posts, onOpenVideo, onMute)
+						HistoryList(
+							recent,
+							mutedIds,
+							youTubeScrobbling,
+							snaps,
+							posts,
+							threads,
+							onOpenVideo,
+							onMute,
+						)
 
 					Destination.NOT_LOGGED -> SkippedList(skipped, youTubeScrobbling, onOpenVideo)
 
@@ -1110,6 +1125,7 @@ private fun HistoryList(
 	thumbnails: Boolean,
 	snaps: SnapComposerState,
 	posts: SnapPostController,
+	threads: SnapThreadController,
 	onOpenVideo: (String) -> Unit,
 	onMute: (FinalizationRuntime.ScrobbleRecord) -> Unit,
 ) {
@@ -1127,8 +1143,28 @@ private fun HistoryList(
 	// Draft mark, waiting for Snap. Above the empty-list return so that leaving
 	// an empty History collapses too.
 	DisposableEffect(Unit) {
-		onDispose { snaps.collapse() }
+		onDispose {
+			snaps.collapse()
+			// The thread sheet belongs to History being on screen for exactly the
+			// same reason the composer does. Reply drafts are untouched by this:
+			// `close` puts the sheet away and never discards one.
+			threads.close()
+		}
 	}
+
+	// The full conversation, over the top of the list. Hoisted out of the card
+	// that opened it so the sheet is not a child of a `LazyColumn` item that can
+	// scroll away, or be recycled, underneath it.
+	threads.openThread?.let { root ->
+		SnapThreadSheet(
+			root = root,
+			rootSnap = threads.openRootSnap,
+			threads = threads,
+			nowEpochSec = System.currentTimeMillis() / 1000,
+			onDismiss = { threads.close() },
+		)
+	}
+
 	if (recent.isEmpty()) {
 		Text(
 			"No scrobbles yet.\n\nWith automatic scrobbling on, a track is " +
@@ -1230,6 +1266,7 @@ private fun HistoryList(
 						muted = id in mutedIds,
 						snaps = snaps,
 						posts = posts,
+						threads = threads,
 						onMute = { onMute(r) },
 					)
 				}
@@ -1265,6 +1302,7 @@ private fun SnapActionRow(
 	muted: Boolean,
 	snaps: SnapComposerState,
 	posts: SnapPostController,
+	threads: SnapThreadController,
 	onMute: () -> Unit,
 ) {
 	val key = snaps.key(record.eventId)
@@ -1319,14 +1357,35 @@ private fun SnapActionRow(
 	// that is not this account, a body that is not a v1 Snap body — shows no card
 	// at all rather than a handle and words it cannot stand behind. The Thread
 	// state below still says the row has been Snapped.
-	(status as? SnapPostStatus.Posted)?.let { posts.posted(key) }?.let { published ->
+	val published = (status as? SnapPostStatus.Posted)?.let { posts.posted(key) }
+	published?.let {
 		PostedSnapCard(
-			posted = published,
+			posted = it,
 			// Read in composition rather than driven by a timer of its own. This
 			// list already recomposes about once a second, which is far finer
 			// than the coarsest thing the age can say.
 			nowEpochSec = System.currentTimeMillis() / 1000,
 		)
+	}
+
+	// The conversation this Snap started, as much of it as a History row may
+	// show. `of` is the only route to a reply target: a Snap whose own
+	// author/permlink is not shaped like an account and a permlink gets no
+	// thread, no chain read and an inert Thread control, because every one of
+	// those would be built from a string nothing vouched for.
+	val root = published?.let { SnapReplyTarget.of(it.author, it.permlink) }
+	if (root != null) {
+		// Bounded by the list: `LazyColumn` composes what is on screen, so this
+		// asks the chain about the Snaps the user is actually looking at, once
+		// each. `load` is idempotent, so the once-a-second recomposition above
+		// does not turn into a request per second.
+		LaunchedEffect(threads.threadKey(root)) { threads.load(root) }
+		threads.preview(root)?.let { preview ->
+			SnapThreadPreviewStrip(
+				preview = preview,
+				onOpenThread = { threads.open(root, published) },
+			)
+		}
 	}
 
 	// The subtle mark on a collapsed card that still holds typed text. Deliberately
@@ -1356,14 +1415,13 @@ private fun SnapActionRow(
 			// One root Snap per History event. Once it is on chain the action
 			// stops being Snap and becomes the thread that Snap started.
 			//
-			// Inert in Stage 3, and drawn as state rather than as an invitation.
-			// Opening a thread means replies, reply composition and a screen to
-			// show them on — Stage 4's architecture, none of which exists yet —
-			// and a control that looked live and did nothing would be a worse
-			// answer than one that plainly shows where the card has got to.
+			// Live once there is a Snap History can vouch for. Without one it
+			// stays exactly as it was in Stage 3 — drawn as state, not as an
+			// invitation — because a thread needs a root identity to read, and a
+			// confirmed row whose author is not this account is not one.
 			status is SnapPostStatus.Posted -> WaxOutlinedButton(
-				onClick = {},
-				enabled = false,
+				onClick = { root?.let { threads.open(it, published) } },
+				enabled = root != null,
 				icon = WaxIcons.SpeechBubble,
 				modifier = Modifier.weight(1f),
 			) {
