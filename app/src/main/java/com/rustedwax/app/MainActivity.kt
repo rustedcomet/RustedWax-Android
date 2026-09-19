@@ -47,8 +47,12 @@ import com.rustedwax.app.snaps.HiveSnapPort
 import com.rustedwax.app.snaps.PostedSnaps
 import com.rustedwax.app.snaps.SharedPreferencesPendingSnapStore
 import com.rustedwax.app.snaps.SnapPublisher
+import com.rustedwax.app.snaps.HiveSnapThreadReader
+import com.rustedwax.app.ui.snaps.SharedPreferencesSnapReplyDraftStore
+import com.rustedwax.app.ui.snaps.SharedPreferencesSnapThreadPreviewStore
 import com.rustedwax.app.ui.snaps.SnapComposerState
 import com.rustedwax.app.ui.snaps.SnapPostController
+import com.rustedwax.app.ui.snaps.SnapThreadController
 import com.rustedwax.app.ui.Thumbnails
 import com.rustedwax.app.ui.YouTubeSignInActivity
 
@@ -245,9 +249,41 @@ class MainActivity : ComponentActivity() {
 				},
 			)
 		}
+		// Reply threads. A second, parallel assembly rather than an extension of
+		// the one above: replies get their own pending store, their own draft
+		// file and their own publisher instance, so the root-Snap write path of
+		// Stages 1–3 is untouched by anything Stage 4 does.
+		val threads = remember {
+			val pendingReplies = SharedPreferencesPendingSnapStore(
+				applicationContext,
+				SharedPreferencesPendingSnapStore.REPLIES,
+			)
+			val replyPublisher = SnapPublisher(
+				hive = HiveSnapPort(loadKey = { vault.loadKey() }),
+				store = pendingReplies,
+			)
+			SnapThreadController(
+				scope = lifecycleScope,
+				// Reading a thread cannot publish one: this port has no key and no
+				// broadcaster behind it.
+				reader = { HiveSnapThreadReader() },
+				publisher = { replyPublisher },
+				account = { account?.username },
+				// Reply drafts carry the publication intent that stops a crash
+				// becoming a duplicate, so they get their own store and their own
+				// type rather than sharing the root-Snap draft strings.
+				drafts = SharedPreferencesSnapReplyDraftStore(applicationContext),
+				// What a reopened History card draws before Hive answers. Only
+				// the card's own summary, never the conversation.
+				previewStore = SharedPreferencesSnapThreadPreviewStore(applicationContext),
+			)
+		}
 		// Anything that was still in flight when the process last died gets
 		// settled against the chain on the way in. This reconciles; it never sends.
-		LaunchedEffect(account?.username) { posts.resumePending() }
+		LaunchedEffect(account?.username) {
+			posts.resumePending()
+			threads.resumePending()
+		}
 		var autoScrobble by remember { mutableStateOf(settings.autoScrobble) }
 		// Re-read on every poll: the session is written by the sign-in
 		// activity, and the refusal by the resolver on a background
@@ -352,6 +388,7 @@ class MainActivity : ComponentActivity() {
 			mutedIds = mutedIds,
 			snaps = snaps,
 			posts = posts,
+			threads = threads,
 			tracksWithoutVideoId = quietBar,
 			queuedCount = queued,
 			youTubeAccount = youTubeAccount,

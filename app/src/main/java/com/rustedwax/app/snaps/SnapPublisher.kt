@@ -77,6 +77,9 @@ class SnapPublisher(
 	private val store: PendingSnapStore,
 	private val nowEpochSec: () -> Long = { System.currentTimeMillis() / 1000 },
 	private val newPermlink: (Long) -> String = { SnapPermlink.generate(it) },
+	private val newReplyPermlink: (Long) -> String = {
+		SnapPermlink.generate(it, prefix = SnapPermlink.REPLY_PREFIX)
+	},
 ) {
 
 	sealed interface Outcome {
@@ -93,16 +96,135 @@ class SnapPublisher(
 		data class Uncertain(val message: String) : Outcome
 	}
 
+	/**
+	 * Where a comment is going and what it will say.
+	 *
+	 * Deliberately computed *late* — inside [publish], after the stored record
+	 * has already decided whether anything may be sent at all. Resolving a Snap
+	 * container or building a body before that check would be doing work, and
+	 * asking the network questions, on behalf of a row that is locked.
+	 */
+	private data class Destination(
+		val parentAuthor: String,
+		val parentPermlink: String,
+		val body: String,
+		val jsonMetadata: String,
+	)
+
+	private sealed interface DestinationResult {
+		data class Ready(val destination: Destination) : DestinationResult
+		data class Refused(val message: String) : DestinationResult
+	}
+
 	/** Post, or resume posting, the root Snap for one History row. */
 	fun publishRoot(
 		account: String,
 		eventId: String,
 		media: SnapMedia,
 		userText: String,
+	): Outcome = publish(
+		account = account,
+		eventId = eventId,
+		kind = PendingSnap.KIND_ROOT_SNAP,
+		mintPermlink = newPermlink,
+		destination = { rootDestination(media, userText) },
+	)
+
+	/**
+	 * Post, or resume posting, one reply *intent*.
+	 *
+	 * [target] may be the user's own root Snap or any comment beneath it,
+	 * including one written by somebody else, and it has already been through
+	 * [SnapReplyTarget.of] — so the strings that become `parent_author` and
+	 * `parent_permlink` are shaped like an account and a permlink before a
+	 * signature is anywhere near them.
+	 *
+	 * [intentId] is what makes a reply slot reusable without being repeatable.
+	 * The record is filed under the parent **and** the intent, so:
+	 *
+	 *  - the same intent attempted again finds its own record. Confirmed means
+	 *    published, and answers with the comment that already exists rather than
+	 *    minting a second permlink — which is exactly the case a crash between
+	 *    confirmation and the draft being cleared produces;
+	 *  - an uncertain intent locks, and only reconciliation can move it;
+	 *  - a *different* intent is a different record, so a genuinely later reply
+	 *    to the same comment publishes normally.
+	 *
+	 * There is deliberately no flag here that lets a confirmed record be thrown
+	 * away and rebuilt. Within one intent this behaves exactly like
+	 * [publishRoot]: confirmed is final.
+	 */
+	fun publishReply(
+		account: String,
+		target: SnapReplyTarget,
+		intentId: String,
+		userText: String,
+	): Outcome = publish(
+		account = account,
+		eventId = SnapReplyKey.of(target, intentId),
+		kind = PendingSnap.KIND_REPLY,
+		mintPermlink = newReplyPermlink,
+		destination = { replyDestination(target, userText) },
+	)
+
+	private fun rootDestination(media: SnapMedia, userText: String): DestinationResult {
+		val payload = SnapPayloadBuilder.build(userText, media)
+		SnapPayloadBuilder.problem(payload, media)?.let { return DestinationResult.Refused(it) }
+
+		return when (val c = hive.resolveContainer()) {
+			is SnapContainerResolver.Result.Resolved -> DestinationResult.Ready(
+				Destination(
+					parentAuthor = c.container.author,
+					parentPermlink = c.container.permlink,
+					body = payload.body,
+					jsonMetadata = payload.jsonMetadata,
+				),
+			)
+			is SnapContainerResolver.Result.Unavailable -> DestinationResult.Refused(c.reason)
+		}
+	}
+
+	/**
+	 * A reply needs no container lookup: its parent is the comment the user
+	 * tapped Reply on, and that is already an identity the chain gave us.
+	 */
+	private fun replyDestination(
+		target: SnapReplyTarget,
+		userText: String,
+	): DestinationResult {
+		val payload = SnapReplyPayloadBuilder.build(userText)
+		SnapReplyPayloadBuilder.problem(payload)?.let { return DestinationResult.Refused(it) }
+		return DestinationResult.Ready(
+			Destination(
+				parentAuthor = target.author,
+				parentPermlink = target.permlink,
+				body = payload.body,
+				jsonMetadata = payload.jsonMetadata,
+			),
+		)
+	}
+
+	/**
+	 * The one publication path, shared by root Snaps and replies.
+	 *
+	 * Shared on purpose and shared *entirely*: prepare, persist, verify,
+	 * broadcast, reconcile. The duplicate-safety rules in this class were the
+	 * expensive part to get right, and a second copy of them for replies would
+	 * be a second chance to get them wrong — a reply is just as permanent and
+	 * just as public as a Snap. What differs between the two callers is only
+	 * where the comment goes and what it says, which is [destination]. The
+	 * *rules* do not differ at all.
+	 */
+	private fun publish(
+		account: String,
+		eventId: String,
+		kind: String,
+		mintPermlink: (Long) -> String,
+		destination: () -> DestinationResult,
 	): Outcome {
 		val existing = when (val read = store.read(account, eventId)) {
 			is PendingSnapRead.Corrupt ->
-				// Locked. Unreadable state may describe a Snap that is already
+				// Locked. Unreadable state may describe a comment that is already
 				// live, so this row gets no new permlink and no transaction.
 				return Outcome.Uncertain(corruptMessage(read.reason))
 			is PendingSnapRead.Present -> read.snap
@@ -111,6 +233,8 @@ class SnapPublisher(
 
 		when {
 			existing == null -> Unit
+			// Proven on chain: the final answer for this row or this intent, and
+			// never the starting point for another transaction.
 			existing.state == PendingSnapState.CONFIRMED ->
 				return Outcome.Published(existing.contentId, existing.txId)
 			existing.isUncertain ->
@@ -120,33 +244,29 @@ class SnapPublisher(
 
 		// A prepared-but-unsent transaction that has not expired is still exactly
 		// the right bytes, and reusing it keeps the transaction id reconcilable.
-		if (existing != null &&
-			existing.state == PendingSnapState.PREPARED &&
-			existing.expirationEpochSec > nowEpochSec()
-		) {
-			return broadcast(existing)
+		existing?.let {
+			if (it.state == PendingSnapState.PREPARED && it.expirationEpochSec > nowEpochSec()) {
+				return broadcast(it)
+			}
 		}
 
-		val payload = SnapPayloadBuilder.build(userText, media)
-		SnapPayloadBuilder.problem(payload, media)?.let { return Outcome.Failed(it) }
-
-		val container = when (val c = hive.resolveContainer()) {
-			is SnapContainerResolver.Result.Resolved -> c.container
-			is SnapContainerResolver.Result.Unavailable -> return Outcome.Failed(c.reason)
+		val going = when (val d = destination()) {
+			is DestinationResult.Ready -> d.destination
+			is DestinationResult.Refused -> return Outcome.Failed(d.message)
 		}
 
-		val permlink = existing?.permlink ?: newPermlink(nowEpochSec())
+		val permlink = existing?.permlink ?: mintPermlink(nowEpochSec())
 
 		val prepared = when (
 			val p = hive.prepareComment(
 				TxSerializer.CommentOp(
-					parentAuthor = container.author,
-					parentPermlink = container.permlink,
+					parentAuthor = going.parentAuthor,
+					parentPermlink = going.parentPermlink,
 					author = account,
 					permlink = permlink,
 					title = "",
-					body = payload.body,
-					jsonMetadata = payload.jsonMetadata,
+					body = going.body,
+					jsonMetadata = going.jsonMetadata,
 				),
 			)
 		) {
@@ -164,16 +284,17 @@ class SnapPublisher(
 			eventId = eventId,
 			author = account,
 			permlink = permlink,
-			parentAuthor = container.author,
-			parentPermlink = container.permlink,
-			body = payload.body,
-			jsonMetadata = payload.jsonMetadata,
+			parentAuthor = going.parentAuthor,
+			parentPermlink = going.parentPermlink,
+			body = going.body,
+			jsonMetadata = going.jsonMetadata,
 			signedTransactionJson = prepared.signedTransactionJson,
 			txId = prepared.txId,
 			expirationEpochSec = prepared.expirationEpochSec,
 			state = PendingSnapState.PREPARED,
 			createdAtEpochSec = existing?.createdAtEpochSec ?: now,
 			updatedAtEpochSec = now,
+			kind = kind,
 		)
 
 		// The network boundary is gated on durable state, not on hope. A Snap sent
@@ -313,11 +434,76 @@ class SnapPublisher(
 	}
 
 	/**
+	 * Whether this row's outcome is still unknown, without asking the network.
+	 *
+	 * A pure store read, and the only question a caller needs answered before
+	 * destroying something that points at a record: a row that is uncertain, or
+	 * whose stored state cannot be read, must keep whatever still refers to it.
+	 * Absent and decided rows answer false.
+	 */
+	fun isUnresolved(account: String, eventId: String): Boolean =
+		when (val read = store.read(account, eventId)) {
+			is PendingSnapRead.Corrupt -> true
+			is PendingSnapRead.Present -> read.snap.isUncertain
+			PendingSnapRead.Absent -> false
+		}
+
+	/**
+	 * The body this row actually published, or null when there is no proven one.
+	 *
+	 * A pure store read. It exists so a caller settling a confirmed write can
+	 * compare against **what reached Hive** rather than against what it happens
+	 * to believe it sent: the two differ whenever a draft was edited while the
+	 * network was busy, and the difference is exactly the text that must not be
+	 * thrown away.
+	 */
+	fun publishedBody(account: String, eventId: String): String? =
+		(store.read(account, eventId) as? PendingSnapRead.Present)?.snap
+			?.takeIf { it.state == PendingSnapState.CONFIRMED }
+			?.body
+
+	/**
+	 * Every Snap this account has **already proven**, read from disk alone.
+	 *
+	 * The local half of [restore], split out so a caller can draw what is
+	 * settled before anything that needs the network runs. [restore] decides
+	 * confirmed and unresolved rows in one pass, which means a single stalled
+	 * reconciliation — a node that hangs, a device with no signal — holds back
+	 * the whole list, including rows whose outcome was never in question. A row
+	 * stored as `CONFIRMED` is on chain and known to be on chain; making it wait
+	 * behind a different row's uncertainty is a reopened app looking like it
+	 * forgot what it published.
+	 *
+	 * Deliberately narrow:
+	 *
+	 *  - **no RPC.** There is no call to [hive] on this path at all;
+	 *  - **no mutation.** Nothing is persisted, cleared or advanced, so this
+	 *    cannot move the duplicate-safety state machine. Reconciliation remains
+	 *    the only thing that decides an unresolved row, and it still happens in
+	 *    [restore], unchanged;
+	 *  - **confirmed only.** Uncertain, unresolved, failed and corrupt rows are
+	 *    absent rather than optimistically included. A card drawn for one of them
+	 *    would assert a publication the app has refused to assert everywhere
+	 *    else, which is the opposite of the point;
+	 *  - **ordered.** `store.all` reflects `SharedPreferences.getAll()`'s hash
+	 *    order, which is arbitrary and unstable. Sorting means what the caller
+	 *    does with this list cannot depend on it.
+	 */
+	fun restoreLocal(account: String): List<Pair<String, Outcome.Published>> =
+		store.all(account)
+			.filter { it.state == PendingSnapState.CONFIRMED }
+			.sortedBy { it.eventId }
+			.map { it.eventId to Outcome.Published(it.contentId, it.txId) }
+
+	/**
 	 * Restore every stored Snap for an account after a restart.
 	 *
 	 * Confirmed rows come back as [Outcome.Published] so the card shows its posted
 	 * state again; unresolved rows are reconciled by *reading* the chain. Nothing
 	 * here broadcasts, and corrupt rows stay locked.
+	 *
+	 * This reads the chain, so it can be slow or stall outright. Callers that
+	 * have something to show without it should draw [restoreLocal] first.
 	 */
 	fun restore(account: String): List<Pair<String, Outcome>> {
 		val corrupt = store.corruptEventIds(account).map { eventId ->

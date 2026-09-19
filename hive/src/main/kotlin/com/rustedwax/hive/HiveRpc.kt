@@ -145,6 +145,33 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 	}
 
 	/**
+	 * Every comment in the discussion rooted at `author/permlink`, that root
+	 * included.
+	 *
+	 * `bridge.get_discussion` answers with a **map** keyed by `author/permlink`
+	 * rather than a list, and each entry carries its own `parent_author` and
+	 * `parent_permlink`. Only the values are returned here: the keys are
+	 * redundant with the objects, and trusting a key that disagreed with the
+	 * object under it would be choosing which of two untrusted strings to
+	 * believe.
+	 *
+	 * Deliberately one call rather than a recursive walk of
+	 * `get_content_replies`. A tree fetched a level at a time is a tree whose
+	 * depth decides how many round trips a reply thread costs, and an untrusted
+	 * `replies` array would be deciding how many.
+	 *
+	 * Every object in the returned list is **untrusted chain content**. Nothing
+	 * here validates a field; that is the caller's job, and the caller does it
+	 * before any of this reaches a screen.
+	 */
+	fun getDiscussion(author: String, permlink: String): List<JSONObject> {
+		val params = JSONObject().put("author", author).put("permlink", permlink)
+		val result = callObject("bridge.get_discussion", params) as? JSONObject
+			?: throw RpcException("unexpected get_discussion response")
+		return result.keys().asSequence().mapNotNull { result.optJSONObject(it) }.toList()
+	}
+
+	/**
 	 * One comment or post by `author/permlink`, or null when the chain has none.
 	 *
 	 * This is the *content* half of Snap reconciliation. Transaction evidence

@@ -75,6 +75,49 @@ class PendingSnapIntegrityTest {
 		assertEquals(emptyList<PendingSnap>(), PendingSnapIntegrity.valid(account, entries))
 	}
 
+	/**
+	 * The harder half of the same case: the claimed event has a record of its
+	 * own, and that record is impeccable.
+	 *
+	 * Judged alone it passes every test — its account matches, its id matches
+	 * its key. It still must not be enumerable, because two entries now claim
+	 * event B and nothing here can say which of them describes the comment that
+	 * may already be on chain. Letting the tidy one through would hand a caller
+	 * a record it cannot prove belongs to B, which is the same mistake as
+	 * answering "absent".
+	 */
+	@Test
+	fun `a contested event is invalid even when its own record is well formed`() {
+		val entries = mapOf(
+			"event-a" to record(eventId = "event-b"),
+			"event-b" to record(eventId = "event-b"),
+		)
+
+		assertEquals(setOf("event-a", "event-b"), PendingSnapIntegrity.lockedEventIds(account, entries))
+		assertEquals(
+			"the well-formed record under the contested key is not valid either",
+			emptyList<PendingSnap>(),
+			PendingSnapIntegrity.valid(account, entries),
+		)
+	}
+
+	/** Whatever is locked is never also returned as valid. */
+	@Test
+	fun `valid and locked never overlap`() {
+		val entries = mapOf(
+			"event-a" to record(eventId = "event-b"),
+			"event-b" to record(eventId = "event-b"),
+			"event-c" to record(eventId = "event-c"),
+			"event-d" to "not json at all",
+		)
+
+		val locked = PendingSnapIntegrity.lockedEventIds(account, entries)
+		val valid = PendingSnapIntegrity.valid(account, entries).map { it.eventId }.toSet()
+
+		assertEquals("nothing may be both", emptySet<String>(), locked intersect valid)
+		assertEquals(setOf("event-c"), valid)
+	}
+
 	/** One bad row must not take the account's healthy rows down with it. */
 	@Test
 	fun `a mismatch does not lock unrelated events`() {
