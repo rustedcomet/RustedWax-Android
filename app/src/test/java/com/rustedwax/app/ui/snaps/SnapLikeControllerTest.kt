@@ -99,9 +99,16 @@ class SnapLikeControllerTest {
 			)
 		}
 
-		override fun broadcast(prepared: PreparedHiveTransaction): HiveRpc.BroadcastResult {
+		/** The captured voter each broadcast was bound to, as the caller passed it. */
+		val broadcastFor = mutableListOf<String>()
+
+		override fun broadcast(
+			prepared: PreparedHiveTransaction,
+			voter: String,
+		): HiveRpc.BroadcastResult {
 			log += "broadcast"
 			broadcasts += prepared
+			broadcastFor += voter
 			broadcastThrows?.let { throw it }
 			return result
 		}

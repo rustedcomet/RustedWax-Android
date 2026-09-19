@@ -69,8 +69,18 @@ interface SnapLikePort {
 	 */
 	fun prepare(operation: TxSerializer.VoteOp, voter: String): SnapLikePrepare
 
-	/** Send exactly the transaction that was prepared, and nothing else. */
-	fun broadcast(prepared: PreparedHiveTransaction): HiveRpc.BroadcastResult
+	/**
+	 * Send exactly the transaction that was prepared, and nothing else.
+	 *
+	 * [voter] is the same captured account [prepare] was given, passed back in
+	 * so the **transmission** boundary can refuse a vote that has outlived it.
+	 * Signing and sending are separated by a chain read, which is time enough
+	 * for the account to change underneath both.
+	 */
+	fun broadcast(
+		prepared: PreparedHiveTransaction,
+		voter: String,
+	): HiveRpc.BroadcastResult
 }
 
 internal class HiveSnapLikePort(
@@ -86,6 +96,37 @@ internal class HiveSnapLikePort(
 	private val storedAccount: () -> String?,
 	private val broadcaster: HiveBroadcaster = HiveBroadcaster(),
 	private val rpc: HiveRpc = HiveRpc(),
+	/**
+	 * The signing seam, paired with [send] and there for the same reason as
+	 * its twin on `HiveSnapPort`.
+	 *
+	 * It wraps the key read *and* the signature, so a test can drive the real
+	 * [prepare] — real account guards, real orchestration — and get a usable
+	 * [PreparedHiveTransaction] back without a private key existing in the
+	 * test sources. The guards run **before** it, so overriding it cannot skip
+	 * them. Defaults to exactly what it replaced; no caller passes it.
+	 */
+	private val sign: (TxSerializer.VoteOp) -> HivePreparationResult = { operation ->
+		when (val key = loadKey()) {
+			null -> HivePreparationResult.Failed(
+				HiveRpc.BroadcastResult.Rejected("RustedWax couldn't read your posting key."),
+			)
+			else -> broadcaster.prepareVote(key, operation)
+		}
+	},
+	/**
+	 * The one transmission seam, so the **real** guard below can be tested
+	 * without a node.
+	 *
+	 * The account check in [broadcast] is the last thing standing between a
+	 * switched vault and a cast vote, and a test that re-implements it in a
+	 * fake proves only that the fake agrees with itself. Lifting the single
+	 * line that actually transmits lets a test drive this class — genuinely
+	 * this class — and assert that nothing reached the wire.
+	 */
+	private val send: (PreparedHiveTransaction) -> HiveRpc.BroadcastResult = {
+		broadcaster.broadcastPrepared(it)
+	},
 ) : SnapLikePort {
 
 	override fun readViewerVote(author: String, permlink: String, voter: String): HiveVoteRead =
@@ -125,10 +166,7 @@ internal class HiveSnapLikePort(
 				"You've switched Hive accounts — this Like belonged to a different one.",
 			)
 		}
-		val key = loadKey()
-			?: return SnapLikePrepare.Refused("RustedWax couldn't read your posting key.")
-
-		return when (val prepared = broadcaster.prepareVote(key, operation)) {
+		return when (val prepared = sign(operation)) {
 			is HivePreparationResult.Ready -> SnapLikePrepare.Ready(prepared.transaction)
 			is HivePreparationResult.Failed -> when (val r = prepared.result) {
 				// Everything `prepareVote` can fail with happens before a byte
@@ -149,9 +187,35 @@ internal class HiveSnapLikePort(
 	 * prepares and sends in one call cannot be stopped in between, and stopping
 	 * in between is the whole mechanism by which a vote decided a second ago is
 	 * abandoned rather than cast over somebody's newer one.
+	 *
+	 * **And the account is proved again here**, against the vault rather than
+	 * against the caller's idea of who is signed in. [prepare] checked it, but
+	 * a second authoritative read happens between the two calls, and a switch
+	 * lands in the vault before the UI's account state catches up — so there is
+	 * a window in which the caller still believes it is Alice while the key on
+	 * disk is already Bob's. One Hive posting key can authorize both accounts,
+	 * so the chain would take that vote. This is the check that will not.
+	 *
+	 * A refusal sends zero bytes and rebuilds nothing. The transaction is not
+	 * re-signed, not queued and not retried: the vote it describes belonged to
+	 * a session that has ended, and the only safe thing to do with it is drop
+	 * it. Exactly what `HiveSnapPort.broadcastPrepared` does for a comment.
 	 */
-	override fun broadcast(prepared: PreparedHiveTransaction): HiveRpc.BroadcastResult =
-		broadcaster.broadcastPrepared(prepared)
+	override fun broadcast(
+		prepared: PreparedHiveTransaction,
+		voter: String,
+	): HiveRpc.BroadcastResult {
+		val stored = storedAccount()?.takeIf { it.isNotBlank() }
+			?: return HiveRpc.BroadcastResult.Rejected(
+				"There's no saved Hive account to Like as.",
+			)
+		if (!stored.equals(voter, ignoreCase = true)) {
+			return HiveRpc.BroadcastResult.Rejected(
+				"You've switched Hive accounts — this Like belonged to a different one.",
+			)
+		}
+		return send(prepared)
+	}
 }
 
 /**

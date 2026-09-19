@@ -510,8 +510,13 @@ class SnapLikeController internal constructor(
 	 *     behind us;
 	 *  7. **decide again** — and it must *still* be `Cast`. A vote that appeared
 	 *     between the two reads vetoes the transaction that is already signed;
-	 *  8. **account check** — the last one, immediately before the wire;
-	 *  9. **broadcast** — exactly what was prepared, with nothing in between.
+	 *  8. **account check** — the last one this class makes, immediately before
+	 *     the wire;
+	 *  9. **broadcast** — exactly what was prepared, with nothing in between,
+	 *     and with the captured account handed to the port so it can make the
+	 *     same check against the **vault**. This class can only see session
+	 *     state, and a switch reaches the vault first — see
+	 *     [com.rustedwax.app.snaps.HiveSnapLikePort.broadcast].
 	 *
 	 * This does not make the operation atomic with another frontend and cannot:
 	 * a vote cast in the milliseconds between step 6 and step 9 will still be
@@ -553,11 +558,14 @@ class SnapLikeController internal constructor(
 		val second = decide(p, who, target, percent)
 		if (second !is SnapLikeDecision.Cast) return stateFor(second)
 
-		// 8. The last check before the wire.
+		// 8. The last check before the wire. Session state — the port makes
+		// the same check against the vault, which is the one that counts.
 		if (accountId() != who) return null
 
-		// 9. Send what was signed, immediately.
-		return send(p, signed, percent)
+		// 9. Send what was signed, immediately, as the account it was signed
+		// for. The captured name goes with it so the transmission boundary can
+		// refuse a vote whose session ended while this ran.
+		return send(p, signed, who, percent)
 	}
 
 	/** One fresh read and the decision that follows from it. */
@@ -601,9 +609,10 @@ class SnapLikeController internal constructor(
 	private fun send(
 		p: SnapLikePort,
 		prepared: PreparedHiveTransaction,
+		voter: String,
 		percent: Int,
 	): SnapLikeState {
-		val result = runCatching { p.broadcast(prepared) }.getOrElse {
+		val result = runCatching { p.broadcast(prepared, voter) }.getOrElse {
 			// An exception on the way out says nothing about what the node
 			// received. Treated exactly like a lost response.
 			return SnapLikeState.Pending(lostMessage("lost contact while sending: ${it.message}"))
