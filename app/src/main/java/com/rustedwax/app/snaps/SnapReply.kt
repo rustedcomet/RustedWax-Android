@@ -1,5 +1,7 @@
 package com.rustedwax.app.snaps
 
+import com.rustedwax.hive.ViewerVote
+
 /**
  * One comment in a Snap thread, after it has been made safe to hold.
  *
@@ -24,6 +26,48 @@ data class SnapReply(
 	/** The comment's text, sanitised but never shortened. */
 	val body: String,
 	val createdAtEpochSec: Long?,
+	/**
+	 * What the **signed-in viewer's own** vote on this comment looked like in
+	 * the response this was built from, for drawing an outline or a filled
+	 * heart without a second request.
+	 *
+	 * Only the viewer's row is kept, never the whole `active_votes` list. A
+	 * popular Snap carries thousands of votes per comment and every reply in a
+	 * conversation is held in memory at once — see [SnapThreadBuilder] — so
+	 * storing the list would make the cost of opening a thread scale with other
+	 * people's voting rather than with the conversation.
+	 *
+	 * It is a **rendering** fact and never an authorization. `bridge` answers
+	 * from hivemind, which can lag, and carries no declared percentage at all;
+	 * every actual Like tap re-reads the chain through
+	 * [com.rustedwax.hive.HiveRpc.findViewerVote] before anything is signed.
+	 *
+	 * Defaults to [com.rustedwax.hive.ViewerVote.Unreadable] rather than to
+	 * `None`, so a [SnapReply] built by something that never looked at votes
+	 * draws no heart state instead of asserting that nobody voted.
+	 */
+	val viewerVote: ViewerVote = ViewerVote.Unreadable("vote state was never read"),
+	/**
+	 * How many positive votes the chain showed on this comment when it was
+	 * read. **Presentation only.**
+	 *
+	 * The other half of the heart, and a different question from
+	 * [viewerVote]: that one says whether *this* account liked something, this
+	 * says how many people did. Kept as one integer rather than as the voter
+	 * list it was reduced from — a popular Snap carries thousands of votes per
+	 * comment and a whole conversation is held in memory at once, so the cost
+	 * of opening a thread must scale with the conversation and not with other
+	 * people's voting.
+	 *
+	 * It decides nothing. It cannot authorize a Like, block one, change its
+	 * strength or stand in for the authoritative `get_active_votes` read that
+	 * every vote is gated on — see [com.rustedwax.hive.HiveVotes.positiveCount]
+	 * for why an unreadable row lowers this number instead of failing a read.
+	 *
+	 * Defaults to zero, which is what a [SnapReply] built by something that
+	 * never looked at votes should draw: no number at all.
+	 */
+	val positiveLikeCount: Int = 0,
 ) {
 	val contentId: String get() = "$author/$permlink"
 	val parentId: String get() = "$parentAuthor/$parentPermlink"
@@ -64,6 +108,18 @@ data class SnapThread(
 	val children: List<SnapThreadNode>,
 	/** Depth-first, in reading order — every node, exactly once. */
 	val rows: List<SnapThreadNode>,
+	/**
+	 * Positive votes on the **root Snap itself**, for the same heart the
+	 * replies get. Presentation only, exactly as
+	 * [SnapReply.positiveLikeCount] is.
+	 *
+	 * It arrives here because the root is in the same response as its replies
+	 * and is then dropped from the tree — it is the Snap, not a reply to it —
+	 * so this is the one field of it worth keeping. Zero when the response
+	 * carried no root row, which is what a thread built from local rows alone
+	 * looks like.
+	 */
+	val rootLikeCount: Int = 0,
 ) {
 	val total: Int get() = rows.size
 
@@ -123,8 +179,15 @@ object SnapThreadBuilder {
 		// De-duplicate first, and drop the root if the chain echoed it back: the
 		// root is the Snap itself, not a reply to it.
 		val byId = LinkedHashMap<String, SnapReply>()
+		// The root's own row is dropped from the tree but not thrown away
+		// entirely: its Like count is the one thing on it the screen still
+		// needs, and this response is where it comes from.
+		var rootLikes = 0
 		replies.forEach { reply ->
-			if (reply.contentId == rootId) return@forEach
+			if (reply.contentId == rootId) {
+				rootLikes = maxOf(rootLikes, reply.positiveLikeCount)
+				return@forEach
+			}
 			if (reply.contentId == reply.parentId) return@forEach
 			byId.putIfAbsent(reply.contentId, reply)
 		}
@@ -205,7 +268,7 @@ object SnapThreadBuilder {
 		// produced — so the reading order is a by-product of building, not a
 		// second traversal.
 		@Suppress("UNCHECKED_CAST")
-		return SnapThread(rootId, top, (rows as Array<SnapThreadNode>).asList())
+		return SnapThread(rootId, top, (rows as Array<SnapThreadNode>).asList(), rootLikes)
 	}
 
 	/** One node waiting to be walked, and where it hangs. */

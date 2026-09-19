@@ -2,6 +2,7 @@ package com.rustedwax.app.snaps
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.rustedwax.hive.HiveAccountName
 import org.json.JSONObject
 import java.security.SecureRandom
 
@@ -15,6 +16,29 @@ import java.security.SecureRandom
  * permanent duplicate public comment, and there is no undo for that.
  */
 enum class PendingSnapState {
+	/**
+	 * The user tapped Post and the **identity of the Snap is frozen** — but
+	 * nothing has been built, signed or sent.
+	 *
+	 * This state exists so the card can appear without the network on the
+	 * visible path. Everything it carries is computed locally: the permlink is
+	 * minted from the clock and a random suffix, and the body and metadata come
+	 * from [SnapPayloadBuilder], which needs no chain. What it does *not* carry
+	 * is anything that requires a round trip — the parent container and the
+	 * signed transaction are both empty here, and filling them is the
+	 * background's job.
+	 *
+	 * It is emphatically **not permission to broadcast**. A record in this state
+	 * has no transaction to send, and the only path out of it is through
+	 * [PREPARED]: the identity frozen here is reused, a transaction is built
+	 * around it, and *that* is persisted before anything reaches a node.
+	 *
+	 * Its real purpose is duplicate prevention across a crash. A permlink minted
+	 * and committed before any slow work begins is a permlink that cannot be
+	 * minted a second time, however many times the attempt is resumed.
+	 */
+	INTENT,
+
 	/** Signed and persisted; nothing has been sent yet. */
 	PREPARED,
 
@@ -41,6 +65,50 @@ enum class PendingSnapState {
 	 * permlink, no new transaction, nothing sent.
 	 */
 	CORRUPT,
+}
+
+/**
+ * Which of the two write paths a durable record belongs to.
+ *
+ * Not decoration. A record decides whether a comment may be signed, delivered,
+ * retried or reconciled, and the two paths build *different* comments: a root
+ * Snap is parented on the `peak.snaps` container, a reply on the comment the
+ * user tapped. A record consumed by the wrong path would therefore sign the
+ * wrong parent under an identity minted for something else — so the kind is
+ * part of the record's identity and is checked wherever the record can
+ * authorize a write.
+ *
+ * [stored] is the durable spelling and must never change: it is what is already
+ * written in every record on every device. The enum exists so that the set of
+ * legal values is closed — an unrecognised string is not a third kind, it is a
+ * record this code cannot read.
+ */
+enum class PendingSnapKind(val stored: String) {
+	/** A Snap about something in History, parented on the Snap container. */
+	ROOT("root_snap"),
+
+	/**
+	 * A reply comment, parented on another comment.
+	 *
+	 * Stored in a file of its own rather than beside root Snaps — see
+	 * [SharedPreferencesPendingSnapStore] — so this is a second, independent
+	 * check rather than the only thing keeping the two apart.
+	 */
+	REPLY("reply");
+
+	companion object {
+		/**
+		 * The kind this durable string names, or **null**.
+		 *
+		 * Null for a missing value, an empty one and anything unrecognised.
+		 * There is deliberately no fallback: defaulting an unreadable kind to
+		 * [ROOT] is exactly how a reply record would come to be signed as a
+		 * Snap, and a record whose kind this code cannot read is a record it
+		 * cannot safely act on.
+		 */
+		fun of(stored: String?): PendingSnapKind? =
+			entries.firstOrNull { it.stored == stored }
+	}
 }
 
 /**
@@ -83,7 +151,14 @@ data class PendingSnap(
 	val updatedAtEpochSec: Long,
 	/** Last thing that went wrong, for the card to show. Never key material. */
 	val lastError: String? = null,
-	val kind: String = KIND_ROOT_SNAP,
+	/**
+	 * Which write path this record belongs to.
+	 *
+	 * Deliberately has **no default**. A record that did not say which kind it
+	 * is would be one more place where "unspecified" silently becomes "root",
+	 * and every caller here knows perfectly well what it is building.
+	 */
+	val kind: PendingSnapKind,
 ) {
 	/** `@author/permlink` — the durable Hive identity of this Snap. */
 	val contentId: String get() = "$author/$permlink"
@@ -110,21 +185,85 @@ data class PendingSnap(
 		.put("createdAtEpochSec", createdAtEpochSec)
 		.put("updatedAtEpochSec", updatedAtEpochSec)
 		.put("lastError", lastError ?: JSONObject.NULL)
-		.put("kind", kind)
+		.put("kind", kind.stored)
 		.toString()
 
 	companion object {
-		const val KIND_ROOT_SNAP = "root_snap"
 
 		/**
-		 * A reply comment, parented on another comment rather than on the Snap
-		 * container.
+		 * Whether this expiration is one this state is allowed to carry.
 		 *
-		 * Stored in a store of its own rather than beside root Snaps — see
-		 * [SharedPreferencesPendingSnapStore] — so this string is a label on the
-		 * record and never the thing that keeps the two apart.
+		 * [PendingSnapState.INTENT] is the only state with no transaction, so
+		 * it is the only state whose expiration is meaningfully **zero** — and
+		 * it must be exactly zero, because an intent carrying a real-looking
+		 * expiry would be a record claiming bytes it does not have.
+		 *
+		 * Every other state describes a signed transaction, and its expiration
+		 * decides two different actionable things: whether those bytes may
+		 * still be broadcast, and whether they must be rebuilt instead. A zero
+		 * or negative value would read as long expired and invite a rebuild; a
+		 * huge one would read as fresh forever and invite a doomed broadcast.
+		 * Neither may be inferred from a number this code could not read.
 		 */
-		const val KIND_REPLY = "reply"
+		private fun PendingSnapState.allowsExpiration(value: Long): Boolean =
+			if (this == PendingSnapState.INTENT) value == 0L else value > 0L
+
+		/**
+		 * One field as an **exact** whole number, or null.
+		 *
+		 * `JSONObject.getLong` coerces, and both of its coercions are unsafe
+		 * here: it truncates a fractional number, so `1.9` would arrive as `1`,
+		 * and it parses a string, so `"nonsense"` throws while `"12"` quietly
+		 * succeeds. This record decides whether a signed transaction may reach
+		 * the chain, so neither guess is acceptable — a value that is not
+		 * exactly the integer that was written is a value this code does not
+		 * have.
+		 *
+		 * Accepted: JSON integer tokens, however the runtime boxes them —
+		 * `Int`, `Long`, `Short`, `Byte`, and a `BigInteger` that fits `Long`.
+		 * Refused: **every** decimal type (`Double`, `Float`, `BigDecimal`),
+		 * anything beyond `Long`, a string (the stored format never writes one),
+		 * a boolean, an object, an array, an explicit null, and a missing key.
+		 *
+		 * Internal rather than private so the type-level rule can be exercised
+		 * directly: Android hands over a `Double` for every decimal token, and
+		 * that branch is unreachable through `fromJson(String)` on the JVM,
+		 * whose parser boxes the same tokens as `BigDecimal`.
+		 */
+		internal fun JSONObject.exactLong(name: String): Long? = when (val v = opt(name)) {
+			is Int -> v.toLong()
+			is Long -> v
+			is Short -> v.toLong()
+			is Byte -> v.toLong()
+			// `longValueExact()` is API 31 and this app runs from 26, so the
+			// range is checked by hand — exact for the same reason and
+			// available everywhere.
+			is java.math.BigInteger -> v.takeIf { it.bitLength() < Long.SIZE_BITS }?.toLong()
+			// **Everything else is refused, and the two decimal types are the
+			// point of the rule.**
+			//
+			// Android's `JSONTokener` boxes any token containing `.`, `e` or
+			// `E` as a `Double`, which has already discarded what would be
+			// needed to trust it: `9007199254740993.0` arrives as
+			// `9007199254740992.0`, byte-identical to the token one below it.
+			// No test applied afterwards can separate them, so "it looks whole"
+			// is not evidence of anything.
+			//
+			// The reference `org.json` this project's unit tests run against
+			// boxes the same tokens as `BigDecimal`, and that is refused too —
+			// `scale()` cannot distinguish them either, because
+			// `BigDecimal("9.007199254740992E15")` and
+			// `BigDecimal("9007199254740992")` both report scale zero and the
+			// same precision. The only property that separates an integer token
+			// from a decimal one is the *type the parser chose*, and both
+			// parsers choose a decimal type for exactly the tokens to reject.
+			//
+			// Nothing legitimate is lost. `toJson` writes this field with
+			// `put(Long)`, which emits an integer token, and an integer token
+			// is boxed as `Int`, `Long` or `BigInteger` on both runtimes. A
+			// decimal here means the record was not written by this app.
+			else -> null
+		}
 
 		/**
 		 * Parse a stored record, or null if it is unreadable.
@@ -135,6 +274,15 @@ data class PendingSnap(
 		 */
 		fun fromJson(raw: String): PendingSnap? = runCatching {
 			val o = JSONObject(raw)
+			val state = PendingSnapState.valueOf(o.getString("state"))
+			// Read exactly, then judged against the state that claims it. A
+			// record whose expiration cannot be trusted is a record that must
+			// not be delivered *or* rebuilt, and the only way to guarantee
+			// both is to refuse to build it at all — which lands it in
+			// `Corrupt`, where every other unreadable record already goes.
+			val expiration = o.exactLong("expirationEpochSec")
+				?.takeIf { state.allowsExpiration(it) }
+				?: return@runCatching null
 			PendingSnap(
 				account = o.getString("account"),
 				eventId = o.getString("eventId"),
@@ -146,14 +294,24 @@ data class PendingSnap(
 				jsonMetadata = o.getString("jsonMetadata"),
 				signedTransactionJson = o.getString("signedTransactionJson"),
 				txId = o.getString("txId"),
-				expirationEpochSec = o.getLong("expirationEpochSec"),
-				state = PendingSnapState.valueOf(o.getString("state")),
+				expirationEpochSec = expiration,
+				state = state,
 				createdAtEpochSec = o.getLong("createdAtEpochSec"),
 				updatedAtEpochSec = o.getLong("updatedAtEpochSec"),
 				lastError = o.optString("lastError").takeIf {
 					it.isNotBlank() && !o.isNull("lastError")
 				},
-				kind = o.optString("kind", KIND_ROOT_SNAP),
+				// Fails closed, with no default. A missing or unrecognised
+				// kind lands this record in `Corrupt`, where every other
+				// unreadable record goes — never in `Absent`, which would let
+				// it look brand new, and never reclassified as a root Snap,
+				// which would let a reply be signed against the container.
+				//
+				// Nothing legitimate is lost: `toJson` has written this field
+				// since the first version of this class, so a record without
+				// one was not written by this app.
+				kind = PendingSnapKind.of(o.optString("kind").takeIf { !o.isNull("kind") })
+					?: return@runCatching null,
 			)
 		}.getOrNull()
 	}
@@ -217,6 +375,75 @@ object SnapPermlink {
 internal object PendingSnapIntegrity {
 
 	/**
+	 * Why this record's stored identity cannot be acted on, or null.
+	 *
+	 * The **author** is the field this answers for, and it is the one that
+	 * reaches Hive. A record stored under Alice whose author says Bob is a
+	 * record whose local half and published half disagree: the card would be
+	 * drawn as Bob's while the comment would be signed as — whoever the caller
+	 * happened to be. Whichever of the two is wrong, one of them is, and
+	 * neither is safe to publish or to show.
+	 *
+	 * So three things must hold, and the first two are compared **without
+	 * regard to case**, exactly as `HiveSnapPort` compares the identities it
+	 * binds at signing time: one Hive posting key can authorize more than one
+	 * account, so account names are what separate them, and a stored "Alice"
+	 * naming the same account as a vault's "alice" must not be read as two
+	 * different people.
+	 *
+	 *  - **both names are valid Hive account names exactly as stored.** Not
+	 *    lowercased first, not trimmed, not repaired. A canonical Hive account
+	 *    name is lowercase, so a durable `Alice` is not a spelling of a real
+	 *    account — it is a name the chain would refuse and a value this app
+	 *    never wrote. Normalising it here would mean inventing the account the
+	 *    record probably meant and then signing as it, which is the one thing
+	 *    a durable-identity check must never do;
+	 *  - the author is the account the record is filed under. Compared
+	 *    case-insensitively, which only runs *after* both names have passed
+	 *    validation as stored — so by then the comparison is between two
+	 *    canonical names and the tolerance costs nothing. It matches how
+	 *    `HiveSnapPort` binds identities at signing time, where the vault's
+	 *    spelling is outside this record's control;
+	 *  - nothing is blank.
+	 *
+	 * Nothing here repairs or normalises anything. A durable identity that
+	 * disagrees with itself, or that is not a name Hive could accept, is
+	 * evidence — and the only safe thing to do with evidence is keep it.
+	 */
+	fun authorProblem(snap: PendingSnap): String? = when {
+		snap.author.isBlank() -> "stored Snap author is missing"
+		snap.account.isBlank() -> "stored Snap account is missing"
+		// As stored, both of them. The frozen author is what reaches Hive
+		// unchanged, so it has to be a name Hive could accept before anything
+		// is built around it.
+		!HiveAccountName.isValid(snap.author) ->
+			"stored Snap author is not a Hive account name"
+		!HiveAccountName.isValid(snap.account) ->
+			"stored Snap account is not a Hive account name"
+		!snap.author.equals(snap.account, ignoreCase = true) ->
+			"stored Snap author is not the account it is filed under"
+		else -> null
+	}
+
+	/**
+	 * The same question, asked by somebody who wants to act as [account].
+	 *
+	 * Adds the third identity: the account asking. A record may be perfectly
+	 * self-consistent and still not be this caller's to render, prepare, sign
+	 * or send — which is the case an account switch produces, and the case a
+	 * mis-keyed record produces.
+	 */
+	fun identityProblem(snap: PendingSnap, account: String): String? = when {
+		authorProblem(snap) != null -> authorProblem(snap)
+		account.isBlank() -> "no account was given"
+		!account.equals(snap.account, ignoreCase = true) ->
+			"this Snap belongs to a different account"
+		!account.equals(snap.author, ignoreCase = true) ->
+			"this Snap was written by a different account"
+		else -> null
+	}
+
+	/**
 	 * Every event id that must refuse to prepare, mint or broadcast, given the
 	 * raw `eventId to json` entries stored for one account.
 	 */
@@ -233,6 +460,12 @@ internal object PendingSnapIntegrity {
 					locked += keyEventId
 					locked += parsed.eventId
 				}
+				// The record disagrees with *itself* about who wrote it. Only
+				// this event is implicated — no other key is named by it — and
+				// it is locked for the same reason an unreadable record is:
+				// there may already be a comment on chain under one of the two
+				// names, and RustedWax cannot tell which.
+				authorProblem(parsed) != null -> locked += keyEventId
 			}
 		}
 		return locked

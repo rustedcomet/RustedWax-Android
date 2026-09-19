@@ -35,6 +35,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -75,6 +77,7 @@ import com.rustedwax.app.ui.snaps.SnapPostController
 import com.rustedwax.app.ui.snaps.SnapPostStatus
 import com.rustedwax.app.ui.snaps.SnapThreadController
 import com.rustedwax.app.ui.snaps.SnapThreadPreviewStrip
+import com.rustedwax.app.ui.snaps.SnapLikeController
 import com.rustedwax.app.ui.snaps.SnapThreadSheet
 import com.rustedwax.app.snaps.SnapReplyTarget
 import com.rustedwax.app.ui.snaps.SnapText
@@ -155,6 +158,8 @@ fun MainScreen(
 	posts: SnapPostController,
 	/** Reply threads: reading them, drafting replies, and publishing them. */
 	threads: SnapThreadController,
+	/** Likes on other people's comments, inside those threads. */
+	likes: SnapLikeController,
 	tracksWithoutVideoId: Int,
 	queuedCount: Int,
 	youTubeAccount: YouTubeSessionVault.Session?,
@@ -165,6 +170,9 @@ fun MainScreen(
 	developerMode: Boolean,
 	appVersion: String,
 	themeChoice: ThemeChoice,
+	/** Default Like strength, as a whole percent. See [SettingsRow.SNAPS_AND_LIKES]. */
+	likePercent: Int,
+	onLikePercent: (Int) -> Unit,
 	onThemeChoice: (ThemeChoice) -> Unit,
 	onSetDeveloperMode: (Boolean) -> Unit,
 	/**
@@ -374,6 +382,7 @@ fun MainScreen(
 							snaps,
 							posts,
 							threads,
+							likes,
 							onOpenVideo,
 							onMute,
 						)
@@ -413,6 +422,8 @@ fun MainScreen(
 							appVersion = appVersion,
 							postingPublicKey = postingPublicKey,
 							themeChoice = themeChoice,
+							likePercent = likePercent,
+							onLikePercent = onLikePercent,
 							onThemeChoice = onThemeChoice,
 							onSetDeveloperMode = onSetDeveloperMode,
 							onToggleEventLogging = onToggleEventLogging,
@@ -679,6 +690,8 @@ private fun ScrobbleControls(
 	appVersion: String,
 	postingPublicKey: () -> String?,
 	themeChoice: ThemeChoice,
+	likePercent: Int,
+	onLikePercent: (Int) -> Unit,
 	onThemeChoice: (ThemeChoice) -> Unit,
 	onSetDeveloperMode: (Boolean) -> Unit,
 	onToggleEventLogging: (Boolean) -> Unit,
@@ -874,6 +887,16 @@ private fun ScrobbleControls(
 					onForget = onForgetKey,
 				)
 
+				// How hard a Like votes. A preference about this account's own
+				// voting power, so it sits directly under the account that
+				// spends it, and it says plainly that a Like is a Hive vote
+				// rather than a private app gesture.
+				SettingsRow.SNAPS_AND_LIKES -> LikeStrengthRow(
+					percent = likePercent,
+					hasKey = hasKey,
+					onPercent = onLikePercent,
+				)
+
 				// Usage access is a grant, not a preference, so it stays on the
 				// simple screen even though the switch it used to sit beside is
 				// gone: the app cannot ask for it in a dialog and the user has to
@@ -1039,6 +1062,77 @@ private const val SETTLE_MILLIS = 1_500L
  * silently pick one the first time it was touched and never give the choice
  * back.
  */
+/**
+ * How hard a Like votes, 10% to 100%.
+ *
+ * Said plainly, because a Like is not a private gesture: it is a Hive vote cast
+ * with this account's own voting power, and somebody who does not know that
+ * would have no reason to care what the number is. The default is the gentlest
+ * setting the slider offers rather than a middle value — spending as little as
+ * possible until somebody asks otherwise is the right default for an
+ * irreversible thing that costs the user something.
+ *
+ * The slider moves continuously and **stores a whole percent**. Rounding at the
+ * edge means the number shown is always the number stored, so the row can never
+ * read 37% while the chain gets 36.8 — and there is deliberately no coarse
+ * 5%/10% detent, which would be the app deciding a strength is a bucket rather
+ * than a number.
+ *
+ * Changing it affects future Likes only. The value is read at the moment a Like
+ * is cast, and an existing vote on chain is never revisited.
+ */
+@Composable
+private fun LikeStrengthRow(percent: Int, hasKey: Boolean, onPercent: (Int) -> Unit) {
+	SettingCard {
+		Row(verticalAlignment = Alignment.Top) {
+			WaxRowIcon(WaxIcons.Heart)
+			Spacer(Modifier.width(10.dp))
+			Column(Modifier.weight(1f)) {
+				Text("Snaps & Likes", style = MaterialTheme.typography.titleSmall)
+				Spacer(Modifier.height(2.dp))
+				Text(
+					if (hasKey) {
+						"Default Like strength — $percent%. A Like is a Hive vote cast " +
+							"with your own voting power. New Likes use this; ones you've " +
+							"already given are left alone."
+					} else {
+						"Add a Hive key to Like other people's Snaps. A Like is a Hive " +
+							"vote cast with your own voting power."
+					},
+					style = MaterialTheme.typography.bodySmall,
+					color = MaterialTheme.colorScheme.onSurfaceVariant,
+				)
+			}
+		}
+		Slider(
+			value = percent.toFloat(),
+			// Rounded here, on the way in, so nothing downstream ever sees a
+			// fraction of a percent — not the label, not the store, not the vote.
+			onValueChange = { onPercent(it.roundToInt()) },
+			valueRange = 10f..100f,
+			enabled = hasKey,
+			colors = SliderDefaults.colors(
+				thumbColor = MaterialTheme.colorScheme.primary,
+				activeTrackColor = MaterialTheme.colorScheme.primary,
+			),
+			modifier = Modifier.padding(top = 4.dp),
+		)
+		Row(Modifier.fillMaxWidth()) {
+			Text(
+				"10%",
+				style = MaterialTheme.typography.labelSmall,
+				color = MaterialTheme.colorScheme.onSurfaceVariant,
+				modifier = Modifier.weight(1f),
+			)
+			Text(
+				"100%",
+				style = MaterialTheme.typography.labelSmall,
+				color = MaterialTheme.colorScheme.onSurfaceVariant,
+			)
+		}
+	}
+}
+
 @Composable
 private fun AppearanceRow(choice: ThemeChoice, onChoice: (ThemeChoice) -> Unit) {
 	SettingCard {
@@ -1126,6 +1220,7 @@ private fun HistoryList(
 	snaps: SnapComposerState,
 	posts: SnapPostController,
 	threads: SnapThreadController,
+	likes: SnapLikeController,
 	onOpenVideo: (String) -> Unit,
 	onMute: (FinalizationRuntime.ScrobbleRecord) -> Unit,
 ) {
@@ -1160,6 +1255,7 @@ private fun HistoryList(
 			root = root,
 			rootSnap = threads.openRootSnap,
 			threads = threads,
+			likes = likes,
 			nowEpochSec = System.currentTimeMillis() / 1000,
 			onDismiss = { threads.close() },
 		)
@@ -1357,7 +1453,20 @@ private fun SnapActionRow(
 	// that is not this account, a body that is not a v1 Snap body — shows no card
 	// at all rather than a handle and words it cannot stand behind. The Thread
 	// state below still says the row has been Snapped.
-	val published = (status as? SnapPostStatus.Posted)?.let { posts.posted(key) }
+	// Both settled and optimistic draw the same card. The difference between
+	// them is whether Hive has acknowledged it yet, and that is not a fact the
+	// author of the Snap needs narrated back at them — the words are theirs, the
+	// permlink is minted and the transaction is on disk either way.
+	val published = when (status) {
+		// Interrupted keeps its card too. The words are the user's and the
+		// record is on disk; hiding it would lose the Snap on screen while
+		// still holding it, which is the worst of both.
+		is SnapPostStatus.Posted,
+		is SnapPostStatus.Optimistic,
+		is SnapPostStatus.Interrupted,
+		-> posts.posted(key)
+		else -> null
+	}
 	published?.let {
 		PostedSnapCard(
 			posted = it,
@@ -1373,7 +1482,18 @@ private fun SnapActionRow(
 	// author/permlink is not shaped like an account and a permlink gets no
 	// thread, no chain read and an inert Thread control, because every one of
 	// those would be built from a string nothing vouched for.
-	val root = published?.let { SnapReplyTarget.of(it.author, it.permlink) }
+	// Said plainly, and only for the state that needs saying: this Snap exists
+	// here and nowhere else, and only another tap will change that.
+	if (status is SnapPostStatus.Interrupted) {
+		SnapNotice("This Snap didn't finish posting to Hive. Your words are saved.")
+	}
+
+	// A thread belongs to a Snap that is actually on chain. An interrupted one
+	// is not, so it gets no reply target and no Thread control — the button
+	// below becomes Retry instead.
+	val root = published
+		?.takeIf { status !is SnapPostStatus.Interrupted }
+		?.let { SnapReplyTarget.of(it.author, it.permlink) }
 	if (root != null) {
 		// Bounded by the list: `LazyColumn` composes what is on screen, so this
 		// asks the chain about the Snaps the user is actually looking at, once
@@ -1388,9 +1508,15 @@ private fun SnapActionRow(
 		}
 	}
 
-	// The subtle mark on a collapsed card that still holds typed text. Deliberately
-	// quiet: it is a reminder, not a call to action.
-	if (!open && draft.isNotEmpty()) {
+	// The subtle mark on a collapsed card that still holds typed text.
+	// Deliberately quiet: it is a reminder, not a call to action.
+	//
+	// Never shown once the row has a card. The draft lingers on disk until the
+	// chain confirms, which is a detail of how recovery works and not something
+	// the author needs told — a "Draft" badge beside a Snap they just posted
+	// says the opposite of what happened.
+	val hasCard = published != null
+	if (!open && !hasCard && draft.isNotEmpty()) {
 		Row(
 			verticalAlignment = Alignment.CenterVertically,
 			modifier = Modifier.padding(bottom = 6.dp),
@@ -1419,14 +1545,32 @@ private fun SnapActionRow(
 			// stays exactly as it was in Stage 3 — drawn as state, not as an
 			// invitation — because a thread needs a root identity to read, and a
 			// confirmed row whose author is not this account is not one.
-			status is SnapPostStatus.Posted -> WaxOutlinedButton(
-				onClick = { root?.let { threads.open(it, published) } },
-				enabled = root != null,
-				icon = WaxIcons.SpeechBubble,
+			// Intended, never sent. The only thing offered is finishing it,
+			// and only because the user asked — nothing here resumes on its own.
+			status is SnapPostStatus.Interrupted -> WaxOutlinedButton(
+				onClick = {
+					posts.retry(key, record.eventId) {
+						// Finishing a Snap is finishing it: the draft goes when
+						// the chain confirms, exactly as it does on a first
+						// attempt, and never a moment earlier.
+						snaps.discard(key)
+					}
+				},
+				icon = WaxIcons.Send,
 				modifier = Modifier.weight(1f),
 			) {
-				Text("Thread")
+				Text("Retry posting")
 			}
+
+			status is SnapPostStatus.Posted || status is SnapPostStatus.Optimistic ->
+				WaxOutlinedButton(
+					onClick = { root?.let { threads.open(it, published) } },
+					enabled = root != null,
+					icon = WaxIcons.SpeechBubble,
+					modifier = Modifier.weight(1f),
+				) {
+					Text("Thread")
+				}
 
 			// Unknown outcome. The only thing offered is another *read* — posting
 			// again could duplicate a comment that is already live.
@@ -1440,11 +1584,21 @@ private fun SnapActionRow(
 
 			open -> WaxOutlinedButton(
 				onClick = {
-					posts.post(key, record.eventId, media, draft) {
-						// The draft is only destroyed once Hive has confirmed the
-						// Snap — never optimistically.
-						snaps.discard(key)
-					}
+					posts.post(
+						key = key,
+						eventId = record.eventId,
+						media = media,
+						userText = draft,
+						// Closes the box the moment the Snap is durably ours.
+						// `collapse` flushes the draft to disk first, so this
+						// hides the composer without destroying a word of it.
+						onStaged = { snaps.collapse() },
+						onPublished = {
+							// The draft is only destroyed once Hive has confirmed
+							// the Snap — never optimistically.
+							snaps.discard(key)
+						},
+					)
 				},
 				// Locked while in flight, so a second tap cannot start a second
 				// broadcast.
@@ -1452,7 +1606,11 @@ private fun SnapActionRow(
 				icon = WaxIcons.Send,
 				modifier = Modifier.weight(1f),
 			) {
-				Text(if (posts.isBusy(key)) "Posting…" else "Post")
+				// No "Posting…", ever. The box closes on the durable intent and
+				// the card is up before anyone could read a label — and what
+				// Hive does after that happens behind the card, not in front of
+				// the user.
+				Text("Post")
 			}
 
 			else -> WaxOutlinedButton(

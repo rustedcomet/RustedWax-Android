@@ -31,9 +31,20 @@ class SnapRepliesTest {
 		.put("body", body)
 		.put("created", created)
 
+	/**
+	 * These tests are about identity and body parsing, not about votes, so they
+	 * parse with nobody signed in. The vote state a viewer would carry is
+	 * covered separately — see `HiveVoteReadTest` for the strict rules and
+	 * `a reply carries the signed-in viewer's own vote` below for the wiring.
+	 */
+	private fun parse(o: JSONObject) = SnapReplies.parse(o, viewer = null)
+
+	private fun parseAll(objects: List<JSONObject>) =
+		SnapReplies.parseAll(objects, viewer = null)
+
 	@Test
 	fun `a well formed reply parses whole`() {
-		val reply = SnapReplies.parse(chainReply())!!
+		val reply = parse(chainReply())!!
 
 		assertEquals("bob/re-20260917t120000000z", reply.contentId)
 		assertEquals("alice/rustedwax-snap-1000-aaaaaa", reply.parentId)
@@ -43,7 +54,7 @@ class SnapRepliesTest {
 
 	@Test
 	fun `an empty object is refused rather than thrown on`() {
-		assertNull(SnapReplies.parse(JSONObject()))
+		assertNull(parse(JSONObject()))
 	}
 
 	@Test
@@ -51,7 +62,7 @@ class SnapRepliesTest {
 		listOf("author", "permlink", "parent_author", "parent_permlink").forEach { field ->
 			val o = chainReply()
 			o.remove(field)
-			assertNull("missing $field must refuse", SnapReplies.parse(o))
+			assertNull("missing $field must refuse", parse(o))
 		}
 	}
 
@@ -66,12 +77,12 @@ class SnapRepliesTest {
 	@Test
 	fun `a wrong-typed identity field is refused rather than coerced`() {
 		listOf("author", "permlink", "parent_author", "parent_permlink").forEach { field ->
-			assertNull("$field as a number", SnapReplies.parse(chainReply().put(field, 42)))
-			assertNull("$field as a boolean", SnapReplies.parse(chainReply().put(field, true)))
-			assertNull("$field as null", SnapReplies.parse(chainReply().put(field, JSONObject.NULL)))
+			assertNull("$field as a number", parse(chainReply().put(field, 42)))
+			assertNull("$field as a boolean", parse(chainReply().put(field, true)))
+			assertNull("$field as null", parse(chainReply().put(field, JSONObject.NULL)))
 			assertNull(
 				"$field as an object",
-				SnapReplies.parse(chainReply().put(field, JSONObject().put("a", 1))),
+				parse(chainReply().put(field, JSONObject().put("a", 1))),
 			)
 		}
 	}
@@ -79,7 +90,7 @@ class SnapRepliesTest {
 	/** In particular: a numeric permlink must not become the permlink "42". */
 	@Test
 	fun `a numeric permlink does not become a usable permlink`() {
-		val parsed = SnapReplies.parse(chainReply().put("permlink", 42))
+		val parsed = parse(chainReply().put("permlink", 42))
 
 		assertNull(parsed)
 	}
@@ -87,14 +98,14 @@ class SnapRepliesTest {
 	/** A body is not an identity, so a wrong-typed one is treated as absent. */
 	@Test
 	fun `a wrong-typed body is read as empty rather than refusing the reply`() {
-		val reply = SnapReplies.parse(chainReply().put("body", 42))!!
+		val reply = parse(chainReply().put("body", 42))!!
 
 		assertEquals("", reply.body)
 	}
 
 	@Test
 	fun `a wrong-typed created field leaves the age unknown`() {
-		assertNull(SnapReplies.parse(chainReply().put("created", 1_789_648_560))!!.createdAtEpochSec)
+		assertNull(parse(chainReply().put("created", 1_789_648_560))!!.createdAtEpochSec)
 	}
 
 	/**
@@ -114,14 +125,14 @@ class SnapRepliesTest {
 			"",
 		).forEach {
 			assertFalse("'$it' must not be a permlink", SnapReplies.isPermlink(it))
-			assertNull(SnapReplies.parse(chainReply(permlink = it)))
+			assertNull(parse(chainReply(permlink = it)))
 		}
 	}
 
 	@Test
 	fun `an author that is not a Hive account name is refused`() {
 		listOf("Alice", "al", "a..b", ".alice", "alice.", "alice/bob", "").forEach {
-			assertNull("'$it' must not be an author", SnapReplies.parse(chainReply(author = it)))
+			assertNull("'$it' must not be an author", parse(chainReply(author = it)))
 		}
 	}
 
@@ -131,7 +142,7 @@ class SnapRepliesTest {
 		val o = chainReply()
 		o.remove("body")
 
-		val reply = SnapReplies.parse(o)!!
+		val reply = parse(o)!!
 
 		assertEquals("", reply.body)
 	}
@@ -143,7 +154,7 @@ class SnapRepliesTest {
 	@Test
 	fun `an unreadable created field leaves the age unknown`() {
 		listOf("", "yesterday", "2026-09-17T12:36:00Z", "2026-02-30T00:00:00").forEach {
-			assertNull(SnapReplies.parse(chainReply(created = it))!!.createdAtEpochSec)
+			assertNull(parse(chainReply(created = it))!!.createdAtEpochSec)
 		}
 	}
 
@@ -152,7 +163,7 @@ class SnapRepliesTest {
 		val o = chainReply()
 		o.remove("created")
 
-		assertNull(SnapReplies.parse(o)!!.createdAtEpochSec)
+		assertNull(parse(o)!!.createdAtEpochSec)
 	}
 
 	/**
@@ -163,7 +174,7 @@ class SnapRepliesTest {
 	fun `a long external reply survives the boundary intact`() {
 		val long = "e\u0301\uD83C\uDFB5 ".repeat(2_000)
 
-		val reply = SnapReplies.parse(chainReply(body = long))!!
+		val reply = parse(chainReply(body = long))!!
 
 		assertEquals(long, reply.body)
 		assertTrue(reply.body.length > 5_000)
@@ -180,7 +191,7 @@ class SnapRepliesTest {
 	fun `a body past 64 KiB is preserved whole`() {
 		val huge = "x".repeat(70_000)
 
-		val reply = SnapReplies.parse(chainReply(body = huge))!!
+		val reply = parse(chainReply(body = huge))!!
 
 		assertEquals(70_000, reply.body.length)
 		assertEquals(huge, reply.body)
@@ -193,7 +204,7 @@ class SnapRepliesTest {
 
 		val thread = SnapThreadBuilder.build(
 			rootId,
-			SnapReplies.parseAll(listOf(chainReply(body = huge))),
+			parseAll(listOf(chainReply(body = huge))),
 		)
 
 		assertEquals(1, thread.total)
@@ -242,7 +253,7 @@ class SnapRepliesTest {
 
 	@Test
 	fun `parseAll keeps the good and drops the bad without failing`() {
-		val parsed = SnapReplies.parseAll(
+		val parsed = parseAll(
 			listOf(
 				chainReply(author = "bob"),
 				JSONObject(),
@@ -252,5 +263,182 @@ class SnapRepliesTest {
 		)
 
 		assertEquals(listOf("bob", "carol"), parsed.map { it.author })
+	}
+
+	// ── the viewer's own vote, for the heart ───────────────────────────
+
+	/**
+	 * `bridge.get_discussion` already carries `active_votes`, so the heart costs
+	 * no extra request. Only the signed-in viewer's own row is kept — the rest
+	 * of the list is other people's business and is unbounded in size.
+	 */
+	@Test
+	fun `a reply carries the signed-in viewer's own vote`() {
+		val o = chainReply().put(
+			"active_votes",
+			org.json.JSONArray()
+				.put(JSONObject().put("voter", "carol").put("rshares", 99L))
+				.put(JSONObject().put("voter", "alice").put("rshares", 5_000L)),
+		)
+		val reply = SnapReplies.parse(o, viewer = "alice")!!
+		assertEquals(com.rustedwax.hive.ViewerVote.Positive(null, 5_000L), reply.viewerVote)
+	}
+
+	@Test
+	fun `a reply nobody voted on carries no vote for the viewer`() {
+		val o = chainReply().put("active_votes", org.json.JSONArray())
+		assertEquals(
+			com.rustedwax.hive.ViewerVote.None,
+			SnapReplies.parse(o, viewer = "alice")!!.viewerVote,
+		)
+	}
+
+	/**
+	 * Nobody signed in is not the same fact as "this account has not voted", and
+	 * only one of the two may ever authorize anything — so it reads as
+	 * unreadable, which draws an inert heart rather than an inviting one.
+	 */
+	@Test
+	fun `with nobody signed in the vote state is unreadable rather than absent`() {
+		val o = chainReply().put("active_votes", org.json.JSONArray())
+		listOf(null, "", "   ").forEach { viewer ->
+			assertTrue(
+				"viewer '$viewer' must not read as an absence",
+				SnapReplies.parse(o, viewer = viewer)!!.viewerVote
+					is com.rustedwax.hive.ViewerVote.Unreadable,
+			)
+		}
+	}
+
+	/** A response with no vote list at all is not a response saying nobody voted. */
+	@Test
+	fun `a reply with no active_votes carries an unreadable vote`() {
+		assertTrue(
+			SnapReplies.parse(chainReply(), viewer = "alice")!!.viewerVote
+				is com.rustedwax.hive.ViewerVote.Unreadable,
+		)
+	}
+
+
+	/**
+	 * A reply whose vote list holds an unattributable row still renders, and
+	 * still cannot show that row as the viewer's Like.
+	 *
+	 * `bridge` is the display path: it authorizes nothing, so one odd row does
+	 * not blank a conversation. What it must never do is *match* — a heart drawn
+	 * from `{"voter": ""}` would claim a Like this account never gave.
+	 */
+	@Test
+	fun `an unattributable vote row never renders as the viewer's Like`() {
+		val o = chainReply().put(
+			"active_votes",
+			org.json.JSONArray()
+				.put(JSONObject().put("voter", "").put("rshares", 5_000L))
+				.put(JSONObject().put("voter", "Alice").put("rshares", 5_000L)),
+		)
+		assertEquals(
+			com.rustedwax.hive.ViewerVote.None,
+			SnapReplies.parse(o, viewer = "alice")!!.viewerVote,
+		)
+	}
+
+	// ── the social count ──────────────────────────────────────────────
+
+	private fun vote(voter: String, rshares: Long) =
+		JSONObject().put("voter", voter).put("rshares", rshares)
+
+	@Test
+	fun `a reply carries how many people liked it`() {
+		val o = chainReply().put(
+			"active_votes",
+			org.json.JSONArray()
+				.put(vote("carol", 5_000L))
+				.put(vote("dave", 9_000L))
+				.put(vote("erin", 1L))
+				.put(vote("frank", -9_000L)),
+		)
+
+		assertEquals(3, parse(o)!!.positiveLikeCount)
+	}
+
+	@Test
+	fun `a reply nobody voted on counts zero`() {
+		assertEquals(0, parse(chainReply())!!.positiveLikeCount)
+		assertEquals(
+			0,
+			parse(chainReply().put("active_votes", org.json.JSONArray()))!!.positiveLikeCount,
+		)
+	}
+
+	/** Counted whether or not anybody is signed in: it is not about the viewer. */
+	@Test
+	fun `the count does not depend on a signed-in viewer`() {
+		val o = chainReply().put(
+			"active_votes",
+			org.json.JSONArray().put(vote("carol", 5_000L)).put(vote("alice", 7_000L)),
+		)
+
+		assertEquals(2, SnapReplies.parse(o, viewer = null)!!.positiveLikeCount)
+		assertEquals(2, SnapReplies.parse(o, viewer = "alice")!!.positiveLikeCount)
+		assertEquals(2, SnapReplies.parse(o, viewer = "zoe")!!.positiveLikeCount)
+	}
+
+	/**
+	 * The voter rows are reduced to two facts and then dropped.
+	 *
+	 * Asserted structurally because the cost is structural: a conversation is
+	 * held in memory whole, so a [SnapReply] that kept its voter list would
+	 * make opening a thread scale with other people's voting rather than with
+	 * the size of the conversation. A field able to hold many voters is the
+	 * thing that must not exist.
+	 */
+	@Test
+	fun `no voter list is retained on a reply`() {
+		val collections = SnapReply::class.java.declaredFields.filter {
+			Collection::class.java.isAssignableFrom(it.type) ||
+				Map::class.java.isAssignableFrom(it.type) ||
+				it.type.isArray
+		}
+
+		assertEquals(emptyList<Any>(), collections)
+		assertEquals(
+			"and the vote data it does keep is one enum-ish value and one Int",
+			listOf("viewerVote", "positiveLikeCount"),
+			SnapReply::class.java.declaredFields
+				.map { it.name }
+				.filter { it == "viewerVote" || it == "positiveLikeCount" },
+		)
+	}
+
+	/** The root's own count survives the builder dropping the root row. */
+	@Test
+	fun `the root Snap's like count reaches the thread`() {
+		val rootId = "alice/rustedwax-snap-1000-aaaaaa"
+		val root = chainReply(
+			author = "alice",
+			permlink = "rustedwax-snap-1000-aaaaaa",
+			parentAuthor = "peak.snaps",
+			parentPermlink = "snap-container-1789648560",
+		).put(
+			"active_votes",
+			org.json.JSONArray().put(vote("carol", 5_000L)).put(vote("dave", 9_000L)),
+		)
+		val reply = chainReply().put("active_votes", org.json.JSONArray().put(vote("erin", 1L)))
+
+		val thread = SnapThreadBuilder.build(rootId, parseAll(listOf(root, reply)))
+
+		assertEquals("the root is not a reply to itself", 1, thread.rows.size)
+		assertEquals(2, thread.rootLikeCount)
+		assertEquals(1, thread.rows.single().reply.positiveLikeCount)
+	}
+
+	@Test
+	fun `a thread with no root row in the response counts zero for it`() {
+		val thread = SnapThreadBuilder.build(
+			"alice/rustedwax-snap-1000-aaaaaa",
+			parseAll(listOf(chainReply())),
+		)
+
+		assertEquals(0, thread.rootLikeCount)
 	}
 }

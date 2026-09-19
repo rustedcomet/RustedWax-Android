@@ -103,14 +103,14 @@ class SnapCrossLockRestoreTest {
 			SnapContainer("peak.snaps", "snap-container-1789648560", "2026-09-17T12:36:00"),
 		)
 
-		override fun prepareComment(operation: TxSerializer.CommentOp): HivePreparationResult {
+		override fun prepareComment(operation: TxSerializer.CommentOp, author: String): HivePreparationResult {
 			prepared += operation
 			return HivePreparationResult.Ready(
 				PreparedHiveTransaction("{}", "tx", 2_000_000_000L),
 			)
 		}
 
-		override fun broadcastPrepared(prepared: PreparedHiveTransaction): HiveRpc.BroadcastResult {
+		override fun broadcastPrepared(prepared: PreparedHiveTransaction, author: String): HiveRpc.BroadcastResult {
 			broadcast += prepared
 			return HiveRpc.BroadcastResult.NetworkFailure("no test may reach this")
 		}
@@ -146,6 +146,7 @@ class SnapCrossLockRestoreTest {
 		state = state,
 		createdAtEpochSec = 1_000L,
 		updatedAtEpochSec = 1_000L,
+		kind = PendingSnapKind.ROOT,
 	)
 
 	/**

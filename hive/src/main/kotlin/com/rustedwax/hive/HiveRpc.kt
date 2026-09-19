@@ -186,6 +186,112 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 		return result.takeIf { it.optString("author").isNotBlank() }
 	}
 
+	/**
+	 * The signed-in account's current vote on one comment, **from a node proven
+	 * current at the moment it answered**.
+	 *
+	 * This is the safety read a Like is gated on, and it is deliberately not
+	 * built out of [call]/[callAny] like every other read in this class.
+	 * [callAny] walks the node list and returns the first answer it gets, with
+	 * no freshness check at all — which is right for the reads it serves, where
+	 * a slightly stale comment body costs nothing. It is wrong here. A node that
+	 * stopped following the chain an hour ago answers "no vote" with total
+	 * confidence for a vote cast fifty minutes ago on another frontend, and
+	 * acting on that answer is precisely the overwrite Stage 5 exists to
+	 * prevent.
+	 *
+	 * So the rule is **per node, and both halves against the same node**: ask
+	 * node N how far behind it is, and only if N is within [MAX_NODE_LAG_SEC]
+	 * ask N for the votes. Checking one node's clock and then believing a
+	 * different node's answer would be a freshness check in name only. A node
+	 * that is stale, unreachable, or answers with something that is not a vote
+	 * list is skipped and the next one is tried from the top, lag check
+	 * included.
+	 *
+	 * When no node manages both halves the answer is
+	 * [HiveVoteRead.Unavailable], which authorizes nothing. There is no
+	 * fall-through to an unchecked node and there must never be one.
+	 *
+	 * `condenser_api.get_active_votes` is the current call for this question and
+	 * the one this read uses. It answers with a **top-level array** of
+	 * `{time, voter, weight, percent, rshares, reputation}`, and with an empty
+	 * array — a real, usable "nobody voted" — for an unvoted comment. Verified
+	 * identical across all four [DEFAULT_NODES] on 2026-09-19.
+	 */
+	fun findViewerVote(author: String, permlink: String, voter: String): HiveVoteRead {
+		val params = JSONArray().put(author).put(permlink)
+		return findViewerVoteAcross(
+			voter = voter,
+			lagOf = { node -> chainLagSeconds(node) },
+			votesFrom = { node -> activeVotesFrom(node, params) },
+		)
+	}
+
+	/**
+	 * One node's `get_active_votes` answer, or null if it did not give one.
+	 *
+	 * Null covers every way this can fail to be an answer — a transport error, a
+	 * JSON-RPC `error`, a missing `result`, a `result` that is not an array —
+	 * and all of them mean "ask somebody else", never "there are no votes". The
+	 * empty array is a different thing entirely and is returned as itself.
+	 */
+	private fun activeVotesFrom(node: String, params: JSONArray): JSONArray? = runCatching {
+		val response = post(node, "condenser_api.get_active_votes", params)
+		if (response.optJSONObject("error") != null) return@runCatching null
+		response.opt("result") as? JSONArray
+	}.getOrNull()
+
+	/**
+	 * The node-selection rule on its own, with the network lifted out.
+	 *
+	 * Internal, and shaped this way so a test can prove the property that
+	 * matters and cannot be observed from the outside: that [votesFrom] is only
+	 * ever called for a node [lagOf] has just cleared, and always for *that*
+	 * node. A comment claiming as much would be worth nothing — this is the one
+	 * rule whose violation looks identical to correct behaviour until the day a
+	 * node stalls.
+	 */
+	internal fun findViewerVoteAcross(
+		voter: String,
+		lagOf: (String) -> Long?,
+		votesFrom: (String) -> JSONArray?,
+	): HiveVoteRead {
+		var lastProblem: String? = null
+		for (node in nodes) {
+			val name = node.substringAfter("//")
+			// First, and against this node. Its own answer below is worthless
+			// until this passes, so nothing else happens for this node yet.
+			val age = lagOf(node)
+			if (age == null || age > MAX_NODE_LAG_SEC) {
+				lastProblem = "$name: " + (age?.let { "${it}s behind the chain" }
+					?: "no usable head block")
+				continue
+			}
+			// Same node, immediately after. The vote list and the proof of
+			// freshness have to come from one machine or the proof is about
+			// somebody else.
+			val votes = votesFrom(node)
+			if (votes == null) {
+				lastProblem = "$name: no usable vote list"
+				continue
+			}
+			val vote = HiveVotes.fromActiveVotes(votes, voter)
+			// A node that answered with something unreadable has not answered
+			// the question. Another node may hold the same votes in a form this
+			// can parse, so the list is continued rather than the parser's
+			// refusal being handed back as though it were the chain's verdict.
+			if (vote is ViewerVote.Unreadable) {
+				lastProblem = "$name: ${vote.reason}"
+				continue
+			}
+			return HiveVoteRead.Fresh(vote, node)
+		}
+		return HiveVoteRead.Unavailable(
+			"couldn't read your current vote from an up-to-date Hive node " +
+				"(${lastProblem ?: "none reachable"})",
+		)
+	}
+
 	fun broadcast(
 		signedTx: JSONObject,
 		expectedTxId: String? = null,

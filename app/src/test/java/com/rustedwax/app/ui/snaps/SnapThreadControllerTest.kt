@@ -1,7 +1,9 @@
 package com.rustedwax.app.ui.snaps
 
 import com.rustedwax.app.snaps.PendingSnap
+import com.rustedwax.app.snaps.PendingSnapKind
 import com.rustedwax.app.snaps.PendingSnapRead
+import com.rustedwax.app.snaps.PendingSnapState
 import com.rustedwax.app.snaps.PendingSnapStore
 import com.rustedwax.app.snaps.SnapHivePort
 import com.rustedwax.app.snaps.SnapPublisher
@@ -108,10 +110,13 @@ class SnapThreadControllerTest {
 
 	/** Survives a restart the same way: the map is the disk. */
 	private class Store(val saved: MutableMap<String, String> = mutableMapOf()) : PendingSnapStore {
+		/** Flip to simulate a disk that will not hold the reply record. */
+		var writable = true
 		override fun read(account: String, eventId: String) =
 			saved["$account|$eventId"]?.let { PendingSnap.fromJson(it) }
 				?.let(PendingSnapRead::Present) ?: PendingSnapRead.Absent
 		override fun write(snap: PendingSnap): Boolean {
+			if (!writable) return false
 			saved["${snap.account}|${snap.eventId}"] = snap.toJson(); return true
 		}
 		override fun clear(account: String, eventId: String) { saved.remove("$account|$eventId") }
@@ -125,11 +130,25 @@ class SnapThreadControllerTest {
 		var content: Boolean? = false
 		/** Runs while the "network call" is in flight, to race the cleanup. */
 		var duringBroadcast: (() -> Unit)? = null
+		/**
+		 * Runs while the transaction is being built — the first moment the
+		 * network is involved at all. What the screen looks like *here* is what
+		 * the user would be staring at on a slow connection.
+		 */
+		var duringPrepare: (() -> Unit)? = null
+		/** Flip to make preparation fail, leaving the intent unfinished. */
+		var preparable = true
 		val preparedOps = mutableListOf<TxSerializer.CommentOp>()
 		override fun resolveContainer() = SnapContainerResolver.Result.Resolved(
 			SnapContainer("peak.snaps", "snap-container-1789648560", "2026-09-17T12:36:00"),
 		)
-		override fun prepareComment(operation: TxSerializer.CommentOp): HivePreparationResult {
+		override fun prepareComment(operation: TxSerializer.CommentOp, author: String): HivePreparationResult {
+			duringPrepare?.invoke()
+			if (!preparable) {
+				return HivePreparationResult.Failed(
+					HiveRpc.BroadcastResult.NetworkFailure("no chain head"),
+				)
+			}
 			preparedOps += operation
 			return HivePreparationResult.Ready(
 				PreparedHiveTransaction(
@@ -139,7 +158,7 @@ class SnapThreadControllerTest {
 				),
 			)
 		}
-		override fun broadcastPrepared(prepared: PreparedHiveTransaction): HiveRpc.BroadcastResult {
+		override fun broadcastPrepared(prepared: PreparedHiveTransaction, author: String): HiveRpc.BroadcastResult {
 			broadcasts++
 			duringBroadcast?.invoke()
 			return result
@@ -153,8 +172,15 @@ class SnapThreadControllerTest {
 		var reads = 0
 		/** Runs while a read is in flight — used to race `open` against itself. */
 		var duringRead: (() -> Unit)? = null
-		override fun read(rootAuthor: String, rootPermlink: String): List<SnapReply>? {
+		/** The viewer each read was made for, so account scoping can be asserted. */
+		var lastViewer: String? = null
+		override fun read(
+			rootAuthor: String,
+			rootPermlink: String,
+			viewer: String?,
+		): List<SnapReply>? {
 			reads++
+			lastViewer = viewer
 			duringRead?.invoke()
 			return replies
 		}
@@ -311,7 +337,11 @@ class SnapThreadControllerTest {
 	@Test
 	fun `a reader that throws does not crash the screen`() {
 		val throwing = object : SnapThreadReader {
-			override fun read(rootAuthor: String, rootPermlink: String): List<SnapReply>? =
+			override fun read(
+				rootAuthor: String,
+				rootPermlink: String,
+				viewer: String?,
+			): List<SnapReply>? =
 				throw IllegalStateException("boom")
 		}
 		val threads = SnapThreadController(
@@ -1727,5 +1757,405 @@ class SnapThreadControllerTest {
 
 		assertTrue(threads.isReplying(threads.replyKey(other)))
 		assertFalse(threads.isReplying(threads.replyKey(root)))
+	}
+
+	// ── local-first: the reply is the user's before Hive hears about it ──
+	//
+	// The invariant these pin, in one line: **nothing the network does is on
+	// the visible path.** Tapping Reply commits one local record, and from that
+	// instant the composer is gone and the reply is in the thread. Everything
+	// after — building the transaction, signing it, broadcasting it, settling
+	// it — happens behind a screen that has already moved on.
+	//
+	// The strongest of these assert *from inside the network call*: whatever
+	// they can see while a node is being asked is what a user on a slow
+	// connection sits looking at.
+
+	/** Reply, and the box is already gone by the time Hive is asked anything. */
+	@Test
+	fun `the reply composer closes on the durable intent, before any network call`() {
+		val hive = Hive(inBlock())
+		val threads = controller(hive) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(root)
+		threads.startReply(key)
+		threads.edit(key, "nice one")
+		var openDuringPrepare: Boolean? = null
+		hive.duringPrepare = { openDuringPrepare = threads.isReplying(key) }
+
+		threads.send(root, root)
+
+		assertEquals("the composer was still open while a node was asked", false, openDuringPrepare)
+		assertFalse(threads.isReplying(key))
+	}
+
+	/** And the reply itself is on screen just as early, in its right place. */
+	@Test
+	fun `the reply is in the thread before the network is asked`() {
+		val hive = Hive(inBlock())
+		// Older than the clock the controller stages under, so the two order
+		// the way the conversation actually happened.
+		val bob = SnapReply("bob", "r1", root.author, root.permlink, "hi", 900L)
+		val threads = controller(hive, reader = Reader(listOf(bob))) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(root)
+		threads.edit(key, "nice one")
+		var bodiesDuringPrepare: List<String>? = null
+		hive.duringPrepare = {
+			bodiesDuringPrepare = threads.thread(root)?.rows?.map { it.reply.body }
+		}
+
+		threads.send(root, root)
+
+		assertEquals(listOf("hi", "nice one"), bodiesDuringPrepare)
+		// Under the comment it answers, not floating at the top.
+		val mine = threads.thread(root)!!.rows.single { it.reply.body == "nice one" }
+		assertEquals("alice", mine.reply.author)
+		assertEquals(root.author, mine.reply.parentAuthor)
+		assertEquals(root.permlink, mine.reply.parentPermlink)
+	}
+
+	/** A reply to a reply lands under *that* comment, not under the root. */
+	@Test
+	fun `an optimistic reply to a nested comment keeps its position`() {
+		val bob = reply("bob", "r1", root)
+		val target = SnapReplyTarget.of("bob", "r1")!!
+		val threads = controller(reader = Reader(listOf(bob))) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(target)
+		threads.edit(key, "agreed")
+
+		threads.send(root, target)
+
+		val mine = threads.thread(root)!!.rows.single { it.reply.body == "agreed" }
+		assertEquals("bob", mine.reply.parentAuthor)
+		assertEquals("r1", mine.reply.parentPermlink)
+		assertEquals("one level in", 1, mine.depth)
+	}
+
+	/**
+	 * The durable boundary, from the other side.
+	 *
+	 * A record that could not be committed is a reply with no identity and no
+	 * permlink — nothing a crash could recover and nothing a retry could reuse.
+	 * Drawing it would be the app asserting a Snap it cannot prove it owns, so
+	 * nothing is drawn, nothing is sent, and the words stay in the composer.
+	 */
+	@Test
+	fun `a reply whose record cannot be stored is never drawn and never sent`() {
+		val hive = Hive(inBlock())
+		val store = Store().apply { writable = false }
+		val threads = controller(hive, store = store) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(root)
+		threads.startReply(key)
+		threads.edit(key, "nice one")
+
+		threads.send(root, root)
+
+		assertEquals("nothing reached a node", 0, hive.broadcasts)
+		assertEquals(emptyList<Any>(), threads.thread(root)!!.rows)
+		assertTrue(threads.status(key) is SnapPostStatus.Failed)
+		assertTrue("the composer stays open on the words", threads.isReplying(key))
+		assertEquals("nice one", threads.draft(key))
+	}
+
+	/**
+	 * Two taps, one comment.
+	 *
+	 * The second arrives while the first is still on the wire — which is now
+	 * the *normal* case, because the composer closed long before the broadcast
+	 * finished. The claim is what turns it away; the status cannot, because by
+	 * then the row reads as an ordinary reply.
+	 */
+	@Test
+	fun `a second tap during the broadcast cannot duplicate the reply`() {
+		val hive = Hive(inBlock())
+		val threads = controller(hive) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(root)
+		threads.edit(key, "nice one")
+		hive.duringBroadcast = { threads.send(root, root) }
+
+		threads.send(root, root)
+
+		assertEquals("exactly one comment", 1, hive.broadcasts)
+		assertEquals(1, hive.preparedOps.size)
+		assertEquals(1, threads.thread(root)!!.rows.size)
+	}
+
+	// ── an unfinished reply: frozen, visible, and nobody's to finish but
+	// the user's ──────────────────────────────────────────────────────
+
+	/**
+	 * Preparation failed, so the reply exists here and nowhere else.
+	 *
+	 * It keeps its place in the thread — the words are the user's and the
+	 * record is durable — and it is not reported as posted. What it must never
+	 * become is a ghost: a comment sitting in a conversation that Hive has
+	 * never heard of, with nothing on screen saying so.
+	 */
+	@Test
+	fun `an unbuilt reply stays in the thread and says it is unfinished`() {
+		val hive = Hive(inBlock()).apply { preparable = false }
+		val threads = controller(hive) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(root)
+		threads.edit(key, "nice one")
+
+		threads.send(root, root)
+
+		assertEquals("nothing was sent", 0, hive.broadcasts)
+		assertTrue(threads.status(key) is SnapPostStatus.Interrupted)
+		assertEquals(
+			listOf("nice one"),
+			threads.thread(root)!!.rows.map { it.reply.body },
+		)
+		assertEquals("the words survive", "nice one", threads.draft(key))
+	}
+
+	/** It survives a restart in exactly that state, and writes nothing. */
+	@Test
+	fun `restarting with an unfinished reply broadcasts nothing and still shows it`() {
+		val hive = Hive(inBlock()).apply { preparable = false }
+		val drafts = Drafts()
+		val store = Store()
+		val first = controller(hive, drafts = drafts, store = store) { "alice" }
+		first.open(root, null)
+		val key = first.replyKey(root)
+		first.edit(key, "nice one")
+		first.send(root, root)
+		assertTrue(first.status(key) is SnapPostStatus.Interrupted)
+
+		hive.preparable = true
+		val restarted = controller(hive, drafts = drafts, store = store) { "alice" }
+		restarted.resumePending()
+		restarted.open(root, null)
+
+		assertEquals("a restart writes nothing to Hive", 0, hive.broadcasts)
+		assertEquals(0, hive.preparedOps.size)
+		assertTrue(restarted.status(key) is SnapPostStatus.Interrupted)
+		assertEquals(listOf("nice one"), restarted.thread(root)!!.rows.map { it.reply.body })
+	}
+
+	/**
+	 * Finishing it is one explicit tap, and it publishes the **frozen** reply.
+	 *
+	 * The draft is edited in between on purpose. What gets signed is what the
+	 * user has been looking at in the thread since they tapped Reply, under the
+	 * permlink minted then — not whatever the composer happens to hold now.
+	 */
+	@Test
+	fun `finishing an interrupted reply reuses the frozen identity and words`() {
+		val hive = Hive(inBlock()).apply { preparable = false }
+		val drafts = Drafts()
+		val store = Store()
+		val threads = controller(hive, drafts = drafts, store = store) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(root)
+		threads.edit(key, "nice one")
+		threads.send(root, root)
+		val frozen = store.saved.values.single().let { PendingSnap.fromJson(it)!! }
+
+		hive.preparable = true
+		threads.edit(key, "completely different words")
+		threads.send(root, root)
+
+		assertEquals(1, hive.preparedOps.size)
+		assertEquals("the frozen body", "nice one", hive.preparedOps.single().body)
+		assertEquals("the frozen permlink", frozen.permlink, hive.preparedOps.single().permlink)
+		assertEquals("one comment", 1, hive.broadcasts)
+		assertEquals("and one record", 1, store.saved.size)
+	}
+
+	/** An ambiguous reply is read, never resent — and stays on screen. */
+	@Test
+	fun `an ambiguous reply keeps its place and is never re-broadcast`() {
+		val hive = Hive(HiveRpc.BroadcastResult.NetworkFailure("lost"))
+		val threads = controller(hive) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(root)
+		threads.edit(key, "nice one")
+		threads.send(root, root)
+
+		threads.send(root, root)
+		threads.recheck(root, root)
+
+		assertEquals("one broadcast, ever", 1, hive.broadcasts)
+		assertTrue(threads.status(key) is SnapPostStatus.Uncertain)
+		assertEquals(listOf("nice one"), threads.thread(root)!!.rows.map { it.reply.body })
+	}
+
+	/** A confirmed reply is not drawn twice once the chain returns it. */
+	@Test
+	fun `a reply the chain has caught up with is not shown twice`() {
+		val hive = Hive(inBlock())
+		val store = Store()
+		val reader = Reader(emptyList())
+		val threads = controller(hive, reader = reader, store = store) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(root)
+		threads.edit(key, "nice one")
+		threads.send(root, root)
+		val published = PendingSnap.fromJson(store.saved.values.single())!!
+
+		// hivemind catches up, and the thread is re-read.
+		reader.replies = listOf(
+			SnapReply("alice", published.permlink, root.author, root.permlink, "nice one", 1_000L),
+		)
+		threads.load(root, force = true)
+
+		assertEquals(listOf("nice one"), threads.thread(root)!!.rows.map { it.reply.body })
+	}
+
+	// ── the Stage 6 seam, on the reply side ────────────────────────────
+
+	/** An unfinished reply is surfaced as a reply, not as a Snap. */
+	@Test
+	fun `needsAttention reports an unfinished reply under its own kind`() {
+		val hive = Hive(inBlock()).apply { preparable = false }
+		val threads = controller(hive) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(root)
+		threads.edit(key, "nice one")
+		threads.send(root, root)
+
+		val attention = threads.needsAttention()
+
+		assertEquals(1, attention.size)
+		assertEquals(key, attention.single().key)
+		assertEquals(SnapAttention.Kind.REPLY, attention.single().kind)
+		assertTrue(attention.single().status is SnapPostStatus.Interrupted)
+		assertEquals("reading it sends nothing", 0, hive.broadcasts)
+	}
+
+	/** And only for the account signed in now. */
+	@Test
+	fun `another account's unfinished reply is not surfaced`() {
+		val hive = Hive(inBlock()).apply { preparable = false }
+		var who: String? = "alice"
+		val threads = controller(hive) { who }
+		threads.open(root, null)
+		threads.edit(threads.replyKey(root), "nice one")
+		threads.send(root, root)
+		assertEquals(1, threads.needsAttention().size)
+
+		who = "bob"
+
+		assertEquals(emptyList<Any>(), threads.needsAttention())
+	}
+
+	// ── discarding an unfinished reply really discards it ──────────────
+
+	/**
+	 * A reply the user throws away leaves the thread with it.
+	 *
+	 * The row is drawn from the durable record, so removing the draft alone
+	 * would leave a comment in the conversation that exists nowhere else and
+	 * that nothing on screen could finish or remove. Safe to delete for one
+	 * reason only: an intent was never built, so it reached no node.
+	 */
+	@Test
+	fun `discarding an unfinished reply removes it from the thread`() {
+		val hive = Hive(inBlock()).apply { preparable = false }
+		val store = Store()
+		val threads = controller(hive, store = store) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(root)
+		threads.edit(key, "nice one")
+		threads.send(root, root)
+		assertEquals(listOf("nice one"), threads.thread(root)!!.rows.map { it.reply.body })
+
+		threads.discard(root)
+
+		assertEquals(emptyList<Any>(), threads.thread(root)!!.rows)
+		assertEquals("the record is gone too", 0, store.saved.size)
+		assertEquals("", threads.draft(key))
+		assertEquals(SnapPostStatus.Idle, threads.status(key))
+	}
+
+	/** A reply that may be on chain is not deletable, and says so. */
+	@Test
+	fun `discarding refuses while the reply may already exist`() {
+		val hive = Hive(HiveRpc.BroadcastResult.NetworkFailure("lost"))
+		val store = Store()
+		val threads = controller(hive, store = store) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(root)
+		threads.edit(key, "nice one")
+		threads.send(root, root)
+
+		threads.discard(root)
+
+		assertEquals("the record stays", 1, store.saved.size)
+		assertEquals("and so do the words", "nice one", threads.draft(key))
+		assertTrue(threads.status(key) is SnapPostStatus.Uncertain)
+	}
+
+	/** A confirmed reply's draft still discards, and the comment stays. */
+	@Test
+	fun `discarding after a confirmed reply leaves the published comment alone`() {
+		val hive = Hive(inBlock())
+		val store = Store()
+		val threads = controller(hive, store = store) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(root)
+		threads.edit(key, "nice one")
+		threads.send(root, root)
+		// The settlement retires the draft; typing again makes one to discard.
+		threads.edit(key, "second thoughts")
+
+		threads.discard(root)
+
+		assertEquals("the published record is untouched", 1, store.saved.size)
+		assertEquals(
+			PendingSnapState.CONFIRMED,
+			PendingSnap.fromJson(store.saved.values.single())!!.state,
+		)
+		assertEquals("", threads.draft(key))
+		assertEquals(listOf("nice one"), threads.thread(root)!!.rows.map { it.reply.body })
+	}
+
+	/**
+	 * A reply record naming another author is not drawn in the thread.
+	 *
+	 * The optimistic row exists because the record proves the reply is this
+	 * user's. A record whose author disagrees with the account it is filed
+	 * under proves the opposite of that, so it draws nothing — otherwise the
+	 * conversation would show a comment under one name that would be signed
+	 * under another.
+	 */
+	@Test
+	fun `a reply record written by another author is never drawn`() {
+		val hive = Hive(inBlock())
+		val store = Store()
+		val target = root
+		val slot = SnapReplyKey.of(target, "a1b2c3d4e5f60718")
+		store.saved["alice|$slot"] = PendingSnap(
+			account = "alice",
+			eventId = slot,
+			author = "bob",
+			permlink = "rustedwax-reply-1000-frozen",
+			parentAuthor = target.author,
+			parentPermlink = target.permlink,
+			body = "not mine",
+			jsonMetadata = """{"app":"rustedwax/test"}""",
+			signedTransactionJson = "",
+			txId = "",
+			expirationEpochSec = 0L,
+			state = PendingSnapState.INTENT,
+			createdAtEpochSec = 900L,
+			updatedAtEpochSec = 900L,
+			kind = PendingSnapKind.REPLY,
+		).toJson()
+		val before = store.saved.toMap()
+		val threads = controller(hive, store = store) { "alice" }
+
+		threads.open(root, null)
+		threads.resumePending()
+
+		assertEquals(emptyList<Any>(), threads.thread(root)!!.rows)
+		assertEquals("nothing sent", 0, hive.broadcasts)
+		assertEquals("nothing written", before, store.saved)
 	}
 }

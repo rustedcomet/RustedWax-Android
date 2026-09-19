@@ -5,8 +5,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.rustedwax.app.snaps.PendingSnapKind
 import com.rustedwax.app.snaps.PostedSnap
 import com.rustedwax.app.snaps.SnapPublisher
+import com.rustedwax.app.snaps.SnapReply
 import com.rustedwax.app.snaps.SnapReplyIntent
 import com.rustedwax.app.snaps.SnapReplyKey
 import com.rustedwax.app.snaps.SnapReplyTarget
@@ -82,6 +84,27 @@ class SnapThreadController internal constructor(
 
 	/** Account-scoped `rootId` to what is known about that conversation. */
 	private val loads = mutableStateMapOf<String, SnapThreadLoad>()
+
+	/**
+	 * The last chain answer for each conversation, before local rows are mixed in.
+	 *
+	 * Kept so a reply written a moment ago can be folded into the tree without
+	 * asking Hive again — the alternative is a round trip between the tap and
+	 * the reply appearing, which is the wait this whole change removes. Not
+	 * snapshot state: nothing draws it, [loads] is what the screen reads.
+	 */
+	private val chainRows = mutableMapOf<String, List<SnapReply>>()
+
+	/**
+	 * Conversations with a reply attempt actually running.
+	 *
+	 * Separate from [statuses] for the reason the root path learned: a status
+	 * describes what the user sees, and once a reply is drawn optimistically
+	 * the status no longer says "busy" — so a second tap could start a second
+	 * publication. Ownership is held for the whole attempt and released in a
+	 * `finally`, so a restored optimistic reply is never permanently locked.
+	 */
+	private val running = mutableSetOf<String>()
 
 	/**
 	 * The card-sized form of each loaded thread, computed once when it loads.
@@ -174,6 +197,14 @@ class SnapThreadController internal constructor(
 	/** The signed-in account as the key scheme spells it. Never null. */
 	private fun accountId(): String = account()?.takeIf { it.isNotBlank() } ?: ANONYMOUS
 
+	/**
+	 * The account a chain read should look for a vote under, or null.
+	 *
+	 * [ANONYMOUS] is a **key**, not a Hive account — nobody is signed in — so it
+	 * must never be sent to the parser as a voter name to match against.
+	 */
+	private fun viewerOf(who: String): String? = who.takeIf { it != ANONYMOUS }
+
 	// ── reading ────────────────────────────────────────────────────────
 
 	/** What is known now. Null means nothing has been asked yet. */
@@ -181,6 +212,45 @@ class SnapThreadController internal constructor(
 
 	fun thread(root: SnapReplyTarget): SnapThread? =
 		(state(root) as? SnapThreadLoad.Ready)?.thread
+
+	/**
+	 * The conversation as the screen should see it: what Hive returned, plus
+	 * what this device has written and Hive has not shown back yet.
+	 *
+	 * The chain list goes first so [SnapThreadBuilder]'s de-duplication keeps
+	 * the chain's copy of any reply that appears in both — a local row is only
+	 * ever a stand-in for the seconds before the chain catches up, and it is
+	 * dropped the moment the real one arrives. Rows whose parent is not in the
+	 * conversation are discarded by the builder, so a pending reply belonging
+	 * to some other thread cannot leak into this one.
+	 */
+	private fun merged(root: SnapReplyTarget, chain: List<SnapReply>): SnapThread {
+		val who = account()?.takeIf { it.isNotBlank() }
+			?: return SnapThreadBuilder.build(root.contentId, chain)
+		val local = runCatching { publisher()?.stagedReplyRows(who).orEmpty() }
+			.getOrDefault(emptyList())
+		return SnapThreadBuilder.build(root.contentId, chain + local)
+	}
+
+	/**
+	 * Redraw one conversation from what is already known — no network.
+	 *
+	 * Called the instant a reply is committed locally, which is what puts it on
+	 * screen without a round trip.
+	 *
+	 * A conversation that has never been read successfully is left alone. There
+	 * is nothing to place the reply *in* — asserting a one-reply thread over a
+	 * failed read would replace an honest "couldn't load this" with a picture
+	 * of a conversation that has one comment in it. The reply is durable
+	 * either way, and appears as soon as the thread does.
+	 */
+	private fun redraw(root: SnapReplyTarget) {
+		val key = threadKey(root)
+		val chain = chainRows[key] ?: return
+		val built = merged(root, chain)
+		loads[key] = SnapThreadLoad.Ready(built)
+		previews[key] = SnapThreadPreview.of(built)
+	}
 
 	/** The bounded form the History card draws. Null until a thread is loaded. */
 	fun preview(root: SnapReplyTarget): SnapThreadPreview.Preview? = previews[threadKey(root)]
@@ -230,7 +300,17 @@ class SnapThreadController internal constructor(
 		scope.launch {
 			try {
 				val replies = withContext(io) {
-					runCatching { reader()?.read(root.author, root.permlink) }.getOrNull()
+					// The viewer is `who` — the account this load was started
+					// under — and never a second read of the live account. The
+					// replies come back stamped with that account's own vote for
+					// the heart, so reading the account again here would let a
+					// switch mid-flight stamp Alice's conversation with Bob's
+					// votes. The guard below then discards the whole answer
+					// anyway, which is the point: it must be discardable as one
+					// account's, not a mixture of two.
+					runCatching {
+						reader()?.read(root.author, root.permlink, viewerOf(who))
+					}.getOrNull()
 				}
 				// The account can change while a read is in flight. Alice's answer
 				// must not land anywhere at all once Bob is signed in — not under
@@ -247,7 +327,8 @@ class SnapThreadController internal constructor(
 					// nothing about the replies the card was already showing.
 					return@launch
 				}
-				val built = SnapThreadBuilder.build(root.contentId, replies)
+				chainRows[key] = replies
+				val built = merged(root, replies)
 				val preview = SnapThreadPreview.of(built)
 				loads[key] = SnapThreadLoad.Ready(built)
 				previews[key] = preview
@@ -382,6 +463,20 @@ class SnapThreadController internal constructor(
 						)
 						return@launch
 					}
+					// An intent that was never built is deleted with the draft
+					// it was written from. Nothing was sent, so nothing can be
+					// orphaned — and leaving it would leave a reply drawn in
+					// the thread that the user has just thrown away.
+					read.draft.intentId?.let { id ->
+						if (!withContext(io) { abandonIntent(who, target, id) }) {
+							if (accountId() != who) return@launch
+							statuses[key] = SnapPostStatus.Failed(
+								"RustedWax couldn't discard this reply, so it's still here.",
+							)
+							return@launch
+						}
+					}
+					if (accountId() != who) return@launch
 					read.draft
 				}
 			}
@@ -409,22 +504,45 @@ class SnapThreadController internal constructor(
 		corruptDrafts.remove(key)
 		statuses.remove(key)
 		if (replyingToState == key) replyingToState = null
+		// A discarded reply may have been drawn from its record. Redrawing the
+		// open conversation is what actually takes it off the screen; the chain
+		// is not asked again, because nothing about the chain changed.
+		openThreadState?.let(::redraw)
 	}
 
 	/** Whether an attempt, if this draft has made one, is still undecided. */
+	/**
+	 * Delete an unfinished reply record, or refuse.
+	 *
+	 * True also when there is nothing to delete — an ambiguous or confirmed row
+	 * never reaches here, because [discard] checks that first. See
+	 * [SnapPublisher.abandonIntendedReply] for why only an intent may go.
+	 */
+	private fun abandonIntent(who: String, target: SnapReplyTarget, intentId: String): Boolean {
+		val pub = publisher() ?: return false
+		return runCatching { pub.abandonIntendedReply(who, target, intentId) }.getOrDefault(false)
+	}
+
 	private fun isUnresolved(who: String, intentId: String?, target: SnapReplyTarget): Boolean {
 		if (intentId == null) return false
 		// No publisher means no way to ask, and "cannot tell" resolves towards
 		// keeping the draft rather than towards destroying it.
 		val pub = publisher() ?: return true
-		return pub.isUnresolved(who, SnapReplyKey.of(target, intentId))
+		return pub.isUnresolved(who, SnapReplyKey.of(target, intentId), PendingSnapKind.REPLY)
 	}
 
 	// ── writing ────────────────────────────────────────────────────────
 
 	fun status(key: String): SnapPostStatus = statuses[key] ?: SnapPostStatus.Idle
 
-	fun isBusy(key: String): Boolean = statuses[key] == SnapPostStatus.Posting
+	/**
+	 * True while an attempt is running.
+	 *
+	 * Answered by ownership rather than by how the row reads: once a reply is
+	 * drawn optimistically its status no longer says "busy", and a
+	 * status-based guard would stop guarding exactly while the slow work runs.
+	 */
+	fun isBusy(key: String): Boolean = key in running
 
 	/**
 	 * Publish one reply, once.
@@ -433,8 +551,9 @@ class SnapThreadController internal constructor(
 	 * reply is just as permanent and just as public:
 	 *
 	 *  - the slot is claimed **synchronously**, so a second tap arriving before
-	 *    the coroutine is scheduled finds [SnapPostStatus.Posting] and is turned
-	 *    away rather than starting a second broadcast;
+	 *    the coroutine is scheduled — or after the reply is already drawn and
+	 *    the broadcast is still running behind it — finds the claim and is
+	 *    turned away rather than starting a second broadcast;
 	 *  - the intent id is minted and **committed before the network**, so the
 	 *    attempt has a durable identity that survives process death;
 	 *  - the account is re-read inside the coroutine, both before acting and
@@ -445,24 +564,163 @@ class SnapThreadController internal constructor(
 	 */
 	fun send(root: SnapReplyTarget, target: SnapReplyTarget) {
 		val key = replyKey(target)
-		if (isBusy(key)) return
+		// Ownership, synchronously. A second tap arriving before the coroutine
+		// is scheduled — or while the reply is already drawn and the broadcast
+		// is still running behind it — finds the claim here and is turned away.
+		if (!running.add(key)) return
 		val text = draft(key)
 		// Checked here so the control is honest, and checked again at the
 		// publication boundary, which is what actually enforces it.
-		if (!SnapText.isValid(text)) return
+		if (!SnapText.isValid(text)) {
+			running.remove(key)
+			return
+		}
 		val who = accountId()
-		statuses[key] = SnapPostStatus.Posting
 
 		scope.launch {
-			val attempt = withContext(io) { publish(key, target, text) }
-			if (accountId() != who) return@launch
-			if (attempt.locked) corruptDrafts[key] = attempt.outcome.messageOrEmpty()
-			statuses[key] = attempt.outcome.toStatus()
-			if (attempt.outcome is SnapPublisher.Outcome.Published) {
-				settle(root, key, who, target, attempt.intentId)
+			try {
+				// ── Phase one: commit the reply locally. No network at all. ──
+				//
+				// A reply needs no container lookup — its parent is the comment
+				// that was tapped — so the permlink, the body and the parent are
+				// all known without asking Hive. One local write stands between
+				// the tap and the reply being on screen.
+				val staged = withContext(io) { intend(key, target, text) }
+				if (accountId() != who) return@launch
+
+				when (staged.outcome) {
+					is SnapPublisher.Staged.Failed -> {
+						if (staged.locked) corruptDrafts[key] = staged.outcome.message
+						statuses[key] = SnapPostStatus.Failed(staged.outcome.message)
+						return@launch
+					}
+					is SnapPublisher.Staged.Uncertain -> {
+						statuses[key] = SnapPostStatus.Uncertain(staged.outcome.message)
+						return@launch
+					}
+					is SnapPublisher.Staged.Published -> {
+						statuses[key] = SnapPostStatus.Posted(staged.outcome.contentId)
+						settle(root, key, who, target, staged.intentId)
+						return@launch
+					}
+					is SnapPublisher.Staged.Ready -> Unit
+				}
+
+				// ── The durable boundary. The composer closes, the reply shows. ──
+				//
+				// The record is signed-for, committed and read back, so the reply
+				// has an identity that survives a crash and a permlink that can
+				// never be minted twice. That — not Hive's acknowledgement — is
+				// what makes showing it honest.
+				statuses[key] = SnapPostStatus.Optimistic(staged.outcome.contentId)
+				if (replyingToState == key) replyingToState = null
+				redraw(root)
+
+				// ── Phase two: the ordinary publication path, behind the reply. ──
+				//
+				// `publishReply` is the same call it has always been. It resumes
+				// from the record phase one committed, reusing that permlink and
+				// that body, signs, persists the exact prepared transaction and
+				// only then broadcasts.
+				val attempt = withContext(io) { publish(key, target, text) }
+				if (accountId() != who) return@launch
+				if (attempt.locked) corruptDrafts[key] = attempt.outcome.messageOrEmpty()
+				statuses[key] = replyStatus(who, target, attempt)
+				if (attempt.outcome is SnapPublisher.Outcome.Published) {
+					settle(root, key, who, target, attempt.intentId)
+				} else {
+					// Keep the reply drawn whatever happened: the record is
+					// still on disk and the words on it are still the user's.
+					redraw(root)
+				}
+			} finally {
+				running.remove(key)
 			}
 		}
 	}
+
+	/**
+	 * What an attempt decided, without losing an intent it left behind.
+	 *
+	 * A failure is only a failure if nothing is on disk any more. When the
+	 * record is still an intent — the chain head could not be read, the key
+	 * could not be loaded — the reply has not been lost, it has been
+	 * interrupted, and it keeps its place in the thread with an explicit way
+	 * to finish it.
+	 */
+	private suspend fun replyStatus(
+		who: String,
+		target: SnapReplyTarget,
+		attempt: Attempt,
+	): SnapPostStatus {
+		val stillIntended = attempt.outcome is SnapPublisher.Outcome.Failed &&
+			attempt.intentId != null &&
+			withContext(io) {
+				publisher()?.isReplyInterrupted(who, target, attempt.intentId) == true
+			}
+		return if (stillIntended) {
+			SnapPostStatus.Interrupted("${target.contentId}#${attempt.intentId}")
+		} else {
+			attempt.outcome.toStatus()
+		}
+	}
+
+	/**
+	 * Mint-or-reuse the intent, prove it is stored, then freeze the reply.
+	 *
+	 * The same ordering [publish] has always used, stopped one step earlier.
+	 * An intent that is not durably on disk before anything slow begins is an
+	 * attempt a crash can detach from its draft, and a detached draft is one
+	 * whose next Send mints a second permlink for words that may already be on
+	 * chain.
+	 *
+	 * An undecodable stored draft stops here, before an intent exists — see
+	 * [SnapReplyDraftRead.Corrupt] for why there is no safe way to guess what
+	 * it was.
+	 */
+	private fun intend(key: String, target: SnapReplyTarget, text: String): Staging {
+		val read = drafts.read(key)
+		if (read is SnapReplyDraftRead.Corrupt) {
+			return Staging(
+				SnapPublisher.Staged.Failed(corruptMessage(read.reason)),
+				intentId = null,
+				locked = true,
+			)
+		}
+		val stored = (read as? SnapReplyDraftRead.Present)?.draft?.intentId
+		var used: String? = null
+		val who = account()
+		val pub = publisher()
+		val outcome = when {
+			who.isNullOrBlank() ->
+				SnapPublisher.Staged.Failed("Sign in to your Hive account to reply.")
+			pub == null -> SnapPublisher.Staged.Failed("Replying isn't available right now.")
+			key != SnapDraftKey.of(who, SnapReplyKey.slot(target)) ->
+				SnapPublisher.Staged.Failed(
+					"You've switched Hive accounts — this draft belongs to a different one.",
+				)
+			else -> {
+				val intentId = stored ?: SnapReplyIntent.generate()
+				if (stored == null && !drafts.beginIntent(key, intentId)) {
+					SnapPublisher.Staged.Failed(
+						"RustedWax couldn't save this reply safely, so it didn't send. " +
+							"Your draft is still here.",
+					)
+				} else {
+					used = intentId
+					pub.intendReply(who, target, intentId, text)
+				}
+			}
+		}
+		return Staging(outcome, used)
+	}
+
+	/** What staging one reply achieved, and the intent it ran under. */
+	private data class Staging(
+		val outcome: SnapPublisher.Staged,
+		val intentId: String?,
+		val locked: Boolean = false,
+	)
 
 	/**
 	 * What one attempt did, and what it believes is on disk because of it.
@@ -529,39 +787,43 @@ class SnapThreadController internal constructor(
 	 */
 	fun recheck(root: SnapReplyTarget, target: SnapReplyTarget) {
 		val key = replyKey(target)
-		if (isBusy(key)) return
+		if (!running.add(key)) return
 		val who = accountId()
 		statuses[key] = SnapPostStatus.Posting
 		scope.launch {
-			val attempt = withContext(io) {
-				val read = drafts.read(key)
-				if (read is SnapReplyDraftRead.Corrupt) {
-					return@withContext Attempt(
-						SnapPublisher.Outcome.Failed(corruptMessage(read.reason)),
-						intentId = null,
-						locked = true,
-					)
-				}
-				val stored = (read as? SnapReplyDraftRead.Present)?.draft
-				var checked: String? = null
-				val outcome = owner(key, target) { w, pub ->
-					val intentId = stored?.intentId
-						?: return@owner SnapPublisher.Outcome.Failed(
-							"There's nothing to check — this reply hasn't been sent.",
+			try {
+				val attempt = withContext(io) {
+					val read = drafts.read(key)
+					if (read is SnapReplyDraftRead.Corrupt) {
+						return@withContext Attempt(
+							SnapPublisher.Outcome.Failed(corruptMessage(read.reason)),
+							intentId = null,
+							locked = true,
 						)
-					checked = intentId
-					pub.reconcile(w, SnapReplyKey.of(target, intentId))
-						?: SnapPublisher.Outcome.Uncertain(
-							"RustedWax still can't tell whether this reply posted.",
-						)
+					}
+					val stored = (read as? SnapReplyDraftRead.Present)?.draft
+					var checked: String? = null
+					val outcome = owner(key, target) { w, pub ->
+						val intentId = stored?.intentId
+							?: return@owner SnapPublisher.Outcome.Failed(
+								"There's nothing to check — this reply hasn't been sent.",
+							)
+						checked = intentId
+						pub.reconcile(w, SnapReplyKey.of(target, intentId), PendingSnapKind.REPLY)
+							?: SnapPublisher.Outcome.Uncertain(
+								"RustedWax still can't tell whether this reply posted.",
+							)
+					}
+					Attempt(outcome, checked)
 				}
-				Attempt(outcome, checked)
-			}
-			if (accountId() != who) return@launch
-			if (attempt.locked) corruptDrafts[key] = attempt.outcome.messageOrEmpty()
-			statuses[key] = attempt.outcome.toStatus()
-			if (attempt.outcome is SnapPublisher.Outcome.Published) {
-				settle(root, key, who, target, attempt.intentId)
+				if (accountId() != who) return@launch
+				if (attempt.locked) corruptDrafts[key] = attempt.outcome.messageOrEmpty()
+				statuses[key] = replyStatus(who, target, attempt)
+				if (attempt.outcome is SnapPublisher.Outcome.Published) {
+					settle(root, key, who, target, attempt.intentId)
+				}
+			} finally {
+				running.remove(key)
 			}
 		}
 	}
@@ -616,7 +878,7 @@ class SnapThreadController internal constructor(
 			// No intent means nothing was ever attached to this draft, so there
 			// is nothing of this draft's to settle.
 			val id = intentId ?: return@withContext SnapReplySettlement.Untouched
-			val body = publisher()?.publishedBody(who, SnapReplyKey.of(target, id))
+			val body = publisher()?.publishedBody(who, SnapReplyKey.of(target, id), PendingSnapKind.REPLY)
 				?: return@withContext SnapReplySettlement.Untouched
 			drafts.settle(key, SnapReplyDraft(body, id))
 		}
@@ -657,7 +919,33 @@ class SnapThreadController internal constructor(
 		scope.launch {
 			val who = accountId()
 			if (who == ANONYMOUS) return@launch
-			val resolved = withContext(io) { publisher()?.restore(who).orEmpty() }
+
+			// ── First, from disk alone: replies this device committed to and
+			// never settled. ─────────────────────────────────────────────────
+			//
+			// Nothing here asks the network or writes anything. It matters most
+			// for an intent that was never built: that reply reached no node, so
+			// it is certainly not on Hive, and reconciliation below has nothing
+			// to say about it. Without this the row would come back from
+			// [SnapPublisher.stagedReplyRows] looking like any other reply — the
+			// exact ghost a local-first thread has to avoid — instead of saying
+			// it still needs a tap.
+			val staged = withContext(io) { publisher()?.restoreStagedReplies(who).orEmpty() }
+			if (accountId() != who) return@launch
+			staged.forEach { row ->
+				val slot = SnapReplyKey.slotOf(row.eventId) ?: return@forEach
+				val key = SnapDraftKey.of(who, slot)
+				statuses[key] = if (row.interrupted) {
+					SnapPostStatus.Interrupted(row.contentId)
+				} else {
+					SnapPostStatus.Optimistic(row.contentId)
+				}
+			}
+
+			// ── Then the reconciliation, unchanged. ──────────────────────────
+			val resolved = withContext(io) {
+				publisher()?.restore(who, PendingSnapKind.REPLY).orEmpty()
+			}
 			if (accountId() != who) return@launch
 
 			resolved.forEach { (eventId, outcome) ->
@@ -695,6 +983,27 @@ class SnapThreadController internal constructor(
 			}
 		}
 	}
+
+	/**
+	 * Every reply this device staged and could not settle, for the account
+	 * signed in now.
+	 *
+	 * The reply half of [SnapPostController.needsAttention], and deliberately
+	 * the same shape, tagged [SnapAttention.Kind.REPLY] so a reader can tell an
+	 * unfinished comment from an unfinished Snap without parsing keys. A plain
+	 * query over state that already exists: no store, no channel, no retry and
+	 * no notification machinery.
+	 */
+	fun needsAttention(): List<SnapAttention> =
+		statuses.entries
+			.filter { it.key.startsWith("${accountId()}|") }
+			.filter {
+				it.value is SnapPostStatus.Uncertain ||
+					it.value is SnapPostStatus.Failed ||
+					it.value is SnapPostStatus.Interrupted
+			}
+			.map { SnapAttention(SnapAttention.Kind.REPLY, it.key, it.value) }
+			.sortedBy { it.key }
 
 	private inline fun owner(
 		key: String,

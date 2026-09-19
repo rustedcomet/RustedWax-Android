@@ -101,6 +101,7 @@ class SettingsOutlineTest {
 				SettingsRow.BROWSER_EVIDENCE,
 				SettingsRow.WATCH_HISTORY,
 				SettingsRow.HIVE_ACCOUNT,
+				SettingsRow.SNAPS_AND_LIKES,
 				SettingsRow.APPEARANCE,
 				SettingsRow.ABOUT,
 			),
@@ -193,4 +194,39 @@ class SettingsOutlineTest {
 			assertFalse("\"$it\" is named in the settings copy", body.contains(it, ignoreCase = true))
 		}
 	}
+
+	// ── Snaps & Likes ──────────────────────────────────────────────────
+
+	/**
+	 * Directly under the Hive account, because it is a preference *about* that
+	 * account's voting power and says nothing to anyone without a key saved.
+	 */
+	@Test
+	fun `Snaps and Likes sits immediately below the Hive account`() {
+		val order = rows()
+		assertEquals(
+			order.indexOf(SettingsRow.HIVE_ACCOUNT) + 1,
+			order.indexOf(SettingsRow.SNAPS_AND_LIKES),
+		)
+	}
+
+	@Test
+	fun `Snaps and Likes is always offered`() {
+		assertTrue(SettingsRow.SNAPS_AND_LIKES in rows())
+		assertTrue(SettingsRow.SNAPS_AND_LIKES in rows(usageAccessGranted = false))
+		assertTrue(SettingsRow.SNAPS_AND_LIKES in rows(developerMode = true))
+		assertTrue(SettingsRow.SNAPS_AND_LIKES in rows(queuedCount = 3))
+	}
+
+	@Test
+	fun `the Snaps and Likes row is found by its own title`() {
+		assertEquals("Snaps & Likes", SettingsOutline.title(SettingsRow.SNAPS_AND_LIKES))
+	}
+
+	/** It is a setting, not a grant, so it never appears behind the hidden tier. */
+	@Test
+	fun `Snaps and Likes is not a developer row`() {
+		assertTrue(SettingsRow.SNAPS_AND_LIKES in rows(developerMode = false))
+	}
+
 }
