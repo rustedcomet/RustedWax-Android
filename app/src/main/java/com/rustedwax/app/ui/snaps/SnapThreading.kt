@@ -79,6 +79,22 @@ class SnapThreadController internal constructor(
 	 * summary is kept and never the thread.
 	 */
 	private val previewStore: SnapThreadPreviewStore,
+	/**
+	 * Told about every chain answer this controller accepts, so Stage 6 can
+	 * notice a reply somebody else wrote.
+	 *
+	 * Deliberately the *only* new thing Stage 6 asks of this class, and
+	 * deliberately shaped so it cannot become more. It is handed the account the
+	 * read belongs to, the root, and the rows exactly as they came back — it
+	 * returns nothing, so no caller can steer a load, and it is invoked after
+	 * the account guard below, so an answer fetched as one user is never
+	 * reported under another.
+	 *
+	 * Defaulted to a no-op because nothing about reading a conversation depends
+	 * on anybody listening: every test that existed before Stage 6 builds this
+	 * controller exactly as it did.
+	 */
+	private val onChainRead: (String, SnapReplyTarget, List<SnapReply>) -> Unit = { _, _, _ -> },
 	private val io: CoroutineDispatcher = Dispatchers.IO,
 ) {
 
@@ -256,6 +272,38 @@ class SnapThreadController internal constructor(
 	fun preview(root: SnapReplyTarget): SnapThreadPreview.Preview? = previews[threadKey(root)]
 
 	/**
+	 * The conversation a comment sits in, **if this process has read it**.
+	 *
+	 * A pure lookup over answers already in memory: no network, no store, and
+	 * nothing written. It exists so the Stage 6 bell can send an unfinished
+	 * reply or an unsettled Like to the thread it belongs to rather than to a
+	 * comment on its own.
+	 *
+	 * Null is an ordinary answer and the caller is expected to cope with it —
+	 * [chainRows] is not persisted, so after a process death nothing here has
+	 * been read yet. It is scoped to the signed-in account for the same reason
+	 * everything else in this class is: a conversation loaded under another
+	 * account is not visible, so it cannot be the answer either.
+	 */
+	fun rootOf(comment: SnapReplyTarget): SnapReplyTarget? {
+		val prefix = "${accountId()}|"
+		val id = comment.contentId
+		chainRows.forEach { (key, rows) ->
+			if (!key.startsWith(prefix)) return@forEach
+			val rootId = key.removePrefix(prefix)
+			// The comment may be the root itself, which no row in the list names
+			// — the builder drops the root's own echoed row from the tree.
+			if (rootId == id) return comment
+			if (rows.none { it.contentId == id }) return@forEach
+			val slash = rootId.indexOf('/')
+			if (slash <= 0) return@forEach
+			SnapReplyTarget.of(rootId.substring(0, slash), rootId.substring(slash + 1))
+				?.let { return it }
+		}
+		return null
+	}
+
+	/**
 	 * Fetch this conversation.
 	 *
 	 * Two callers with two different needs, and [force] is what separates them.
@@ -328,6 +376,11 @@ class SnapThreadController internal constructor(
 					return@launch
 				}
 				chainRows[key] = replies
+				// A fresh, account-checked answer is the one moment this app can
+				// learn that somebody replied to its user. Reported before the
+				// tree is built, from the rows themselves, so what the bell sees
+				// is what Hive said rather than what the builder kept.
+				onChainRead(who, root, replies)
 				val built = merged(root, replies)
 				val preview = SnapThreadPreview.of(built)
 				loads[key] = SnapThreadLoad.Ready(built)

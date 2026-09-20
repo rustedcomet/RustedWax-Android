@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+	The status-bar icon for a Snap reply.
+
+	Its own drawable rather than the app mark: Android draws a small icon as a
+	single-colour stencil, taking only the alpha channel, so `rustedwax_mark` —
+	a full-colour PNG on an opaque square — would arrive as a filled block. The
+	monochrome launcher layer is a stencil but is drawn into a 108dp adaptive
+	viewport with a wide safe zone, which leaves the mark noticeably small in a
+	24dp slot.
+
+	So this is the speech bubble from [WaxIcons.SpeechBubble], solid rather than
+	stroked. A hairline outline is what a 1.7dp stroke becomes at status-bar
+	size on a dense screen, and the shade is not a place to be subtle.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+	android:width="24dp"
+	android:height="24dp"
+	android:viewportWidth="24"
+	android:viewportHeight="24"
+	android:tint="#FFFFFFFF">
+	<path
+		android:fillColor="#FFFFFFFF"
+		android:pathData="M12,4.2C7.7,4.2 4.2,7.1 4.2,10.8c0,3.7 3.5,6.6 7.8,6.6c0.4,0 0.8,0 1.2,-0.1l4.3,2.7l-1.4,-3.6c1.9,-1.2 3.1,-3.1 3.1,-5.6C19.2,7.1 15.7,4.2 12,4.2z" />
+</vector>

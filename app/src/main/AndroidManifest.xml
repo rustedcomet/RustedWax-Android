@@ -19,6 +19,18 @@
 		android:name="android.permission.PACKAGE_USAGE_STATS"
 		tools:ignore="ProtectedPermissions" />
 
+	<!--
+		History Snap replies. Stage 6 posts one notification when a conversation
+		this app was already reading turns out to contain a new reply to the
+		signed-in account — nothing schedules, wakes or polls for it, so there is
+		no service, receiver or worker beside this line.
+
+		Required from Android 13 (API 33) and requested at runtime; on 26–32 it
+		is granted at install and the runtime request is skipped. Refusing it
+		costs the shade only: the in-app bell is unaffected.
+	-->
+	<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
 	<!-- Lets us resolve app labels for the packages publishing media sessions. -->
 	<queries>
 		<intent>

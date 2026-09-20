@@ -2,6 +2,9 @@
 <resources>
 	<string name="app_name">RustedWax</string>
 	<string name="browser_evidence_service_name">RustedWax — Browser evidence</string>
+	<!-- The notification channel for replies to this account's Snaps. -->
+	<string name="snap_replies_channel_name">Snap replies</string>
+	<string name="snap_replies_channel_description">When somebody replies to one of your Snaps.</string>
 
 	<string name="accessibility_summary">Reads the browser URL bar and visible YouTube ad labels</string>
 	<string name="accessibility_description">Optional. Lets RustedWax read the URL bar in Brave and Chrome so it knows exactly which site is playing and which video. While that bar names a YouTube Short, it also checks visible page labels for exact YouTube ad controls such as “Sponsored” or “Skip ad”, so promoted items can be excluded from scrobbling. Unmatched page text is not stored; a matched ad label is kept only in the local diagnostic log.\n\nThis service is restricted to those browsers by the system — it cannot see any other app. Nothing from this accessibility scan is sent anywhere. The separate video-lookup switch controls network requests made from a detected video id.</string>

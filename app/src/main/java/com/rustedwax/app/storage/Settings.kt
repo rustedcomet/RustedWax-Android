@@ -127,6 +127,20 @@ class Settings internal constructor(
 		set(value) = store.putBoolean(KEY_AUTO, value)
 
 	/**
+	 * Whether the Android 13 notification prompt has been shown once.
+	 *
+	 * Not a record of the *answer* — Android owns that, and asking it is a
+	 * permission check rather than a stored flag. This exists only so the prompt
+	 * is raised once, when there is first an account that could receive a reply,
+	 * rather than on every sign-in. A user who declined and later changed their
+	 * mind goes to the system settings for this app, which is where Android puts
+	 * that decision after the second refusal anyway.
+	 */
+	var notificationsAsked: Boolean
+		get() = store.getBoolean(KEY_NOTIFICATIONS_ASKED, false)
+		set(value) = store.putBoolean(KEY_NOTIFICATIONS_ASKED, value)
+
+	/**
 	 * The pre-v0.11.0 per-package opt-in, read once by
 	 * [com.rustedwax.app.detect.AppAllowlist.migrateIfNeeded] and never again.
 	 *
@@ -452,6 +466,13 @@ class Settings internal constructor(
 		 * choice somebody already made, and nobody has made this one yet.
 		 */
 		const val KEY_LIKE_PERCENT = "likeStrengthPercent"
+
+		/**
+		 * A new key with a `false` default, so no [SettingsMigration] entry is
+		 * needed: nothing has ever written it and no existing choice can be
+		 * overwritten by it.
+		 */
+		const val KEY_NOTIFICATIONS_ASKED = "notificationsAsked"
 
 		/** The gentlest Like the slider offers, and what a fresh install votes at. */
 		const val DEFAULT_LIKE_PERCENT = 10
