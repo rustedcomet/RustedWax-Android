@@ -1,11 +1,16 @@
 package com.rustedwax.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings as AndroidSettings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -13,6 +18,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
@@ -48,12 +54,17 @@ import com.rustedwax.app.snaps.HiveSnapPort
 import com.rustedwax.app.snaps.PostedSnaps
 import com.rustedwax.app.snaps.SharedPreferencesPendingSnapStore
 import com.rustedwax.app.snaps.SnapPublisher
+import com.rustedwax.app.snaps.SnapReplyTarget
 import com.rustedwax.app.snaps.HiveSnapLikePort
 import com.rustedwax.app.snaps.HiveSnapThreadReader
+import com.rustedwax.app.ui.snaps.AndroidSnapNoticeNotifier
+import com.rustedwax.app.ui.snaps.SharedPreferencesSnapNoticeStore
 import com.rustedwax.app.ui.snaps.SharedPreferencesSnapReplyDraftStore
 import com.rustedwax.app.ui.snaps.SharedPreferencesSnapThreadPreviewStore
 import com.rustedwax.app.ui.snaps.SnapComposerState
 import com.rustedwax.app.ui.snaps.SnapLikeController
+import com.rustedwax.app.ui.snaps.SnapNoticeController
+import com.rustedwax.app.ui.snaps.SnapNoticeIntent
 import com.rustedwax.app.ui.snaps.SnapPostController
 import com.rustedwax.app.ui.snaps.SnapThreadController
 import com.rustedwax.app.ui.Thumbnails
@@ -71,6 +82,22 @@ class MainActivity : ComponentActivity() {
 	private lateinit var settings: Settings
 	private val validator = KeyValidator()
 
+	/**
+	 * The conversation a tapped reply notification asked for, until the screen
+	 * has opened it.
+	 *
+	 * Held on the Activity rather than inside the composition because it arrives
+	 * from outside it — through [onNewIntent] on a running app, and through the
+	 * launch intent on a cold start — and the composition may not exist yet at
+	 * either moment. Snapshot state, so setting it from `onNewIntent` simply
+	 * recomposes the screen.
+	 *
+	 * What it holds is already validated: [readNoticeTarget] refuses a tap whose
+	 * account is not the one signed in, so nothing downstream has to re-decide
+	 * whether this conversation may be shown.
+	 */
+	private var noticeTarget by mutableStateOf<SnapReplyTarget?>(null)
+
 	override fun onResume() {
 		super.onResume()
 		RustedWaxUiVisibility.resumed()
@@ -81,6 +108,52 @@ class MainActivity : ComponentActivity() {
 		// resume as soon as Android starts delivering that app's window events.
 		RustedWaxUiVisibility.paused()
 		super.onPause()
+	}
+
+	/**
+	 * A notification tapped while the app was already running.
+	 *
+	 * The intent is stored as the Activity's own so a later configuration change
+	 * does not resurrect the previous one, exactly as the platform expects.
+	 */
+	override fun onNewIntent(intent: Intent) {
+		super.onNewIntent(intent)
+		setIntent(intent)
+		readNoticeTarget(intent)
+	}
+
+	/**
+	 * Turn a tapped notification into a conversation, or into nothing.
+	 *
+	 * Fails closed: [SnapNoticeIntent.target] refuses a tap whose account is not
+	 * the account signed in now, and refuses identifiers that are not shaped
+	 * like the things they claim to be. A notification raised days ago, before a
+	 * sign-out or an account switch, opens nothing rather than somebody else's
+	 * thread.
+	 *
+	 * The extras are consumed as they are read. A tap is a one-time request, and
+	 * leaving it on the Activity's intent would re-open the same conversation
+	 * every time the process was recreated — on a rotation, or on the way back
+	 * from Settings.
+	 */
+	private fun readNoticeTarget(intent: Intent?) {
+		val bundle = intent ?: return
+		if (!bundle.hasExtra(SnapNoticeIntent.EXTRA_ACCOUNT)) return
+		val target = SnapNoticeIntent.target(
+			// Read from the vault rather than from composition: this can run
+			// before the first frame.
+			signedIn = runCatching { vault.account?.username }.getOrNull(),
+			account = bundle.getStringExtra(SnapNoticeIntent.EXTRA_ACCOUNT),
+			rootAuthor = bundle.getStringExtra(SnapNoticeIntent.EXTRA_ROOT_AUTHOR),
+			rootPermlink = bundle.getStringExtra(SnapNoticeIntent.EXTRA_ROOT_PERMLINK),
+		)
+		listOf(
+			SnapNoticeIntent.EXTRA_ACCOUNT,
+			SnapNoticeIntent.EXTRA_ROOT_AUTHOR,
+			SnapNoticeIntent.EXTRA_ROOT_PERMLINK,
+			SnapNoticeIntent.EXTRA_REPLY,
+		).forEach(bundle::removeExtra)
+		noticeTarget = target
 	}
 
 	override fun onCreate(savedInstanceState: Bundle?) {
@@ -258,6 +331,28 @@ class MainActivity : ComponentActivity() {
 				},
 			)
 		}
+		// Stage 6's bell. Built before the thread controller because that is what
+		// feeds it: the only way this app can learn that somebody replied is a
+		// thread read, and those already happen for every posted Snap on screen.
+		//
+		// It holds a store and an account getter and nothing else. There is no
+		// publisher, no port, no key and no broadcaster behind it, so no path
+		// through a notification can reach a Hive write.
+		val notices = remember {
+			SnapNoticeController(
+				store = SharedPreferencesSnapNoticeStore(applicationContext),
+				// Read late, like everywhere else in this stack, so a switch
+				// mid-flight cannot file one account's replies under another's.
+				account = { account?.username },
+				// The system shade. Reached only for rows the store has just
+				// written unread, so every rule about who is notified is already
+				// settled by the time this is handed anything.
+				notifier = AndroidSnapNoticeNotifier(
+					context = applicationContext,
+					target = MainActivity::class.java,
+				),
+			)
+		}
 		// Reply threads. A second, parallel assembly rather than an extension of
 		// the one above: replies get their own pending store, their own draft
 		// file and their own publisher instance, so the root-Snap write path of
@@ -291,6 +386,10 @@ class MainActivity : ComponentActivity() {
 				// What a reopened History card draws before Hive answers. Only
 				// the card's own summary, never the conversation.
 				previewStore = SharedPreferencesSnapThreadPreviewStore(applicationContext),
+				// Read-only, and the whole of Stage 6's data supply. The rows
+				// handed over are the ones this load already fetched and already
+				// checked against the account it was started under.
+				onChainRead = notices::record,
 			)
 		}
 		// Likes. A third parallel assembly, and the narrowest of the three: it
@@ -323,9 +422,43 @@ class MainActivity : ComponentActivity() {
 		}
 		// Anything that was still in flight when the process last died gets
 		// settled against the chain on the way in. This reconciles; it never sends.
+		// A notification tapped on a cold start. Read here rather than in
+		// `onCreate` because the answer depends on the vault, which is opened off
+		// the main thread during start-up — and this composable only exists once
+		// that has finished.
+		LaunchedEffect(Unit) { readNoticeTarget(intent) }
+
+		// Android 13 stopped granting this at install, so the shade is silent
+		// until it is asked for. Asked once, and only when there is an account
+		// that could receive a reply — a permission prompt on a first run, before
+		// anybody has signed in or posted anything, is a dialog with no story
+		// behind it. On 26–32 `POST_NOTIFICATIONS` is not a runtime permission
+		// and this never runs.
+		val askNotifications = rememberLauncherForActivityResult(
+			ActivityResultContracts.RequestPermission(),
+		) { /* Refused is a fine answer: the bell is unaffected. */ }
+		LaunchedEffect(account?.username) {
+			if (account?.username.isNullOrBlank()) return@LaunchedEffect
+			if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return@LaunchedEffect
+			val granted = ContextCompat.checkSelfPermission(
+				this@MainActivity,
+				Manifest.permission.POST_NOTIFICATIONS,
+			) == PackageManager.PERMISSION_GRANTED
+			// Never re-asked here. Android stops showing the dialog after two
+			// refusals anyway, and a launcher that fires on every account change
+			// would be the app nagging.
+			if (!granted && !settings.notificationsAsked) {
+				settings.notificationsAsked = true
+				askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+			}
+		}
 		LaunchedEffect(account?.username) {
 			posts.resumePending()
 			threads.resumePending()
+			// Re-read rather than migrated, on the way in and on every switch.
+			// This reconciles nothing and sends nothing; it reads a preference
+			// file whose entire contents are public Hive comment ids.
+			notices.load()
 		}
 		// Mirrored into composition so the slider redraws as it moves. The value
 		// a Like actually votes with is read from `settings` at the moment of
@@ -437,6 +570,9 @@ class MainActivity : ComponentActivity() {
 			posts = posts,
 			threads = threads,
 			likes = likes,
+			notices = notices,
+			openThreadRequest = noticeTarget,
+			onThreadRequestConsumed = { noticeTarget = null },
 			tracksWithoutVideoId = quietBar,
 			queuedCount = queued,
 			youTubeAccount = youTubeAccount,

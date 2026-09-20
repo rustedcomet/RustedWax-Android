@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -72,7 +73,11 @@ import com.rustedwax.app.ui.snaps.DiscardSnapDialog
 import com.rustedwax.app.ui.snaps.PostedSnapCard
 import com.rustedwax.app.ui.snaps.SnapComposer
 import com.rustedwax.app.snaps.SnapMedia
+import com.rustedwax.app.ui.snaps.SnapAttentionBell
+import com.rustedwax.app.ui.snaps.SnapAttentionModel
+import com.rustedwax.app.ui.snaps.SnapAttentionTarget
 import com.rustedwax.app.ui.snaps.SnapComposerState
+import com.rustedwax.app.ui.snaps.SnapNoticeController
 import com.rustedwax.app.ui.snaps.SnapPostController
 import com.rustedwax.app.ui.snaps.SnapPostStatus
 import com.rustedwax.app.ui.snaps.SnapThreadController
@@ -160,6 +165,23 @@ fun MainScreen(
 	threads: SnapThreadController,
 	/** Likes on other people's comments, inside those threads. */
 	likes: SnapLikeController,
+	/**
+	 * Incoming replies, for the top bar's bell.
+	 *
+	 * The three controllers above are read for the *other* three things the bell
+	 * shows — an unfinished Snap, an unfinished reply, an unsettled Like — so
+	 * this one only carries the fact none of them can know.
+	 */
+	notices: SnapNoticeController,
+	/**
+	 * A conversation a tapped reply notification asked for, or null.
+	 *
+	 * Already validated against the signed-in account by
+	 * [com.rustedwax.app.ui.snaps.SnapNoticeIntent], so this screen opens it
+	 * rather than re-deciding whether it may.
+	 */
+	openThreadRequest: SnapReplyTarget?,
+	onThreadRequestConsumed: () -> Unit,
 	tracksWithoutVideoId: Int,
 	queuedCount: Int,
 	youTubeAccount: YouTubeSessionVault.Session?,
@@ -216,6 +238,41 @@ fun MainScreen(
 	}
 	val swipeThreshold = with(LocalDensity.current) { 48.dp.toPx() }
 
+	// The History row the bell was asked to show, until History has shown it.
+	//
+	// A one-shot request rather than a selection: it is consumed by the list
+	// that scrolls to it, so coming back to History later does not jump to a
+	// card the user dealt with minutes ago.
+	var focusEventId by remember { mutableStateOf<String?>(null) }
+
+	// The bell's contents, rebuilt from live state rather than stored.
+	//
+	// The three `needsAttention()` calls are plain queries over snapshot state
+	// the controllers already hold, so reading them here subscribes this screen
+	// to exactly the state that decides what the bell says. Nothing is copied,
+	// so the bell and the card it points at cannot disagree.
+	val attention = SnapAttentionModel.of(
+		notices = notices.unread(),
+		rootAttention = posts.needsAttention(),
+		replyAttention = threads.needsAttention(),
+		likeAttention = likes.needsAttention(),
+	)
+
+	// A tapped notification, honoured once. Keyed on the request itself so a
+	// second tap on the same conversation re-opens it, and cleared immediately so
+	// a rotation does not re-open a sheet the user has since dismissed.
+	LaunchedEffect(openThreadRequest) {
+		val target = openThreadRequest ?: return@LaunchedEffect
+		chosen = Destination.HISTORY
+		// The same call the bell makes, with the same null root Snap and for the
+		// same reason: History did not vouch for this root, so the sheet draws
+		// the conversation without a card above it. Marking the notice read is
+		// left to the sheet appearing, which is where every other route is
+		// answered too.
+		threads.open(target, null)
+		onThreadRequestConsumed()
+	}
+
 	Scaffold(
 		containerColor = MaterialTheme.colorScheme.background,
 		topBar = {
@@ -235,9 +292,53 @@ fun MainScreen(
 						Text("RustedWax", style = MaterialTheme.typography.titleLarge)
 					}
 				},
+				// The top bar is where an overflow would go, and the bell goes
+				// there with it. It draws nothing at all while there is nothing
+				// to say — see [SnapAttentionBell].
+				actions = {
+					SnapAttentionBell(
+						rows = attention,
+						onOpen = { row ->
+							// Every destination is History: a Snap lives on a
+							// History card and a conversation opens over that
+							// list. So the tab moves first, and then the row
+							// says what to do once it is there.
+							chosen = Destination.HISTORY
+							when (val target = row.target) {
+								// `null` root Snap: the sheet draws the
+								// conversation without the card above it, which
+								// is the honest rendering when the bell — not
+								// History — is what vouched for this root.
+								is SnapAttentionTarget.Thread ->
+									threads.open(target.root, null)
+
+								// Resolved here rather than when the row was
+								// built, so the answer is the freshest one this
+								// process has. A comment whose conversation has
+								// not been read — after a restart, nothing has —
+								// opens at itself: `get_discussion` returns any
+								// comment's own subtree, so the unfinished reply,
+								// its slot and its draft are all in the thread
+								// that opens. A narrower view of the right place,
+								// never a different place.
+								is SnapAttentionTarget.Comment ->
+									threads.open(
+										threads.rootOf(target.comment) ?: target.comment,
+										null,
+									)
+
+								is SnapAttentionTarget.HistoryEvent ->
+									focusEventId = target.eventId
+
+								null -> Unit
+							}
+						},
+					)
+				},
 				colors = TopAppBarDefaults.topAppBarColors(
 					containerColor = MaterialTheme.colorScheme.background,
 					titleContentColor = MaterialTheme.colorScheme.onBackground,
+					actionIconContentColor = MaterialTheme.colorScheme.onBackground,
 				),
 			)
 		},
@@ -383,6 +484,9 @@ fun MainScreen(
 							posts,
 							threads,
 							likes,
+							notices,
+							focusEventId,
+							{ focusEventId = null },
 							onOpenVideo,
 							onMute,
 						)
@@ -1221,6 +1325,10 @@ private fun HistoryList(
 	posts: SnapPostController,
 	threads: SnapThreadController,
 	likes: SnapLikeController,
+	notices: SnapNoticeController,
+	/** A card the bell asked for, or null. Consumed once it has been reached. */
+	focusEventId: String?,
+	onFocusConsumed: () -> Unit,
 	onOpenVideo: (String) -> Unit,
 	onMute: (FinalizationRuntime.ScrobbleRecord) -> Unit,
 ) {
@@ -1251,6 +1359,12 @@ private fun HistoryList(
 	// that opened it so the sheet is not a child of a `LazyColumn` item that can
 	// scroll away, or be recycled, underneath it.
 	threads.openThread?.let { root ->
+		// Reaching a conversation is what answers a notification about it. This
+		// is the one place every route into the sheet passes through — the bell,
+		// the card's Thread button and the preview strip all end here — so the
+		// rule is stated once instead of beside three click handlers, one of
+		// which would eventually be added without it.
+		LaunchedEffect(root.contentId) { notices.markThreadRead(root) }
 		SnapThreadSheet(
 			root = root,
 			rootSnap = threads.openRootSnap,
@@ -1311,7 +1425,23 @@ private fun HistoryList(
 				color = MaterialTheme.colorScheme.onSurfaceVariant,
 			)
 		}
-		LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+		// Hoisted so the bell can bring one card into view. History is otherwise
+		// exactly as it was — the state is only ever moved by the user scrolling.
+		val listState = rememberLazyListState()
+		// A request from the bell, honoured once and then cleared.
+		//
+		// A row that is not in `recent` is not scrolled to and the request is
+		// still consumed: History keeps a bounded number of rows, so a Snap old
+		// enough to have fallen off the list is a real possibility, and jumping
+		// to whatever happens to sit at that index would be worse than staying
+		// put. The bell row disappears with the state behind it either way.
+		LaunchedEffect(focusEventId, recent) {
+			val id = focusEventId ?: return@LaunchedEffect
+			val index = recent.indexOfFirst { it.eventId == id }
+			if (index >= 0) listState.animateScrollToItem(index)
+			onFocusConsumed()
+		}
+		LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
 			// Keyed by the row's own identity, because rows are *prepended*: a
 			// new scrobble lands at index 0 and shifts every existing row down
 			// one. Identified by position, Compose hands the composition that

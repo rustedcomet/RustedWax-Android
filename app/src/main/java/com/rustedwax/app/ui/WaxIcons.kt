@@ -135,6 +135,18 @@ object WaxIcons {
 		),
 	)
 
+	/**
+	 * Social activity and unresolved social actions: the top bar's bell.
+	 *
+	 * Drawn at the same weight as the rest of the set rather than borrowed from
+	 * a font, for the reason the others are. The clapper is a separate stroke so
+	 * the glyph still reads at 20dp, which is the size the top bar gives it.
+	 */
+	val Bell = stroked(
+		"M6.4 10.2a5.6 5.6 0 0 1 11.2 0c0 3.1.8 4.8 1.6 5.8H4.8c.8-1 1.6-2.7 1.6-5.8z",
+		"M10.2 18.6a1.9 1.9 0 0 0 3.6 0",
+	)
+
 	/** The posting key. */
 	val Key = stroked(
 		"M15.4 4.4a4.6 4.6 0 1 0 0 9.2 4.6 4.6 0 0 0 0-9.2z",
