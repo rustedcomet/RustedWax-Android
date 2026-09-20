@@ -85,7 +85,7 @@ class SnapPublicationTest {
 
 		override fun resolveContainer() = container
 
-		override fun prepareComment(operation: TxSerializer.CommentOp): HivePreparationResult {
+		override fun prepareComment(operation: TxSerializer.CommentOp, author: String): HivePreparationResult {
 			prepares++
 			preparedOps += operation
 			return HivePreparationResult.Ready(
@@ -97,7 +97,7 @@ class SnapPublicationTest {
 			)
 		}
 
-		override fun broadcastPrepared(prepared: PreparedHiveTransaction): HiveRpc.BroadcastResult {
+		override fun broadcastPrepared(prepared: PreparedHiveTransaction, author: String): HiveRpc.BroadcastResult {
 			broadcasts++
 			return broadcastResults.removeFirstOrNull()
 				?: HiveRpc.BroadcastResult.NetworkFailure("no scripted result")
@@ -233,7 +233,7 @@ class SnapPublicationTest {
 	fun `corrupt state stays locked on recheck`() {
 		val store = MemoryStore().apply { corrupt += "$account|$eventId" }
 		val hive = FakeHive()
-		val outcome = publisher(hive, store).reconcile(account, eventId)
+		val outcome = publisher(hive, store).reconcile(account, eventId, PendingSnapKind.ROOT)
 		assertTrue(outcome is SnapPublisher.Outcome.Uncertain)
 		assertEquals(0, hive.broadcasts)
 	}
@@ -322,7 +322,7 @@ class SnapPublicationTest {
 	fun `an exception on the way out is uncertain`() {
 		val store = MemoryStore()
 		val hive = object : SnapHivePort by FakeHive() {
-			override fun broadcastPrepared(prepared: PreparedHiveTransaction): Nothing =
+			override fun broadcastPrepared(prepared: PreparedHiveTransaction, author: String): Nothing =
 				throw RuntimeException("socket died")
 		}
 		val outcome = SnapPublisher(hive, store, { 1_000L }, { "rustedwax-snap-1000-aaaaaa" })
@@ -478,6 +478,7 @@ class SnapPublicationTest {
 			state = PendingSnapState.ACCEPTED_UNCONFIRMED,
 			createdAtEpochSec = 1_000L,
 			updatedAtEpochSec = 1_000L,
+			kind = PendingSnapKind.ROOT,
 		)
 		// Filed under event-a, but claiming event-b.
 		store.saved["$account|event-a"] = stray.toJson()
@@ -517,7 +518,7 @@ class SnapPublicationTest {
 		listOf("event-a", "event-b").forEach { implicated ->
 			val store = storeWithMismatch()
 			val hive = FakeHive(content = false)
-			val outcome = publisher(hive, store).reconcile(account, implicated)
+			val outcome = publisher(hive, store).reconcile(account, implicated, PendingSnapKind.ROOT)
 			assertTrue("$implicated must stay locked", outcome is SnapPublisher.Outcome.Uncertain)
 			assertEquals(0, hive.broadcasts)
 		}

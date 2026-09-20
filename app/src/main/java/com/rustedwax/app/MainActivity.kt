@@ -9,6 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -47,10 +48,12 @@ import com.rustedwax.app.snaps.HiveSnapPort
 import com.rustedwax.app.snaps.PostedSnaps
 import com.rustedwax.app.snaps.SharedPreferencesPendingSnapStore
 import com.rustedwax.app.snaps.SnapPublisher
+import com.rustedwax.app.snaps.HiveSnapLikePort
 import com.rustedwax.app.snaps.HiveSnapThreadReader
 import com.rustedwax.app.ui.snaps.SharedPreferencesSnapReplyDraftStore
 import com.rustedwax.app.ui.snaps.SharedPreferencesSnapThreadPreviewStore
 import com.rustedwax.app.ui.snaps.SnapComposerState
+import com.rustedwax.app.ui.snaps.SnapLikeController
 import com.rustedwax.app.ui.snaps.SnapPostController
 import com.rustedwax.app.ui.snaps.SnapThreadController
 import com.rustedwax.app.ui.Thumbnails
@@ -232,7 +235,13 @@ class MainActivity : ComponentActivity() {
 			val publisher = SnapPublisher(
 				// The key is read inside the port at signing time, so it is never
 				// held by the publisher and an account switch changes it.
-				hive = HiveSnapPort(loadKey = { vault.loadKey() }),
+				hive = HiveSnapPort(
+					loadKey = { vault.loadKey() },
+					// Read beside the key at signing time: one Hive posting key
+					// can authorize more than one account, so the key alone
+					// cannot prove which account a comment belongs to.
+					storedAccount = { vault.account?.username },
+				),
 				store = pendingSnaps,
 			)
 			SnapPostController(
@@ -259,7 +268,13 @@ class MainActivity : ComponentActivity() {
 				SharedPreferencesPendingSnapStore.REPLIES,
 			)
 			val replyPublisher = SnapPublisher(
-				hive = HiveSnapPort(loadKey = { vault.loadKey() }),
+				hive = HiveSnapPort(
+					loadKey = { vault.loadKey() },
+					// Read beside the key at signing time: one Hive posting key
+					// can authorize more than one account, so the key alone
+					// cannot prove which account a comment belongs to.
+					storedAccount = { vault.account?.username },
+				),
 				store = pendingReplies,
 			)
 			SnapThreadController(
@@ -278,12 +293,44 @@ class MainActivity : ComponentActivity() {
 				previewStore = SharedPreferencesSnapThreadPreviewStore(applicationContext),
 			)
 		}
+		// Likes. A third parallel assembly, and the narrowest of the three: it
+		// holds no store, no draft file and no pending record, because a vote's
+		// durable record is the chain's own and the chain answers for free on
+		// every thread read. What it does hold is a key — casting a vote signs —
+		// which is why it is a port of its own rather than another method on the
+		// read-only thread reader.
+		val likes = remember {
+			SnapLikeController(
+				scope = lifecycleScope,
+				port = {
+					// Both reads happen inside the port at signing time, so
+					// neither is held here and an account switch changes both.
+					// The username is read beside the key on purpose: one Hive
+					// posting key can authorize more than one account, so the
+					// key alone cannot prove which account a vote belongs to.
+					HiveSnapLikePort(
+						loadKey = { vault.loadKey() },
+						storedAccount = { vault.account?.username },
+					)
+				},
+				// Read late, at the moment of acting, so a switch mid-tap cannot
+				// vote as, or write state for, the previous account.
+				account = { account?.username },
+				// Likewise late: changing the slider affects future Likes only,
+				// and never an existing vote on chain.
+				likePercent = { settings.likePercent },
+			)
+		}
 		// Anything that was still in flight when the process last died gets
 		// settled against the chain on the way in. This reconciles; it never sends.
 		LaunchedEffect(account?.username) {
 			posts.resumePending()
 			threads.resumePending()
 		}
+		// Mirrored into composition so the slider redraws as it moves. The value
+		// a Like actually votes with is read from `settings` at the moment of
+		// casting, never from here — see the controller above.
+		var likePercent by remember { mutableIntStateOf(settings.likePercent) }
 		var autoScrobble by remember { mutableStateOf(settings.autoScrobble) }
 		// Re-read on every poll: the session is written by the sign-in
 		// activity, and the refusal by the resolver on a background
@@ -389,6 +436,7 @@ class MainActivity : ComponentActivity() {
 			snaps = snaps,
 			posts = posts,
 			threads = threads,
+			likes = likes,
 			tracksWithoutVideoId = quietBar,
 			queuedCount = queued,
 			youTubeAccount = youTubeAccount,
@@ -399,6 +447,14 @@ class MainActivity : ComponentActivity() {
 			developerMode = developerMode,
 			appVersion = BuildConfig.VERSION_NAME,
 			themeChoice = themeChoice,
+			likePercent = likePercent,
+			onLikePercent = { chosen ->
+				// Clamped again by the store. Rounding already happened at the
+				// slider, so what is shown, what is stored and what is signed
+				// are the same whole number.
+				settings.likePercent = chosen
+				likePercent = settings.likePercent
+			},
 			onThemeChoice = { choice ->
 				settings.themeChoice = choice.name
 				onThemeChoice(choice)

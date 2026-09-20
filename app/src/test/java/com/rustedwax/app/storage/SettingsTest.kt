@@ -273,4 +273,74 @@ class SettingsTest {
 
 		assertEquals(SettingsMigration.CURRENT_VERSION, store.getInt("settingsSchemaVersion", 0))
 	}
+
+	// ── default Like strength ──────────────────────────────────────────
+
+	/**
+	 * The gentlest setting the slider offers, not a middle value. Spending as
+	 * little of somebody's voting power as possible until they ask otherwise is
+	 * the right default for an irreversible thing that costs them something.
+	 */
+	@Test
+	fun `a fresh install Likes at ten percent`() {
+		assertEquals(10, Settings(MemoryStore()).likePercent)
+	}
+
+	/** An upgrading install has never chosen one either, so it gets the same. */
+	@Test
+	fun `an upgrading install also starts at ten percent`() {
+		assertEquals(10, Settings(upgrading()).likePercent)
+	}
+
+	@Test
+	fun `a chosen Like strength is stored and read back exactly`() {
+		val settings = Settings(upgrading())
+		listOf(10, 11, 37, 63, 99, 100).forEach {
+			settings.likePercent = it
+			assertEquals("a $it% Like must round-trip", it, settings.likePercent)
+		}
+	}
+
+	/**
+	 * Clamped on the way in **and** on the way out. The stored value outlives
+	 * the slider that wrote it, so a hand-edited preference file or a value from
+	 * an older build must not become a 0% vote — which Hive reads as *removing*
+	 * a vote — or one stronger than anybody chose.
+	 */
+	@Test
+	fun `a Like strength below the floor is clamped on write`() {
+		val settings = Settings(upgrading())
+		listOf(9, 0, -1, -1000).forEach {
+			settings.likePercent = it
+			assertEquals("$it must clamp up to the floor", 10, settings.likePercent)
+		}
+	}
+
+	@Test
+	fun `a Like strength above full is clamped on write`() {
+		val settings = Settings(upgrading())
+		listOf(101, 1000, Int.MAX_VALUE).forEach {
+			settings.likePercent = it
+			assertEquals("$it must clamp down to full", 100, settings.likePercent)
+		}
+	}
+
+	@Test
+	fun `a stored value outside the range is clamped on read`() {
+		assertEquals(10, Settings(upgrading("likeStrengthPercent" to 0)).likePercent)
+		assertEquals(10, Settings(upgrading("likeStrengthPercent" to -5)).likePercent)
+		assertEquals(100, Settings(upgrading("likeStrengthPercent" to 5000)).likePercent)
+	}
+
+	/** A new key, so the migration has nothing to preserve and must not invent one. */
+	@Test
+	fun `the Like strength is not written until somebody chooses one`() {
+		val store = MemoryStore()
+		Settings(store).likePercent
+		assertFalse(
+			"reading the default must not store it",
+			store.contains("likeStrengthPercent"),
+		)
+	}
+
 }

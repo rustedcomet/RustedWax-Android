@@ -167,6 +167,19 @@ object WaxIcons {
 		"M20.6 3.4 10.3 13.7",
 	)
 
+	/**
+	 * Like: an unfilled heart, for a comment this account has not voted on.
+	 *
+	 * The same path as [HeartFilled] on purpose. The two are drawn with one
+	 * outline so the control does not change size, shift the row, or appear to
+	 * move when it fills — the only difference between them is whether the
+	 * inside is painted.
+	 */
+	val Heart = stroked(HEART)
+
+	/** Like: the same heart with a positive Hive vote behind it. */
+	val HeartFilled = stroked(HEART, fills = listOf(HEART))
+
 	/** Close the composer. Small, borderless, and the only way out of it. */
 	val Close = stroked(
 		"M6.6 6.6 17.4 17.4",
@@ -182,6 +195,17 @@ object WaxIcons {
 			"M14.7 9.2a1.05 1.05 0 1 0 0 2.1 1.05 1.05 0 0 0 0-2.1z",
 		),
 	)
+
+	/**
+	 * The one heart outline, shared by [Heart] and [HeartFilled].
+	 *
+	 * Written down once rather than twice so the two can never drift into
+	 * slightly different shapes — which, on a control that swaps between them in
+	 * place, would read as the icon twitching rather than as it filling.
+	 */
+	private const val HEART =
+		"M12 20.4C12 20.4 3.4 15.2 3.4 9.5a4.6 4.6 0 0 1 8.6-2.3 4.6 4.6 0 0 1 8.6 2.3" +
+			"c0 5.7-8.6 10.9-8.6 10.9z"
 
 	/**
 	 * Builds a 24dp icon from SVG path data.

@@ -3,6 +3,7 @@ package com.rustedwax.app.storage
 import com.rustedwax.core.*
 import android.content.Context
 import android.content.SharedPreferences
+import com.rustedwax.hive.HiveBroadcaster
 import com.rustedwax.hive.PrivateScrobble
 import com.rustedwax.core.ListenPolicyDefaults
 
@@ -358,6 +359,33 @@ class Settings internal constructor(
 	val thresholdPercent: Int get() = (scrobbleThreshold * 100).toInt()
 
 	/**
+	 * How hard a Like votes, as a whole percentage.
+	 *
+	 * Clamped on **both** sides, to the same bounds
+	 * [com.rustedwax.hive.HiveBroadcaster] enforces again at signing time. The
+	 * duplication is deliberate: this value outlives the slider that wrote it,
+	 * so a hand-edited preference file, a value from an older build or an
+	 * off-by-one at the slider's end must not become a 0% vote — which Hive
+	 * reads as *removing* a vote — or a vote stronger than the user ever chose.
+	 *
+	 * Stored as a whole percent and nothing finer. The slider moves
+	 * continuously and rounds before it writes, so the stored value is always
+	 * something the settings screen can show back exactly; there is deliberately
+	 * no coarse 5% or 10% step, because a Like strength is a number the user
+	 * picked rather than a bucket the app offers.
+	 *
+	 * Read late, at the moment a Like is cast, so changing it only ever affects
+	 * future Likes — an existing vote on chain is never revisited.
+	 */
+	var likePercent: Int
+		get() = store.getInt(KEY_LIKE_PERCENT, DEFAULT_LIKE_PERCENT)
+			.coerceIn(HiveBroadcaster.MIN_LIKE_PERCENT, HiveBroadcaster.MAX_LIKE_PERCENT)
+		set(value) = store.putInt(
+			KEY_LIKE_PERCENT,
+			value.coerceIn(HiveBroadcaster.MIN_LIKE_PERCENT, HiveBroadcaster.MAX_LIKE_PERCENT),
+		)
+
+	/**
 	 * Newline-delimited, because a package name cannot contain one and a human
 	 * label very well might contain a comma.
 	 */
@@ -417,6 +445,16 @@ class Settings internal constructor(
 
 		/** Same key the extension uses. */
 		const val KEY_PERCENT = "scrobblePercent"
+
+		/**
+		 * Default Like strength. A new key, so no [SettingsMigration] entry is
+		 * needed: that mechanism exists to stop a *changed* default rewriting a
+		 * choice somebody already made, and nobody has made this one yet.
+		 */
+		const val KEY_LIKE_PERCENT = "likeStrengthPercent"
+
+		/** The gentlest Like the slider offers, and what a fresh install votes at. */
+		const val DEFAULT_LIKE_PERCENT = 10
 
 		@Suppress("unused")
 		val DEFAULT = ListenPolicyDefaults.THRESHOLD

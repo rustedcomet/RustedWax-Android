@@ -87,7 +87,7 @@ class SnapReplyPublicationTest {
 			)
 		}
 
-		override fun prepareComment(operation: TxSerializer.CommentOp): HivePreparationResult {
+		override fun prepareComment(operation: TxSerializer.CommentOp, author: String): HivePreparationResult {
 			preparedOps += operation
 			return HivePreparationResult.Ready(
 				PreparedHiveTransaction(
@@ -98,7 +98,7 @@ class SnapReplyPublicationTest {
 			)
 		}
 
-		override fun broadcastPrepared(prepared: PreparedHiveTransaction): HiveRpc.BroadcastResult {
+		override fun broadcastPrepared(prepared: PreparedHiveTransaction, author: String): HiveRpc.BroadcastResult {
 			broadcasts++
 			return broadcastResults.removeFirstOrNull()
 				?: HiveRpc.BroadcastResult.NetworkFailure("no scripted result")
@@ -249,7 +249,7 @@ class SnapReplyPublicationTest {
 
 		assertEquals("reply|alice/rustedwax-snap-1000-aaaaaa|$intent", stored(store).eventId)
 		assertEquals("reply|alice/rustedwax-snap-1000-aaaaaa", SnapReplyKey.slotOf(stored(store).eventId))
-		assertEquals(PendingSnap.KIND_REPLY, stored(store).kind)
+		assertEquals(PendingSnapKind.REPLY, stored(store).kind)
 	}
 
 	// ── the rule that matters: ambiguity never duplicates ──────────────
@@ -285,7 +285,7 @@ class SnapReplyPublicationTest {
 		pub.publishReply(account, target, intent, "hi")
 
 		hive.content = true
-		val outcome = pub.reconcile(account, slot)
+		val outcome = pub.reconcile(account, slot, PendingSnapKind.REPLY)
 
 		assertTrue(outcome is SnapPublisher.Outcome.Published)
 		assertEquals(1, hive.broadcasts)
@@ -308,7 +308,7 @@ class SnapReplyPublicationTest {
 		pub.publishReply(account, target, intent, "hi")
 
 		hive.evidence = HiveRpc.TransactionEvidence.ABSENT
-		assertTrue(pub.reconcile(account, slot) is SnapPublisher.Outcome.Failed)
+		assertTrue(pub.reconcile(account, slot, PendingSnapKind.REPLY) is SnapPublisher.Outcome.Failed)
 
 		val retry = pub.publishReply(account, target, intent, "hi")
 
@@ -342,7 +342,7 @@ class SnapReplyPublicationTest {
 			state = PendingSnapState.PREPARED,
 			createdAtEpochSec = 1_000L,
 			updatedAtEpochSec = 1_000L,
-			kind = PendingSnap.KIND_REPLY,
+			kind = PendingSnapKind.REPLY,
 		).toJson()
 
 		val outcome = publisher(hive, store).publishReply(account, target, intent, "hi")
@@ -484,13 +484,13 @@ class SnapReplyPublicationTest {
 		val store = MemoryStore()
 		val pub = publisher(hive, store)
 
-		assertFalse("nothing sent yet", pub.isUnresolved(account, slot))
+		assertFalse("nothing sent yet", pub.isUnresolved(account, slot, PendingSnapKind.REPLY))
 		pub.publishReply(account, target, intent, "hi")
-		assertTrue("ambiguous", pub.isUnresolved(account, slot))
+		assertTrue("ambiguous", pub.isUnresolved(account, slot, PendingSnapKind.REPLY))
 
 		hive.content = true
-		pub.reconcile(account, slot)
-		assertFalse("proven published", pub.isUnresolved(account, slot))
+		pub.reconcile(account, slot, PendingSnapKind.REPLY)
+		assertFalse("proven published", pub.isUnresolved(account, slot, PendingSnapKind.REPLY))
 	}
 
 	// ── the publication boundary enforces the reply rules ──────────────
@@ -639,7 +639,7 @@ class SnapReplyPublicationTest {
 		pub.publishReply(account, target, intent, "hi")
 
 		assertTrue(store.read("someoneelse", slot) is PendingSnapRead.Absent)
-		assertNull(pub.reconcile("someoneelse", slot))
+		assertNull(pub.reconcile("someoneelse", slot, PendingSnapKind.REPLY))
 		assertTrue(pub.restore("someoneelse").isEmpty())
 	}
 
@@ -657,5 +657,391 @@ class SnapReplyPublicationTest {
 		val reply = SnapReply("bob", "re-one", "alice", "snap-1", "hi", 1_000L)
 
 		assertEquals("bob/re-one", SnapReplyTarget.of(reply)!!.contentId)
+	}
+
+	// ── the durable intent, which is what makes a reply instant ────────
+	//
+	// [SnapPublisher.intendReply] is the whole of the visible path: one local
+	// write, and from then on the reply is on screen. Everything these pin
+	// follows from that — it may not touch the network, it may not mint a
+	// second permlink, and it may not hand back a "ready" the disk did not
+	// actually accept.
+
+	@Test
+	fun `intending a reply asks the network nothing and sends nothing`() {
+		val hive = FakeHive(mutableListOf(inBlock()))
+		val store = MemoryStore()
+
+		val staged = publisher(hive, store).intendReply(account, target, intent, "nice one")
+
+		assertTrue(staged is SnapPublisher.Staged.Ready)
+		assertEquals("no container lookup", 0, hive.containerLookups)
+		assertEquals("nothing signed", 0, hive.preparedOps.size)
+		assertEquals("nothing sent", 0, hive.broadcasts)
+	}
+
+	/** And what it wrote is a reply with no transaction behind it. */
+	@Test
+	fun `the intent record is frozen, parented and unsendable`() {
+		val store = MemoryStore()
+
+		publisher(FakeHive(), store).intendReply(account, target, intent, "nice one")
+
+		val record = stored(store)
+		assertEquals(PendingSnapState.INTENT, record.state)
+		assertEquals(PendingSnapKind.REPLY, record.kind)
+		assertEquals("nice one", record.body)
+		assertEquals("alice", record.parentAuthor)
+		assertEquals("rustedwax-snap-1000-aaaaaa", record.parentPermlink)
+		assertEquals("", record.signedTransactionJson)
+		assertEquals("", record.txId)
+		// An intent with no expiry is an intent with nothing to broadcast.
+		assertEquals(0L, record.expirationEpochSec)
+		assertEquals(
+			"deliver must refuse it outright",
+			SnapPublisher.Outcome.Failed("this Snap hasn't been prepared yet"),
+			publisher(FakeHive(), store).deliver(account, slot, PendingSnapKind.REPLY),
+		)
+	}
+
+	/** A disk that refuses is a reply that does not exist and is not shown. */
+	@Test
+	fun `an intent that cannot be committed is a refusal, not a ready`() {
+		val store = MemoryStore().apply { writable = false }
+
+		val staged = publisher(FakeHive(), store).intendReply(account, target, intent, "nice one")
+
+		assertTrue(staged is SnapPublisher.Staged.Failed)
+		assertTrue(store.saved.isEmpty())
+	}
+
+	/** Publishing resumes from the intent: same permlink, same words. */
+	@Test
+	fun `publishing after an intent reuses its identity and its body`() {
+		val hive = FakeHive(mutableListOf(inBlock()))
+		val store = MemoryStore()
+		val pub = publisher(hive, store)
+		pub.intendReply(account, target, intent, "nice one")
+		val intended = stored(store)
+
+		pub.publishReply(account, target, intent, "completely different words")
+
+		val op = hive.preparedOps.single()
+		assertEquals(intended.permlink, op.permlink)
+		assertEquals("the frozen body is what gets signed", "nice one", op.body)
+		assertEquals(1, hive.broadcasts)
+		assertEquals("one record, one reply", 1, store.entries(account).size)
+	}
+
+	/** Intending twice is intending once: the identity is minted one time. */
+	@Test
+	fun `a second intent for the same slot reuses the first`() {
+		val store = MemoryStore()
+		val pub = publisher(FakeHive(), store)
+
+		pub.intendReply(account, target, intent, "nice one")
+		val first = stored(store).permlink
+		pub.intendReply(account, target, intent, "nice one")
+
+		assertEquals(first, stored(store).permlink)
+		assertEquals(1, store.entries(account).size)
+	}
+
+	/** A reply already on chain is never re-intended. */
+	@Test
+	fun `a confirmed reply answers from disk instead of starting again`() {
+		val hive = FakeHive(mutableListOf(inBlock()))
+		val store = MemoryStore()
+		val pub = publisher(hive, store)
+		pub.publishReply(account, target, intent, "nice one")
+		val permlink = stored(store).permlink
+
+		val staged = pub.intendReply(account, target, intent, "nice one")
+
+		assertTrue(staged is SnapPublisher.Staged.Published)
+		assertEquals(permlink, stored(store).permlink)
+		assertEquals("no second transaction", 1, hive.broadcasts)
+	}
+
+	/** An ambiguous reply is never re-intended either — it is read. */
+	@Test
+	fun `an ambiguous reply refuses a fresh intent`() {
+		val hive = FakeHive(mutableListOf(HiveRpc.BroadcastResult.NetworkFailure("lost")))
+		hive.content = null
+		val store = MemoryStore()
+		val pub = publisher(hive, store)
+		pub.publishReply(account, target, intent, "nice one")
+
+		val staged = pub.intendReply(account, target, intent, "nice one")
+
+		assertTrue(staged is SnapPublisher.Staged.Uncertain)
+		assertEquals(1, hive.broadcasts)
+	}
+
+	// ── the rows a thread draws before the chain has caught up ─────────
+
+	@Test
+	fun `staged reply rows carry the exact record that is being published`() {
+		val store = MemoryStore()
+		val pub = publisher(FakeHive(), store)
+		pub.intendReply(account, target, intent, "nice one")
+		val record = stored(store)
+
+		val row = pub.stagedReplyRows(account).single()
+
+		assertEquals(account, row.author)
+		assertEquals(record.permlink, row.permlink)
+		assertEquals("alice", row.parentAuthor)
+		assertEquals("rustedwax-snap-1000-aaaaaa", row.parentPermlink)
+		assertEquals("nice one", row.body)
+	}
+
+	/** A proven-absent reply is not a reply, and is not drawn. */
+	@Test
+	fun `a failed reply leaves no row behind`() {
+		val hive = FakeHive(mutableListOf(HiveRpc.BroadcastResult.NetworkFailure("lost")))
+		hive.evidence = HiveRpc.TransactionEvidence.ABSENT
+		val store = MemoryStore()
+		val pub = publisher(hive, store)
+
+		pub.publishReply(account, target, intent, "nice one")
+
+		assertEquals(PendingSnapState.FAILED, stored(store).state)
+		assertEquals(emptyList<SnapReply>(), pub.stagedReplyRows(account))
+	}
+
+	/** Root Snaps are not replies, and never appear as thread rows. */
+	@Test
+	fun `a root Snap is never drawn as a reply`() {
+		val store = MemoryStore()
+		val pub = publisher(FakeHive(), store)
+		pub.intendRoot(account, "event-1", SnapMedia("8pSS6wdojqY"), "hello")
+
+		assertEquals(emptyList<SnapReply>(), pub.stagedReplyRows(account))
+		assertEquals("and the two restores do not cross", 1, pub.restoreStaged(account).size)
+		assertEquals(0, pub.restoreStagedReplies(account).size)
+	}
+
+	/** Nor the other way round. */
+	@Test
+	fun `an unfinished reply is not offered to the History cards`() {
+		val store = MemoryStore()
+		val pub = publisher(FakeHive(), store)
+		pub.intendReply(account, target, intent, "nice one")
+
+		assertEquals(emptyList<SnapPublisher.StagedSnap>(), pub.restoreStaged(account))
+		val row = pub.restoreStagedReplies(account).single()
+		assertEquals(slot, row.eventId)
+		assertTrue("an intent reached no node, so it needs the user", row.interrupted)
+	}
+
+	/** And a kind-scoped restore reconciles only its own side. */
+	@Test
+	fun `restore can be scoped to one kind`() {
+		val hive = FakeHive(mutableListOf(inBlock(), inBlock()))
+		val store = MemoryStore()
+		val pub = publisher(hive, store)
+		pub.publishReply(account, target, intent, "nice one")
+		pub.intendRoot(account, "event-1", SnapMedia("8pSS6wdojqY"), "hello")
+
+		val replies = pub.restore(account, PendingSnapKind.REPLY)
+		val roots = pub.restore(account, PendingSnapKind.ROOT)
+
+		assertEquals(listOf(slot), replies.map { it.first })
+		assertEquals(emptyList<String>(), roots.map { it.first })
+		assertEquals("both kinds unscoped", 1, pub.restore(account).size)
+	}
+
+	// ── the parent is frozen with the intent ───────────────────────────
+	//
+	// A reply's parent is the one thing about it the user actually chose: they
+	// tapped Reply on a specific comment, and the reply appeared under that
+	// comment the instant the intent was committed. So the parent is part of
+	// the frozen identity, exactly like the permlink and the body — what gets
+	// signed later has to be what they were shown, and a parent recomputed at
+	// signing time would let the same visible reply land somewhere else.
+
+	/** The intent stores the parent, and stores the parent that was tapped. */
+	@Test
+	fun `a reply intent freezes the parent it was written to`() {
+		val store = MemoryStore()
+
+		publisher(FakeHive(), store).intendReply(account, target, intent, "nice one")
+
+		val record = stored(store)
+		assertEquals("alice", record.parentAuthor)
+		assertEquals("rustedwax-snap-1000-aaaaaa", record.parentPermlink)
+	}
+
+	/** And preparation signs that stored parent, not a freshly derived one. */
+	@Test
+	fun `preparation signs the stored parent`() {
+		val hive = FakeHive(mutableListOf(inBlock()))
+		val store = MemoryStore()
+		val pub = publisher(hive, store)
+		pub.intendReply(account, target, intent, "nice one")
+		val frozen = stored(store)
+
+		pub.publishReply(account, target, intent, "nice one")
+
+		val op = hive.preparedOps.single()
+		assertEquals(frozen.parentAuthor, op.parentAuthor)
+		assertEquals(frozen.parentPermlink, op.parentPermlink)
+		assertEquals(frozen.permlink, op.permlink)
+		assertEquals(frozen.body, op.body)
+		assertEquals(frozen.jsonMetadata, op.jsonMetadata)
+	}
+
+	/**
+	 * The blocker, stated as its own test.
+	 *
+	 * The stored intent says one parent; the caller asks for another. There is
+	 * no reading of this where signing is safe — one of the two is not what the
+	 * user saw — so nothing is signed at all, and in particular the caller's
+	 * parent is never quietly used.
+	 */
+	@Test
+	fun `a parent that disagrees with the intent signs nothing`() {
+		val hive = FakeHive(mutableListOf(inBlock()))
+		val store = MemoryStore()
+		val pub = publisher(hive, store)
+		pub.intendReply(account, target, intent, "nice one")
+		// The record is moved onto a different comment, as a mis-keyed or
+		// tampered entry would be.
+		val moved = stored(store).copy(parentAuthor = "carol", parentPermlink = "somewhere-else")
+		store.saved["$account|$slot"] = moved.toJson()
+
+		val outcome = pub.publishReply(account, target, intent, "nice one")
+
+		assertTrue("got $outcome", outcome is SnapPublisher.Outcome.Failed)
+		assertEquals("nothing signed", 0, hive.preparedOps.size)
+		assertEquals("nothing sent", 0, hive.broadcasts)
+		assertEquals("carol", stored(store).parentAuthor)
+		assertEquals(PendingSnapState.INTENT, stored(store).state)
+	}
+
+	/** A stored parent that is not a parent at all is refused, not guessed. */
+	@Test
+	fun `a blank stored parent refuses rather than inventing one`() {
+		listOf("" to target.permlink, target.author to "").forEach { (author, permlink) ->
+			val hive = FakeHive(mutableListOf(inBlock()))
+			val store = MemoryStore()
+			val pub = publisher(hive, store)
+			pub.intendReply(account, target, intent, "nice one")
+			store.saved["$account|$slot"] = stored(store)
+				.copy(parentAuthor = author, parentPermlink = permlink).toJson()
+
+			val outcome = pub.publishReply(account, target, intent, "nice one")
+
+			assertTrue("'$author'/'$permlink': got $outcome", outcome is SnapPublisher.Outcome.Failed)
+			assertEquals(0, hive.preparedOps.size)
+			assertEquals(0, hive.broadcasts)
+		}
+	}
+
+	/** A restart changes nothing: same parent, same permlink, same words. */
+	@Test
+	fun `a restart resumes the same parent and the same identity`() {
+		val store = MemoryStore()
+		publisher(FakeHive(), store).intendReply(account, target, intent, "nice one")
+		val frozen = stored(store)
+
+		// A second publisher over the same durable bytes is how process death
+		// is expressed here.
+		val hive = FakeHive(mutableListOf(inBlock()))
+		publisher(hive, store).publishReply(account, target, intent, "completely different")
+
+		val op = hive.preparedOps.single()
+		assertEquals(frozen.parentAuthor, op.parentAuthor)
+		assertEquals(frozen.parentPermlink, op.parentPermlink)
+		assertEquals(frozen.permlink, op.permlink)
+		assertEquals("nice one", op.body)
+	}
+
+	/** Two retries cannot produce two identities or two parents. */
+	@Test
+	fun `retrying twice cannot mint a second reply`() {
+		// Preparation fails the first time, so the record stays an intent and
+		// the retry has something to resume.
+		val hive = FakeHive(mutableListOf(inBlock()))
+		val store = MemoryStore()
+		val pub = publisher(hive, store)
+		pub.intendReply(account, target, intent, "nice one")
+
+		pub.publishReply(account, target, intent, "nice one")
+		pub.publishReply(account, target, intent, "nice one")
+
+		assertEquals("one signature", 1, hive.preparedOps.size)
+		assertEquals("one broadcast", 1, hive.broadcasts)
+		assertEquals("one record", 1, store.entries(account).size)
+	}
+
+	/** The root path keeps its own rule: the container fills an empty parent. */
+	@Test
+	fun `a root intent still takes its parent from the container`() {
+		val hive = FakeHive(mutableListOf(inBlock()))
+		val store = MemoryStore()
+		val pub = publisher(hive, store)
+		pub.intendRoot(account, "event-1", SnapMedia("8pSS6wdojqY"), "hello")
+
+		pub.retryRoot(account, "event-1")
+
+		val op = hive.preparedOps.single()
+		assertEquals("peak.snaps", op.parentAuthor)
+		assertEquals("snap-container-1789648560", op.parentPermlink)
+	}
+
+	/** But a root intent that somehow carries a parent is refused. */
+	@Test
+	fun `a root intent carrying a parent is not signed`() {
+		val hive = FakeHive(mutableListOf(inBlock()))
+		val store = MemoryStore()
+		val pub = publisher(hive, store)
+		pub.intendRoot(account, "event-1", SnapMedia("8pSS6wdojqY"), "hello")
+		val tampered = (store.read(account, "event-1") as PendingSnapRead.Present).snap
+			.copy(parentAuthor = "carol", parentPermlink = "somewhere-else")
+		store.saved["$account|event-1"] = tampered.toJson()
+
+		val outcome = pub.retryRoot(account, "event-1")
+
+		assertTrue("got $outcome", outcome is SnapPublisher.Outcome.Failed)
+		assertEquals(0, hive.preparedOps.size)
+		assertEquals(0, hive.broadcasts)
+	}
+
+	/**
+	 * An expired prepared transaction is re-signed against the **record**.
+	 *
+	 * The window a crash opens: signed, committed, never sent, resumed more
+	 * than a minute later, so the old bytes are guaranteed to be refused and
+	 * have to be rebuilt. The permlink survives that — it always did — and so
+	 * now do the parent and the words, which is the whole point: the caller at
+	 * that moment is the thread controller, passing whatever the composer holds
+	 * now, and the record is the only copy of what the user actually sent.
+	 */
+	@Test
+	fun `re-signing an expired reply keeps the frozen parent, words and permlink`() {
+		val store = MemoryStore()
+		// A transaction that expired long before the clock this publisher runs
+		// on — committed, never broadcast.
+		publisher(FakeHive(), store).intendReply(account, target, intent, "nice one")
+		val frozen = stored(store)
+		store.saved["$account|$slot"] = frozen.copy(
+			state = PendingSnapState.PREPARED,
+			signedTransactionJson = """{"op":"stale"}""",
+			txId = "tx-stale",
+			expirationEpochSec = 900L,
+		).toJson()
+
+		val hive = FakeHive(mutableListOf(inBlock()))
+		publisher(hive, store).publishReply(account, target, intent, "completely different")
+
+		val op = hive.preparedOps.single()
+		assertEquals(frozen.permlink, op.permlink)
+		assertEquals(frozen.parentAuthor, op.parentAuthor)
+		assertEquals(frozen.parentPermlink, op.parentPermlink)
+		assertEquals("nice one", op.body)
+		assertEquals(frozen.jsonMetadata, op.jsonMetadata)
+		assertEquals("one comment", 1, hive.broadcasts)
 	}
 }

@@ -23,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,6 +40,7 @@ import com.rustedwax.app.snaps.SnapThreadNode
 import com.rustedwax.app.snaps.SnapThreadPreview
 import com.rustedwax.app.ui.WaxIcons
 import com.rustedwax.app.ui.WaxOutlinedButton
+import com.rustedwax.hive.ViewerVote
 
 /**
  * The two replies a History card is allowed to show, and the way out to the
@@ -112,6 +114,7 @@ internal fun SnapThreadSheet(
 	root: SnapReplyTarget,
 	rootSnap: PostedSnap?,
 	threads: SnapThreadController,
+	likes: SnapLikeController,
 	nowEpochSec: Long,
 	onDismiss: () -> Unit,
 ) {
@@ -137,6 +140,19 @@ internal fun SnapThreadSheet(
 					root = root,
 					target = root,
 					threads = threads,
+					likes = likes,
+					// The root of a History thread is always this user's own
+					// Snap — `PostedSnaps` refuses to draw a confirmed row whose
+					// author is anybody else — so it never gets a heart, and
+					// `SnapLikeController.showsHeart` is what enforces that
+					// rather than this argument. No vote state is carried for it
+					// because the thread builder drops the root from the tree.
+					viewerVote = ViewerVote.Unreadable("the root Snap is your own"),
+					// The root's own Like count *is* carried: it is the Snap
+					// this user posted, and how many people liked it is the
+					// part they most want to see. The heart beside it stays
+					// non-interactive — see [SocialLikeCount].
+					likeCount = threads.thread(root)?.rootLikeCount ?: 0,
 				)
 				HorizontalDivider(Modifier.padding(vertical = 8.dp))
 			}
@@ -164,6 +180,13 @@ internal fun SnapThreadSheet(
 				}
 
 				is SnapThreadLoad.Ready -> {
+					// Hive is authoritative. A conversation that has just been
+					// re-read describes these comments more recently than any
+					// local answer from a previous tap, so the freshly-read vote
+					// state retires it — except for an attempt still in flight,
+					// and an ambiguous one the read did not answer. See
+					// [SnapLikeController.reconcile].
+					LaunchedEffect(load.thread) { likes.reconcile(load.thread) }
 					// The complete conversation, every valid reply of it. The list
 					// is whole and `LazyColumn` is what makes reading it
 					// incremental: it composes the rows on screen and no more, so
@@ -189,7 +212,7 @@ internal fun SnapThreadSheet(
 							// adds a reply cannot hand one comment's composition to
 							// another comment.
 							items(nodes, key = { it.reply.contentId }) { node ->
-								ReplyBlock(node, root, threads, nowEpochSec)
+								ReplyBlock(node, root, threads, likes, nowEpochSec)
 							}
 						}
 					}
@@ -205,10 +228,12 @@ private fun ReplyBlock(
 	node: SnapThreadNode,
 	root: SnapReplyTarget,
 	threads: SnapThreadController,
+	likes: SnapLikeController,
 	nowEpochSec: Long,
 ) {
 	val reply: SnapReply = node.reply
 	CommentBlock(
+		likeCount = reply.positiveLikeCount,
 		author = reply.author,
 		createdAtEpochSec = reply.createdAtEpochSec,
 		body = reply.body,
@@ -222,6 +247,11 @@ private fun ReplyBlock(
 		// at a parent nobody checked.
 		target = SnapReplyTarget.of(reply),
 		threads = threads,
+		likes = likes,
+		// Straight off the `bridge.get_discussion` response this reply was
+		// parsed from — no extra request, and never an authorization. Tapping
+		// the heart re-reads the chain before anything is signed.
+		viewerVote = reply.viewerVote,
 	)
 }
 
@@ -243,6 +273,10 @@ private fun CommentBlock(
 	root: SnapReplyTarget,
 	target: SnapReplyTarget?,
 	threads: SnapThreadController,
+	likes: SnapLikeController,
+	viewerVote: ViewerVote,
+	/** Positive votes the chain last showed here. Presentation only. */
+	likeCount: Int,
 ) {
 	val key = target?.let { threads.replyKey(it) }
 	val replying = key != null && threads.isReplying(key)
@@ -286,6 +320,13 @@ private fun CommentBlock(
 				when (val st = status) {
 					is SnapPostStatus.Failed -> ThreadNotice(st.message)
 					is SnapPostStatus.Uncertain -> ThreadNotice(st.message)
+					// Written, frozen, and never sent. The reply is already in
+					// the thread below — it is this device's, with a permlink
+					// nothing can mint twice — so this says the one true thing
+					// about it rather than taking it off the screen.
+					is SnapPostStatus.Interrupted -> ThreadNotice(
+						"This reply hasn't reached Hive yet.",
+					)
 					else -> Unit
 				}
 
@@ -322,12 +363,17 @@ private fun CommentBlock(
 					Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
 						WaxOutlinedButton(
 							onClick = { threads.send(root, target) },
-							// One explicit send. Locked while in flight, so a
-							// second tap cannot start a second broadcast.
+							// One explicit send. Locked while an attempt owns
+							// this slot, so a second tap cannot start a second
+							// broadcast — though in practice the composer is
+							// already gone by then.
 							enabled = SnapText.isValid(draft) && !threads.isBusy(key),
 							icon = WaxIcons.Send,
 						) {
-							Text(if (threads.isBusy(key)) "Sending…" else "Send")
+							// No "Sending…". The composer closes on the durable
+							// write and the reply appears below it; what Hive
+							// does after that is not something to sit and watch.
+							Text("Send")
 						}
 						// Offered only for a draft with something in it: asking
 						// about nothing is the kind of dialog people learn to
@@ -343,12 +389,48 @@ private fun CommentBlock(
 						}
 					}
 				} else {
-					Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+					// Whatever the last Like attempt had to say. Ambiguity reads
+					// differently from a refusal on purpose: one offers a re-read
+					// and the other does not.
+					likes.notice(target)?.let { ThreadNotice(it) }
+					Row(
+						horizontalArrangement = Arrangement.spacedBy(8.dp),
+						verticalAlignment = Alignment.CenterVertically,
+					) {
+						// The heart sits beside Reply, in the one action row both
+						// the root Snap and every reply already go through — so
+						// there is a single Like control rather than two that can
+						// drift apart. Absent entirely on this user's own
+						// comments.
+						if (likes.showsHeart(author)) {
+							LikeHeart(
+								heart = likes.heart(target, viewerVote),
+								count = likes.likeCount(target, viewerVote, likeCount),
+								pending = likes.isPending(target),
+								onLike = { likes.like(target) },
+								onRecheck = { likes.recheck(target) },
+							)
+						} else {
+							// This user's own comment. They cannot Like it, so
+							// there is no control — but how many other people
+							// did is theirs to see, and it is the one number a
+							// Snap's author actually wants.
+							SocialLikeCount(likeCount)
+						}
 						// An ambiguous reply offers a *read* and nothing else:
 						// sending again could duplicate a live comment.
 						if (status is SnapPostStatus.Uncertain) {
 							TextButton(onClick = { threads.recheck(root, target) }) {
 								Text("Check again", style = MaterialTheme.typography.labelMedium)
+							}
+						} else if (status is SnapPostStatus.Interrupted) {
+							// Safe to offer precisely because the reply was
+							// never built: no transaction exists, so nothing
+							// can be duplicated. Finishing it reuses the frozen
+							// permlink and the frozen words — this cannot write
+							// a second comment.
+							TextButton(onClick = { threads.send(root, target) }) {
+								Text("Finish reply", style = MaterialTheme.typography.labelMedium)
 							}
 						} else {
 							TextButton(onClick = { threads.startReply(key) }) {
@@ -388,6 +470,103 @@ private fun CommentBlock(
 				confirmDiscardCorrupt = false
 				threads.discard(target)
 			},
+		)
+	}
+}
+
+/**
+ * The Like control: one heart, filled the instant it is tapped.
+ *
+ * There is no busy state and no "Liking…", on purpose. The pipeline behind a
+ * Like is two authoritative reads, a signature and a broadcast confirmation,
+ * and narrating that to the user made a tap feel like a request for permission.
+ * The heart fills inside the tap; the work carries on behind it; and if it
+ * turns out the Like could not be given, the heart goes back to an outline and
+ * says why. Nothing about the safety of the pipeline changed — only the moment
+ * the user is told it has begun.
+ *
+ * Tappable only while there is a Like to give. A filled heart is **not** a
+ * button — v1 has no Unlike, so a control that responded to a tap would be
+ * promising something it cannot do — and neither is an inert one, which is what
+ * a downvote cast elsewhere or a vote state RustedWax could not establish looks
+ * like. Drawing it greyed rather than hiding it matters: an absent heart reads
+ * as "this comment cannot be Liked", which is a different and wrong claim.
+ *
+ * An attempt whose outcome is unknown keeps its **filled** heart and gains a
+ * **Check Like** control beside it. That control reads the chain and never
+ * sends, which is the only safe move on a vote that may already exist.
+ */
+@Composable
+private fun LikeHeart(
+	heart: SnapHeart,
+	count: Int,
+	pending: Boolean,
+	onLike: () -> Unit,
+	onRecheck: () -> Unit,
+) {
+	val filled = heart == SnapHeart.FILLED
+	TextButton(
+		onClick = onLike,
+		// Only an outline heart is a live control. Filled has nothing left to
+		// do, and inert never had anything to do.
+		enabled = heart == SnapHeart.OUTLINE,
+	) {
+		Icon(
+			if (filled) WaxIcons.HeartFilled else WaxIcons.Heart,
+			contentDescription = if (filled) "Liked" else "Like",
+			tint = if (filled) {
+				MaterialTheme.colorScheme.primary
+			} else {
+				MaterialTheme.colorScheme.onSurfaceVariant
+			},
+			modifier = Modifier.size(13.dp),
+		)
+		Spacer(Modifier.width(4.dp))
+		Text("Like", style = MaterialTheme.typography.labelMedium)
+		// Two facts, side by side and never conflated: the heart is whether
+		// *you* liked this, the number is how many people did. Nothing is
+		// drawn at zero — "0" beside every new comment is noise, and an
+		// absence already reads as none.
+		if (count > 0) {
+			Spacer(Modifier.width(4.dp))
+			Text("$count", style = MaterialTheme.typography.labelMedium)
+		}
+	}
+	if (pending) {
+		// Named rather than a bare "Check again": the reply beside it has a
+		// re-check of its own, and on a comment where both a reply and a Like
+		// ended up ambiguous, two identically-labelled buttons would be a
+		// choice nobody can make.
+		TextButton(onClick = onRecheck) {
+			Text("Check Like", style = MaterialTheme.typography.labelMedium)
+		}
+	}
+}
+
+/**
+ * How many people liked something this user cannot Like: their own comment.
+ *
+ * Drawn as an **outline** heart and a number, and it is not a button. A filled
+ * heart here would claim this account voted for itself, which Hive refuses and
+ * which nothing in RustedWax can ever have done; a tappable one would offer an
+ * action that cannot exist. So it is a label, and it is absent entirely until
+ * somebody has actually liked the comment.
+ */
+@Composable
+private fun SocialLikeCount(count: Int) {
+	if (count <= 0) return
+	Row(verticalAlignment = Alignment.CenterVertically) {
+		Icon(
+			WaxIcons.Heart,
+			contentDescription = "Likes",
+			tint = MaterialTheme.colorScheme.onSurfaceVariant,
+			modifier = Modifier.size(13.dp),
+		)
+		Spacer(Modifier.width(4.dp))
+		Text(
+			"$count",
+			style = MaterialTheme.typography.labelMedium,
+			color = MaterialTheme.colorScheme.onSurfaceVariant,
 		)
 	}
 }

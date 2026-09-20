@@ -23,6 +23,12 @@ enum class SettingsRow {
 	WATCH_HISTORY,
 	HIVE_ACCOUNT,
 
+	/**
+	 * Directly under the Hive account, because it is a preference *about* that
+	 * account's voting power and is meaningless without a key saved.
+	 */
+	SNAPS_AND_LIKES,
+
 	PICTURE_IN_PICTURE,
 	QUEUE,
 	APPEARANCE,
@@ -81,6 +87,7 @@ object SettingsOutline {
 		SettingsRow.BROWSER_EVIDENCE -> "Browser evidence access"
 		SettingsRow.WATCH_HISTORY -> "YouTube watch history"
 		SettingsRow.HIVE_ACCOUNT -> "Hive account"
+		SettingsRow.SNAPS_AND_LIKES -> "Snaps & Likes"
 		SettingsRow.PICTURE_IN_PICTURE -> "Picture-in-picture time"
 		SettingsRow.DEVELOPER_MODE -> "Developer mode"
 		SettingsRow.APPEARANCE -> "Appearance"

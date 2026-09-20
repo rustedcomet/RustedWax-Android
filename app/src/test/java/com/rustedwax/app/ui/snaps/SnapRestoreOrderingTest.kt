@@ -2,6 +2,7 @@ package com.rustedwax.app.ui.snaps
 
 import com.rustedwax.app.snaps.PendingSnap
 import com.rustedwax.app.snaps.PendingSnapRead
+import com.rustedwax.app.snaps.PendingSnapKind
 import com.rustedwax.app.snaps.PendingSnapState
 import com.rustedwax.app.snaps.PendingSnapStore
 import com.rustedwax.app.snaps.PostedSnapContent
@@ -122,12 +123,12 @@ class SnapRestoreOrderingTest {
 			SnapContainer("peak.snaps", "snap-container-1", "2026-09-17T12:36:00"),
 		)
 
-		override fun prepareComment(operation: TxSerializer.CommentOp): HivePreparationResult {
+		override fun prepareComment(operation: TxSerializer.CommentOp, author: String): HivePreparationResult {
 			prepared.incrementAndGet()
 			return HivePreparationResult.Ready(PreparedHiveTransaction("{}", "tx", 2_000_000_000L))
 		}
 
-		override fun broadcastPrepared(prepared: PreparedHiveTransaction): HiveRpc.BroadcastResult {
+		override fun broadcastPrepared(prepared: PreparedHiveTransaction, author: String): HiveRpc.BroadcastResult {
 			broadcasts.incrementAndGet()
 			return HiveRpc.BroadcastResult.NetworkFailure("no test may reach this")
 		}
@@ -153,10 +154,10 @@ class SnapRestoreOrderingTest {
 			SnapContainer("peak.snaps", "snap-container-1", "2026-09-17T12:36:00"),
 		)
 
-		override fun prepareComment(operation: TxSerializer.CommentOp) =
+		override fun prepareComment(operation: TxSerializer.CommentOp, author: String) =
 			HivePreparationResult.Ready(PreparedHiveTransaction("{}", "tx", 2_000_000_000L))
 
-		override fun broadcastPrepared(prepared: PreparedHiveTransaction) =
+		override fun broadcastPrepared(prepared: PreparedHiveTransaction, author: String) =
 			HiveRpc.BroadcastResult.NetworkFailure("no test may reach this")
 
 		override fun observeTransaction(txId: String, expirationEpochSec: Long) =
@@ -197,6 +198,7 @@ class SnapRestoreOrderingTest {
 		state = state,
 		createdAtEpochSec = 1_000L,
 		updatedAtEpochSec = 1_000L,
+		kind = PendingSnapKind.ROOT,
 	)
 
 	private fun storeWith(order: List<String>): Store {
@@ -319,9 +321,25 @@ class SnapRestoreOrderingTest {
 		}
 	}
 
-	/** A row nobody can decide stays undecided — it is not quietly promoted. */
+	/**
+	 * A row nobody can decide stays undecided — it is not quietly promoted.
+	 *
+	 * The invariant here is unchanged and is the one that matters: an
+	 * unresolved Snap is **never claimed as [SnapPostStatus.Posted]**, because
+	 * that is the app asserting the chain has something it has not proven.
+	 *
+	 * What did change is whether a card is drawn at all. Stage 3 drew nothing,
+	 * on the reasoning that any card asserts publication. Optimistic posting
+	 * separates those two claims: the record is signed, committed to disk and
+	 * owns a permlink that will never be minted twice, so the Snap genuinely
+	 * exists *on this device* whatever the chain later says — and a Snap that
+	 * vanished from History every time the app restarted, only to reappear if
+	 * reconciliation happened to settle it, is the worse lie. So the card comes
+	 * back as [SnapPostStatus.Optimistic], and reconciliation is still the only
+	 * thing that can promote it to posted or retire it as failed.
+	 */
 	@Test
-	fun `the unresolved row is never drawn as posted`() {
+	fun `the unresolved row is drawn optimistically and never claimed as posted`() {
 		val store = storeWith(listOf(unresolvedEvent) + confirmedEvents)
 		val hive = stallingHive()
 		val posts = controller(store, hive, Reader())
@@ -330,10 +348,18 @@ class SnapRestoreOrderingTest {
 		posts.resumePending()
 		assertTrue(hive.reached.await(5, TimeUnit.SECONDS))
 
-		assertNull("an unresolved Snap has no proven card to show", posts.posted(key))
 		assertFalse(
 			"an unresolved Snap must not be claimed as posted",
 			posts.status(key) is SnapPostStatus.Posted,
+		)
+		assertTrue(
+			"but it is still the user's Snap, and it is shown",
+			posts.status(key) is SnapPostStatus.Optimistic,
+		)
+		assertEquals(
+			"drawn from the durable record, with no network involved",
+			"snap $unresolvedEvent",
+			posts.posted(key)?.userText,
 		)
 
 		hive.release.countDown()

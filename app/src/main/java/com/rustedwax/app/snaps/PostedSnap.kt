@@ -159,59 +159,17 @@ object HiveAvatarUrl {
 /**
  * Whether a string is shaped like a Hive account name.
  *
- * An earlier revision asked only whether every character was drawn from
- * `[a-z0-9.-]`. That is a *charset* test wearing a validator's name: `...`,
- * `---`, `.alice`, `alice.` and `a..b` all pass it, and each one becomes a
- * request to an image host for something that cannot be an account. The point of
- * checking at all is to not ask.
+ * Moved to [com.rustedwax.hive.HiveAccountName] and aliased here so every
+ * existing caller reads the same way. The move was forced by reuse rather than
+ * chosen for tidiness: `HiveVotes` has to reject an authoritative vote row whose
+ * voter is not a real account name, it lives in the `hive` module, and `hive`
+ * cannot see `app`. The alternative was a second copy of Hive's account grammar
+ * in the module that talks to Hive, which is exactly the duplication that lets
+ * two validators disagree about who exists.
  *
- * So this checks the structure Hive actually defines:
- *
- *  - three to sixteen characters in total;
- *  - one or more dot-separated segments, each at least three characters;
- *  - a segment starts with a lowercase letter and ends with a letter or digit;
- *  - inside, only lowercase letters, digits and hyphens.
- *
- * Which rejects a leading or trailing dot (it makes an empty segment), two dots
- * in a row (likewise), a segment of pure punctuation, and anything with an
- * uppercase letter, a slash, a space, a control character or a URL in it.
- *
- * Consecutive interior hyphens are **allowed**. An earlier revision refused
- * `ab--cd`, which is not one of Hive's rules — the grammar constrains the first
- * and last character of a label and the alphabet in between, and nothing more.
- * Inventing an extra restriction here means refusing to show a real account
- * their own avatar.
- *
- * Deliberately scoped to Stage 3's own use — deciding whether to fetch an avatar
- * — and deliberately not wired into sign-in, key validation or anything else
- * that already decides what a valid account is. It is a reason not to make a
- * request, never a reason to refuse an account.
+ * The rules themselves are unchanged, and `HiveAccountNameTest` still pins them.
  */
-object HiveAccountName {
-
-	fun isValid(name: String): Boolean {
-		if (name.length !in MIN_LENGTH..MAX_LENGTH) return false
-		// `split` on a name that starts or ends with a dot yields an empty
-		// segment, which fails the length rule below — so those need no case of
-		// their own, and neither does `..`.
-		return name.split('.').all { it.isValidSegment() }
-	}
-
-	private fun String.isValidSegment(): Boolean {
-		if (length < MIN_SEGMENT) return false
-		if (!first().isLowerLetter()) return false
-		if (!(last().isLowerLetter() || last().isDigit())) return false
-		return all { it.isLowerLetter() || it.isDigit() || it == '-' }
-	}
-
-	private fun Char.isLowerLetter() = this in 'a'..'z'
-
-	private fun Char.isDigit() = this in '0'..'9'
-
-	private const val MIN_LENGTH = 3
-	private const val MAX_LENGTH = 16
-	private const val MIN_SEGMENT = 3
-}
+typealias HiveAccountName = com.rustedwax.hive.HiveAccountName
 
 /**
  * Chain timestamps, which arrive as `2026-09-17T12:36:00` in UTC and no other

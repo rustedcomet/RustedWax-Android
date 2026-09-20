@@ -2,6 +2,7 @@ package com.rustedwax.app.ui.snaps
 
 import com.rustedwax.app.snaps.PendingSnap
 import com.rustedwax.app.snaps.PendingSnapRead
+import com.rustedwax.app.snaps.PendingSnapKind
 import com.rustedwax.app.snaps.PendingSnapState
 import com.rustedwax.app.snaps.PendingSnapStore
 import com.rustedwax.app.snaps.PostedSnapContent
@@ -61,9 +62,9 @@ class SnapPostedRestoreTest {
 		override fun resolveContainer() = SnapContainerResolver.Result.Resolved(
 			SnapContainer("peak.snaps", "snap-container-1", "2026-09-17T12:36:00"),
 		)
-		override fun prepareComment(operation: TxSerializer.CommentOp) =
+		override fun prepareComment(operation: TxSerializer.CommentOp, author: String) =
 			HivePreparationResult.Ready(PreparedHiveTransaction("{}", "tx", 2_000_000_000L))
-		override fun broadcastPrepared(prepared: PreparedHiveTransaction) =
+		override fun broadcastPrepared(prepared: PreparedHiveTransaction, author: String) =
 			HiveRpc.BroadcastResult.NetworkFailure("not used in this test")
 		override fun observeTransaction(txId: String, expirationEpochSec: Long) =
 			HiveRpc.TransactionEvidence.UNAVAILABLE
@@ -115,6 +116,7 @@ class SnapPostedRestoreTest {
 		state = PendingSnapState.CONFIRMED,
 		createdAtEpochSec = 1_000L,
 		updatedAtEpochSec = 1_000L,
+		kind = PendingSnapKind.ROOT,
 	)
 
 	private fun storeWith(order: List<String>): Store {

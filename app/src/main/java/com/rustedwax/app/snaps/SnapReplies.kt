@@ -1,6 +1,8 @@
 package com.rustedwax.app.snaps
 
 import com.rustedwax.hive.HiveRpc
+import com.rustedwax.hive.HiveVotes
+import com.rustedwax.hive.ViewerVote
 import org.json.JSONObject
 
 /**
@@ -38,7 +40,7 @@ object SnapReplies {
 	 * find in an untrusted response, and none of them is worth an exception on
 	 * a screen that is drawing somebody's conversation.
 	 */
-	fun parse(o: JSONObject): SnapReply? {
+	fun parse(o: JSONObject, viewer: String?): SnapReply? {
 		val author = o.string("author")?.takeIf { HiveAccountName.isValid(it) } ?: return null
 		val permlink = o.string("permlink")?.takeIf { isPermlink(it) } ?: return null
 		val parentAuthor = o.string("parent_author")
@@ -59,6 +61,20 @@ object SnapReplies {
 			// `created` in exactly one format; anything else is a field that
 			// could not be read, not a reply that happened at midnight in 1970.
 			createdAtEpochSec = ChainTime.epochSec(o.string("created")?.takeIf { it.isNotEmpty() }),
+			// Only the viewer's own row, and only for drawing a heart. Nobody
+			// signed in means there is no heart to draw and no row to look for,
+			// which is a different fact from "this account has not voted" — so
+			// it reads as unreadable rather than as an absence.
+			viewerVote = viewer
+				?.takeIf { it.isNotBlank() }
+				?.let { HiveVotes.inComment(o, it) }
+				?: ViewerVote.Unreadable("nobody is signed in"),
+			// The vote list is reduced to two facts here and then dropped: the
+			// viewer's own row above, and how many positive votes there were.
+			// Nobody downstream ever sees the voters — see
+			// [SnapReply.positiveLikeCount]. Counted for everyone, signed in or
+			// not: "five people liked this" is true either way.
+			positiveLikeCount = HiveVotes.positiveCount(o),
 		)
 	}
 
@@ -70,7 +86,8 @@ object SnapReplies {
 	 */
 	private fun JSONObject.string(name: String): String? = opt(name) as? String
 
-	fun parseAll(objects: List<JSONObject>): List<SnapReply> = objects.mapNotNull { parse(it) }
+	fun parseAll(objects: List<JSONObject>, viewer: String?): List<SnapReply> =
+		objects.mapNotNull { parse(it, viewer) }
 
 	/**
 	 * Whether a string is usable as a Hive permlink.
@@ -178,15 +195,24 @@ interface SnapThreadReader {
 	 * means "this Snap has no replies", which the screen states plainly; null
 	 * means "RustedWax does not know", which it also states plainly, and the two
 	 * must never be shown as the same thing.
+	 *
+	 * [viewer] is the signed-in account, so each reply can carry that account's
+	 * own vote for the heart. It changes nothing about which replies are
+	 * returned — it is read out of a response that was going to be fetched
+	 * anyway, which is why a thread costs exactly the requests it did before.
 	 */
-	fun read(rootAuthor: String, rootPermlink: String): List<SnapReply>?
+	fun read(rootAuthor: String, rootPermlink: String, viewer: String?): List<SnapReply>?
 }
 
 internal class HiveSnapThreadReader(
 	private val rpc: HiveRpc = HiveRpc(),
 ) : SnapThreadReader {
 
-	override fun read(rootAuthor: String, rootPermlink: String): List<SnapReply>? = runCatching {
-		SnapReplies.parseAll(rpc.getDiscussion(rootAuthor, rootPermlink))
+	override fun read(
+		rootAuthor: String,
+		rootPermlink: String,
+		viewer: String?,
+	): List<SnapReply>? = runCatching {
+		SnapReplies.parseAll(rpc.getDiscussion(rootAuthor, rootPermlink), viewer)
 	}.getOrNull()
 }
