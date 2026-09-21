@@ -7,6 +7,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -57,13 +58,35 @@ object Thumbnails {
 	 * than both lists hold. Sized in bytes rather than entries because the cost
 	 * of a wrong guess here is an OOM on a 2 GB phone.
 	 */
-	private const val MEMORY_BUDGET_BYTES = 6 * 1024 * 1024
+	// Raised with the frames themselves. A banner decodes to about 640x360,
+	// which is ~900KB in memory against the ~58KB a 160x90 `mqdefault` used to
+	// cost — the old 6MB would have held six of them and thrashed on every
+	// scroll.
+	private const val MEMORY_BUDGET_BYTES = 16 * 1024 * 1024
 
 	/** Enough for both 50-row lists several times over. */
 	private const val MAX_FILES = 240
 
 	/** 320×180 halved on decode: crisp at 68dp on a 3x screen, 1/4 the memory. */
-	private const val SAMPLE = 2
+	/**
+	 * How wide the banner crop is for its height.
+	 *
+	 * Measured off the v1.1 mockup, whose four cards sit between 3.7:1 and
+	 * 5.4:1 — they are pasted crops rather than one ratio, so this is the middle
+	 * of that range rather than any one of them.
+	 */
+	const val BANNER_ASPECT = 4f
+
+	/**
+	 * The smallest decoded width worth drawing a full-width banner from.
+	 *
+	 * The card is as wide as the screen, so a 160px bitmap — which is what
+	 * `mqdefault` at `inSampleSize = 2` used to give — was being stretched
+	 * about five times and looked it. Sampling is chosen against this instead
+	 * of being a constant, so a small source is left alone and a large one is
+	 * only halved while it stays above the line.
+	 */
+	private const val TARGET_WIDTH = 600
 
 	private val VIDEO_ID = Regex("""[A-Za-z0-9_-]{11}""")
 
@@ -153,9 +176,20 @@ object Thumbnails {
 			}
 		}
 		if (bytes == null) return null
-		val options = BitmapFactory.Options().apply { inSampleSize = SAMPLE }
 		val bitmap = runCatching {
-			BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+			// Bounds first, so the sampling is decided by what actually arrived
+			// rather than by what was hoped for: `maxresdefault` is not
+			// published for every video, and the fallback is a third the width.
+			val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+			BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+			var sample = 1
+			while (bounds.outWidth / (sample * 2) >= TARGET_WIDTH) sample *= 2
+			BitmapFactory.decodeByteArray(
+				bytes,
+				0,
+				bytes.size,
+				BitmapFactory.Options().apply { inSampleSize = sample },
+			)
 		}.getOrNull()
 		if (bitmap == null) {
 			// Whatever is on disk is not an image. Drop it and let the next
@@ -166,8 +200,25 @@ object Thumbnails {
 		return bitmap.asImageBitmap().also { memory.put(videoId, it) }
 	}
 
-	private fun download(videoId: String): Fetched = runCatching {
-		val connection = URL("https://i.ytimg.com/vi/$videoId/mqdefault.jpg")
+	/**
+	 * The best frame YouTube publishes for this video, then the one it always
+	 * publishes.
+	 *
+	 * `maxresdefault` is 1280 wide and missing for plenty of videos; `hqdefault`
+	 * is 480 and effectively always there. Asking for the first and accepting
+	 * the second is the only way to get a sharp banner without leaving some
+	 * rows with no image at all — an `Absent` on maxres used to be remembered as
+	 * "this video has no thumbnail", which would have been wrong for most of
+	 * them.
+	 */
+	private fun download(videoId: String): Fetched =
+		when (val best = downloadFrame(videoId, "maxresdefault")) {
+			is Fetched.Body -> best
+			else -> downloadFrame(videoId, "hqdefault")
+		}
+
+	private fun downloadFrame(videoId: String, frame: String): Fetched = runCatching {
+		val connection = URL("https://i.ytimg.com/vi/$videoId/$frame.jpg")
 			.openConnection() as HttpURLConnection
 		connection.connectTimeout = 8_000
 		connection.readTimeout = 8_000
@@ -223,7 +274,16 @@ fun VideoThumbnail(
 	videoId: String?,
 	enabled: Boolean,
 	modifier: Modifier = Modifier,
-	width: androidx.compose.ui.unit.Dp = 68.dp,
+	/**
+	 * A fixed width, or **null** to fill whatever the caller gives it and take
+	 * the height from the 16:9 ratio.
+	 *
+	 * Null is what the History banner uses: the card is as wide as the screen
+	 * allows, so pinning a number here would make the image a different shape
+	 * on every device. 16:9 is not an arbitrary choice either — it is the shape
+	 * YouTube serves, so filling the width crops nothing and stretches nothing.
+	 */
+	width: androidx.compose.ui.unit.Dp? = 68.dp,
 ) {
 	val shape = RoundedCornerShape(9.dp)
 	// Starts from the memory cache so a row that has been drawn before does not
@@ -237,8 +297,16 @@ fun VideoThumbnail(
 
 	Box(
 		modifier = modifier
-			.width(width)
-			.height(width * 9 / 16)
+			.let {
+				if (width != null) {
+					it.width(width).height(width * 9 / 16)
+				} else {
+					// The banner crop from the mockup rather than the whole
+					// 16:9 frame. `ContentScale.Crop` takes the middle of the
+					// image, which is where a music thumbnail puts its subject.
+					it.aspectRatio(Thumbnails.BANNER_ASPECT)
+				}
+			}
 			.clip(shape)
 			.background(MaterialTheme.colorScheme.surfaceContainerHighest),
 		contentAlignment = Alignment.Center,
@@ -263,8 +331,14 @@ fun VideoThumbnail(
 			Box(
 				modifier = Modifier
 					.align(Alignment.BottomStart)
-					.padding(4.dp)
-					.size(width = 20.dp, height = 14.dp)
+					.padding(if (width != null) 4.dp else 8.dp)
+					// Scaled with the frame. The badge was sized for a 68dp
+					// row; left at that size on a full-width banner it reads as
+					// a speck rather than a mark.
+					.size(
+						width = if (width != null) 20.dp else 32.dp,
+						height = if (width != null) 14.dp else 22.dp,
+					)
 					.clip(RoundedCornerShape(4.dp))
 					.background(YOUTUBE_RED),
 				contentAlignment = Alignment.Center,
@@ -273,7 +347,7 @@ fun VideoThumbnail(
 					WaxIcons.PlayTriangle,
 					contentDescription = null,
 					tint = Color.White,
-					modifier = Modifier.size(11.dp),
+					modifier = Modifier.size(if (width != null) 11.dp else 17.dp),
 				)
 			}
 		}

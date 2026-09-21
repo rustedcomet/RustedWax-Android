@@ -181,11 +181,37 @@ class SnapThreadController internal constructor(
 
 	private var openThreadState by mutableStateOf<SnapReplyTarget?>(null)
 	private var openRootSnapState by mutableStateOf<PostedSnap?>(null)
+	private var openEventState by mutableStateOf<String?>(null)
 	private var replyingToState by mutableStateOf<String?>(null)
+
+	/**
+	 * Slots whose words have been handed to an attempt and should no longer sit
+	 * in the box.
+	 *
+	 * The draft itself is untouched — it stays on disk under the same rules it
+	 * always had, because it is still what recovery reads. This only answers a
+	 * narrower question: *should the composer still be showing it?* Once Send
+	 * has been tapped the answer is no, and it becomes no on the tap rather
+	 * than when Hive gets back to us, which is the whole point.
+	 */
+	private val submitted = mutableStateMapOf<String, String>()
 
 	/** The root whose full thread is on screen — for *this* account, or null. */
 	val openThread: SnapReplyTarget?
 		get() = openThreadState.takeIf { uiOwner == accountId() }
+
+	/**
+	 * The History event whose sheet is open *before* it has a Snap, or null.
+	 *
+	 * The other half of [openThread]. A row that has not been Snapped yet has no
+	 * root to hang a conversation on, so there is nothing for [open] to take —
+	 * but the sheet still has somewhere to go, because writing the first Snap
+	 * happens in the same place as answering one. Account-scoped by the same
+	 * `uiOwner` check as everything else here, so a switch cannot leave another
+	 * account's row composing.
+	 */
+	val openEvent: String?
+		get() = openEventState.takeIf { uiOwner == accountId() }
 
 	/**
 	 * The root Snap the open thread hangs under, as History already vouched for
@@ -411,8 +437,23 @@ class SnapThreadController internal constructor(
 		uiOwner = accountId()
 		openThreadState = root
 		openRootSnapState = rootSnap
+		openEventState = null
 		replyingToState = null
 		load(root, force = true)
+	}
+
+	/**
+	 * Opens the sheet on a History row that has no Snap yet.
+	 *
+	 * Reads nothing and writes nothing: there is no conversation to fetch until
+	 * a root exists. The sheet this opens carries the composer and nothing else.
+	 */
+	fun openComposer(eventId: String) {
+		uiOwner = accountId()
+		openEventState = eventId
+		openThreadState = null
+		openRootSnapState = null
+		replyingToState = null
 	}
 
 	/** Leaves every draft exactly as typed — closing a thread never discards. */
@@ -420,10 +461,20 @@ class SnapThreadController internal constructor(
 		uiOwner = null
 		openThreadState = null
 		openRootSnapState = null
+		openEventState = null
 		replyingToState = null
 	}
 
 	// ── reply drafts ───────────────────────────────────────────────────
+
+	/**
+	 * What the composer draws: empty from the moment Send is tapped.
+	 *
+	 * Distinct from [draft], which keeps answering with the words themselves so
+	 * that recovery, validation at the publication boundary and the discard
+	 * dialog all keep working on the real thing.
+	 */
+	fun composerText(key: String): String = if (key in submitted) "" else draft(key)
 
 	fun draft(key: String): String = draftCache[key]
 		?: (drafts.read(key) as? SnapReplyDraftRead.Present)?.draft?.text
@@ -464,6 +515,20 @@ class SnapThreadController internal constructor(
 	}
 
 	fun edit(key: String, text: String) {
+		// An echo of the words just sent is not typing.
+		//
+		// A soft keyboard holds a composing region over the text it last had,
+		// and finishing that session posts one more update carrying it. Arriving
+		// here while the attempt still owns the slot, it would un-submit the slot
+		// and write the words back — which is exactly how a sent reply appeared
+		// to linger in the box until the draft was discarded on confirmation.
+		//
+		// Bounded to the in-flight window and to *identical* text, so anything
+		// the user actually types — including retyping the same message after
+		// the attempt has finished — still takes the slot back.
+		if (key in running && submitted[key] == text) return
+		// Typing is the user taking the slot back.
+		submitted.remove(key)
 		// A locked slot takes no edits. The store refuses too; this stops the
 		// cache showing text the store never accepted.
 		if (corruptDrafts.containsKey(key)) return
@@ -557,6 +622,7 @@ class SnapThreadController internal constructor(
 		corruptDrafts.remove(key)
 		statuses.remove(key)
 		if (replyingToState == key) replyingToState = null
+		submitted.remove(key)
 		// A discarded reply may have been drawn from its record. Redrawing the
 		// open conversation is what actually takes it off the screen; the chain
 		// is not asked again, because nothing about the chain changed.
@@ -628,6 +694,14 @@ class SnapThreadController internal constructor(
 			running.remove(key)
 			return
 		}
+		// The box empties on the tap, not on Hive's acknowledgement. The words
+		// are not gone — `text` holds them for this attempt and the draft still
+		// holds them on disk — they have simply stopped being something the
+		// user is still composing. Restored below on any outcome that leaves
+		// them un-published.
+		// Keyed to the exact words handed over, because an IME that has not
+		// finished its session yet will echo them back — see [edit].
+		submitted[key] = text
 		val who = accountId()
 
 		scope.launch {
@@ -667,6 +741,8 @@ class SnapThreadController internal constructor(
 				// what makes showing it honest.
 				statuses[key] = SnapPostStatus.Optimistic(staged.outcome.contentId)
 				if (replyingToState == key) replyingToState = null
+				// The submitted marker deliberately stays: the box must remain
+				// empty for the whole attempt, not just until staging succeeds.
 				redraw(root)
 
 				// ── Phase two: the ordinary publication path, behind the reply. ──
@@ -687,6 +763,26 @@ class SnapThreadController internal constructor(
 					redraw(root)
 				}
 			} finally {
+				// Both markers belong to the attempt, and both are released
+				// here — including on the paths that leave early.
+				//
+				// `submitted` only ever answers "do not draw this draft", so a
+				// copy of it that outlives the attempt is a draft the user
+				// cannot see. The account guards above are exactly that case:
+				// they abandon the attempt mid-flight when the signed-in account
+				// changes, and an earlier revision returned from them leaving
+				// the marker behind. The key carries the account, so the entry
+				// stranded there was the *first* account's — and on coming back
+				// to it the composer kept drawing an empty box over a draft that
+				// was still on disk, which the next keystroke would then
+				// overwrite. Releasing here cannot strand one.
+				//
+				// Harmless on the published path: `settle` has already retired
+				// the draft by now, so the box is empty because there is nothing
+				// left to draw rather than because it is being hidden. Doing it
+				// here rather than before `settle` also closes a flicker, where
+				// the sent words came back for the length of one disk write.
+				submitted.remove(key)
 				running.remove(key)
 			}
 		}
@@ -942,6 +1038,7 @@ class SnapThreadController internal constructor(
 				draftCache[key] = ""
 				corruptDrafts.remove(key)
 				if (replyingToState == key) replyingToState = null
+				submitted.remove(key)
 			}
 			// Somebody typed while this was in flight. Their words are still
 			// there, no longer tied to the published attempt, and the composer

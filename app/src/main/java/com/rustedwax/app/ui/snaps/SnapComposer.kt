@@ -52,7 +52,7 @@ import com.rustedwax.app.ui.WaxIcons
  * for everything else — the point is one tap for the reaction people actually
  * leave, not a catalogue RustedWax would then have to maintain.
  */
-private val QUICK_EMOJI = listOf(
+internal val QUICK_EMOJI = listOf(
 	"😂", "❤️", "🔥", "😍", "😭", "😮", "😡", "🤣", "👍",
 	"👎", "👀", "🤔", "🙌", "💯", "🚨", "🎵", "🤘",
 )

@@ -1,13 +1,29 @@
 package com.rustedwax.app.ui.snaps
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.IconButton
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -55,7 +71,6 @@ import com.rustedwax.hive.ViewerVote
 @Composable
 internal fun SnapThreadPreviewStrip(
 	preview: SnapThreadPreview.Preview,
-	onOpenThread: () -> Unit,
 	modifier: Modifier = Modifier,
 ) {
 	if (preview.items.isEmpty()) return
@@ -82,22 +97,49 @@ internal fun SnapThreadPreviewStrip(
 				)
 			}
 		}
-		if (preview.hasMore) {
-			TextButton(
-				onClick = onOpenThread,
-				contentPadding = androidx.compose.foundation.layout.PaddingValues(
-					horizontal = 0.dp,
-					vertical = 2.dp,
-				),
-			) {
-				Text(
-					"View replies (${preview.total})",
-					style = MaterialTheme.typography.labelMedium,
-				)
-			}
-		}
+		// No "View replies" here any more. The count moved to the card's own
+		// Comments control, which is also what opens the conversation — two
+		// controls a tap apart, both saying how many replies there are and both
+		// going to the same place, was one more than the card needed.
 	}
 }
+
+/**
+ * Which media a conversation belongs to, in the three fields the header draws.
+ *
+ * Deliberately not [com.rustedwax.app.snaps.SnapMedia] and deliberately not the
+ * History record itself. `SnapMedia` carries the verified video id and nothing
+ * else — it is what a Snap is *built from* — and the record carries status,
+ * percentage, queue state and a transaction id, none of which belong on a
+ * social surface. This is the header's own small contract: what to show, and
+ * nothing that would let the sheet reach into scrobbling.
+ *
+ * Null everywhere it is not known. A thread reached from the bell or from an
+ * Android notification has no History row behind it, and the header says less
+ * rather than guessing — see [ThreadHeader].
+ */
+internal data class SnapThreadMedia(
+	/** Null when identity never resolved. No thumbnail is drawn for it. */
+	val videoId: String?,
+	val title: String,
+	val artist: String?,
+)
+
+/**
+ * Writing the **first** Snap for a History row, from inside the sheet.
+ *
+ * The publication itself stays exactly where it was — this is a handle onto
+ * the call the History card has always made, so the draft is still the card's
+ * draft, still keyed by account and event, and still destroyed only once Hive
+ * confirms. Nothing about posting moved; only where the box is.
+ */
+internal data class SnapRootComposing(
+	val draft: String,
+	/** False while the text is invalid, or an attempt already owns this row. */
+	val canPost: Boolean,
+	val onDraftChange: (String) -> Unit,
+	val onPost: () -> Unit,
+)
 
 /**
  * The whole conversation under one Snap, with room to read it.
@@ -111,23 +153,68 @@ internal fun SnapThreadPreviewStrip(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun SnapThreadSheet(
-	root: SnapReplyTarget,
+	/** Null on a row that has not been Snapped yet — see [SnapRootComposing]. */
+	root: SnapReplyTarget?,
 	rootSnap: PostedSnap?,
 	threads: SnapThreadController,
 	likes: SnapLikeController,
 	nowEpochSec: Long,
+	/** The media this conversation belongs to, when anything knows it. */
+	media: SnapThreadMedia?,
+	/** The viewer's own handle, for the face beside the composer. */
+	viewer: String?,
+	/** Present only while [root] is null: the first Snap is written here. */
+	rootComposer: SnapRootComposing?,
 	onDismiss: () -> Unit,
 ) {
 	val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+	// Which comment the composer at the bottom is aimed at. Null is the ordinary
+	// case and means the root: typing into the bar without choosing anything
+	// adds a comment to the conversation, exactly as it reads. Reset when the
+	// sheet is pointed at a different conversation so a target cannot survive
+	// into a thread it does not belong to.
+	var replyTarget by remember(root?.contentId) { mutableStateOf<SnapReplyTarget?>(null) }
+	/** The reply slot a Send was just fired for, while its outcome is unknown. */
+	var sentKey by remember(root?.contentId) { mutableStateOf<String?>(null) }
 	ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
 		Column(
 			Modifier
 				.fillMaxWidth()
-				.heightIn(max = 560.dp)
-				.padding(horizontal = 16.dp),
+				// A definite, large height rather than the old 560dp ceiling and
+				// rather than wrapping the conversation.
+				//
+				// Both of those were wrong in the same way: they let the sheet's
+				// size be decided by how much had been said. A two-comment thread
+				// then drew a stub with the composer stranded in mid-screen, and
+				// a busy one was cut off at a number somebody wrote down once.
+				// Fixing the height instead gives the header and the composer
+				// somewhere to stay while the middle scrolls, and leaves History
+				// visible above the sheet — which is what tells the reader which
+				// row they are looking at.
+				.fillMaxHeight(0.88f)
+				.padding(horizontal = 16.dp)
+				// The keyboard lifts the composer instead of covering it.
+				.imePadding(),
 		) {
-			Text("Thread", style = MaterialTheme.typography.titleMedium)
+			ThreadHeader(media = media)
 			Spacer(Modifier.height(8.dp))
+
+			if (root == null) {
+				// Nothing has been said about this track yet. The sheet is the
+				// whole of it: a line explaining what this box is for, and the
+				// box.
+				Text(
+					"No Snap yet. Write the first one.",
+					style = MaterialTheme.typography.bodySmall,
+					color = MaterialTheme.colorScheme.onSurfaceVariant,
+				)
+				// Holds the composer on the bottom edge rather than letting it
+				// ride up under the one line above it.
+				Spacer(Modifier.weight(1f))
+				rootComposer?.let { RootComposerBar(it, viewer) }
+				Spacer(Modifier.height(12.dp))
+				return@ModalBottomSheet
+			}
 
 			// The root Snap, and the one place to reply to it directly.
 			rootSnap?.let {
@@ -153,6 +240,7 @@ internal fun SnapThreadSheet(
 					// part they most want to see. The heart beside it stays
 					// non-interactive — see [SocialLikeCount].
 					likeCount = threads.thread(root)?.rootLikeCount ?: 0,
+					onReplyTo = { replyTarget = it },
 				)
 				HorizontalDivider(Modifier.padding(vertical = 8.dp))
 			}
@@ -162,9 +250,10 @@ internal fun SnapThreadSheet(
 					"Loading replies…",
 					style = MaterialTheme.typography.bodySmall,
 					color = MaterialTheme.colorScheme.onSurfaceVariant,
+					modifier = Modifier.weight(1f),
 				)
 
-				is SnapThreadLoad.Unavailable -> Column {
+				is SnapThreadLoad.Unavailable -> Column(Modifier.weight(1f)) {
 					Text(
 						load.message,
 						style = MaterialTheme.typography.bodySmall,
@@ -198,6 +287,7 @@ internal fun SnapThreadSheet(
 							"No replies yet.",
 							style = MaterialTheme.typography.bodySmall,
 							color = MaterialTheme.colorScheme.onSurfaceVariant,
+							modifier = Modifier.weight(1f),
 						)
 					} else {
 						LazyColumn(
@@ -205,20 +295,448 @@ internal fun SnapThreadSheet(
 							// Bounded, so an enormous conversation scrolls inside
 							// the sheet instead of measuring itself against
 							// infinity.
-							modifier = Modifier.weight(1f, fill = false),
+							// Takes the slack between the root Snap and the composer,
+						// so the composer stays on the bottom edge and only the
+						// conversation moves.
+						modifier = Modifier.weight(1f),
 						) {
 							// Keyed by the comment's own chain identity, which the
 							// builder has already de-duplicated, so a refresh that
 							// adds a reply cannot hand one comment's composition to
 							// another comment.
 							items(nodes, key = { it.reply.contentId }) { node ->
-								ReplyBlock(node, root, threads, likes, nowEpochSec)
+								ReplyBlock(node, root, threads, likes, nowEpochSec) {
+									replyTarget = it
+								}
 							}
 						}
 					}
 				}
 			}
-			Spacer(Modifier.height(16.dp))
+			Spacer(Modifier.height(8.dp))
+			// The one composer, at the bottom where the thumb already is, and
+			// present whether or not anything has been replied to yet.
+			// The band is retired at the **durable** boundary, not on the tap and
+			// not on Hive's acknowledgement.
+			//
+			// Not on the tap, because a draft is keyed by the comment it answers:
+			// re-aiming the box at the root before the attempt is recorded would
+			// leave the user's words filed under a comment the box is no longer
+			// pointing at, and a staging failure would look like losing them.
+			// Not on acknowledgement, because that is the wait this whole change
+			// removes. `Optimistic` is set one local write after the tap and
+			// before any network, which is both immediate and safe.
+			//
+			// Watched by the slot that was actually sent rather than by whatever
+			// is aimed now, so a comment that merely *has* an old Posted status —
+			// one replied to earlier in this sitting — can still be aimed at.
+			val sentStatus = sentKey?.let { threads.status(it) }
+			LaunchedEffect(sentKey, sentStatus) {
+				if (sentKey == null) return@LaunchedEffect
+				when (sentStatus) {
+					// Recorded. The reply is already in the conversation above.
+					is SnapPostStatus.Optimistic, is SnapPostStatus.Posted -> {
+						replyTarget = null
+						sentKey = null
+					}
+					// Nothing was recorded, or its outcome is unknown. The aim
+					// stays exactly where it was so the words come back under the
+					// comment they were written for.
+					is SnapPostStatus.Failed,
+					is SnapPostStatus.Uncertain,
+					is SnapPostStatus.Interrupted,
+					-> sentKey = null
+					else -> Unit
+				}
+			}
+			ThreadComposerBar(
+				root = root,
+				target = replyTarget ?: root,
+				aimed = replyTarget,
+				threads = threads,
+				viewer = viewer,
+				onSent = { sentKey = it },
+				onClearTarget = { replyTarget = null },
+			)
+			Spacer(Modifier.height(12.dp))
+		}
+	}
+}
+
+/**
+ * The composer, anchored under the conversation rather than inside it.
+ *
+ * One box for the whole sheet. Aimed at the root by default — typing without
+ * choosing anything adds a comment to the conversation — and re-aimed at a
+ * particular comment by that comment's Reply, which is the only thing Reply
+ * does now. The draft still belongs to the *target*, keyed and stored exactly
+ * as before, so switching aim swaps which draft is on screen and never merges
+ * two of them.
+ *
+ * A draft RustedWax cannot decode gets no composer and no Send, for the reason
+ * it always did: it may already be on Hive under an intent that was lost with
+ * it, so the only ways out are leaving it alone and throwing it away on
+ * purpose.
+ */
+@Composable
+private fun ThreadComposerBar(
+	root: SnapReplyTarget,
+	target: SnapReplyTarget,
+	/** Non-null only while aimed at a particular comment. */
+	aimed: SnapReplyTarget?,
+	threads: SnapThreadController,
+	viewer: String?,
+	/** Fired with the slot just sent, after [SnapThreadController.send] has it. */
+	onSent: (String) -> Unit,
+	onClearTarget: () -> Unit,
+) {
+	val key = threads.replyKey(target)
+	// What the box shows, which empties on the tap. The draft itself is
+	// untouched — the discard dialog below still acts on the real words.
+	val draft = threads.composerText(key)
+	// Bound to the draft it is asking about: this is the one control that
+	// destroys typed text, so re-aiming the composer must not carry a live
+	// dialog onto a different comment's draft.
+	var confirmDiscard by remember(key) { mutableStateOf(false) }
+	var confirmDiscardCorrupt by remember(key) { mutableStateOf(false) }
+	val corrupt = threads.corruptReason(key)
+	val focus = remember { FocusRequester() }
+	val focusManager = LocalFocusManager.current
+	val keyboard = LocalSoftwareKeyboardController.current
+
+	Column(Modifier.fillMaxWidth()) {
+		if (corrupt != null) {
+			ThreadNotice(corrupt)
+			Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+				TextButton(onClick = { confirmDiscardCorrupt = true }) {
+					Text(
+						"Discard draft",
+						style = MaterialTheme.typography.labelMedium,
+						color = MaterialTheme.colorScheme.error,
+					)
+				}
+				if (aimed != null) {
+					TextButton(onClick = onClearTarget) {
+						Text("Leave it", style = MaterialTheme.typography.labelMedium)
+					}
+				}
+			}
+			return@Column
+		}
+
+		// Says where the words are going, and offers the way back. Its own thin
+		// band directly above the box, so the answer sits where the typing is
+		// rather than beside the comment somewhere up the list.
+		aimed?.let { at ->
+			// Aiming at a comment focuses the box: the keyboard is what the tap
+			// on Reply was asking for.
+			LaunchedEffect(at.contentId) { runCatching { focus.requestFocus() } }
+			Row(
+				Modifier
+					.fillMaxWidth()
+					.background(MaterialTheme.colorScheme.surfaceContainerHighest)
+					.padding(horizontal = 12.dp, vertical = 6.dp),
+				verticalAlignment = Alignment.CenterVertically,
+			) {
+				Text(
+					"Replying to @${at.author}",
+					style = MaterialTheme.typography.labelMedium,
+					color = MaterialTheme.colorScheme.onSurfaceVariant,
+					maxLines = 1,
+					overflow = TextOverflow.Ellipsis,
+					modifier = Modifier.weight(1f),
+				)
+				Icon(
+					WaxIcons.Close,
+					contentDescription = "Stop replying to @${at.author}",
+					tint = MaterialTheme.colorScheme.onSurfaceVariant,
+					modifier = Modifier
+						.size(18.dp)
+						.clickable(onClickLabel = "Cancel reply", onClick = onClearTarget),
+				)
+			}
+		}
+
+		QuickEmojiRow { threads.edit(key, draft + it) }
+
+		ComposerPill(
+			viewer = viewer ?: root.author,
+			draft = draft,
+			hint = if (aimed != null) "Reply to @${aimed.author}…" else "Join the conversation…",
+			canSend = SnapText.isValid(draft) && !threads.isBusy(key),
+			focus = focus,
+			onDraftChange = { threads.edit(key, it) },
+			// No "Sending…". The box clears on the durable write and the reply
+			// appears above it.
+			onSend = {
+				// `target` is this composable's parameter, captured when the bar
+				// was composed and closed over by the coroutine `send` starts —
+				// so reporting the slot afterwards cannot reparent anything.
+				threads.send(root, target)
+				onSent(key)
+				// Ending the IME session is part of sending, not decoration.
+				//
+				// The box is emptied by `composerText`, but a live IME session
+				// still owns a composing region over the words it just had, and
+				// the next update it posts calls `onValueChange` with them —
+				// which runs `edit`, un-submits the slot and writes the text
+				// straight back. That is why the field appeared to hang on to a
+				// sent reply for a few seconds: the clear was landing and then
+				// being undone, and what finally emptied it was the draft being
+				// discarded on confirmation, a whole Hive block later.
+				//
+				// Dropping focus retires the session, so there is no stale
+				// update to arrive. It also puts the conversation back on screen,
+				// which is where the reply the user just wrote now is.
+				focusManager.clearFocus()
+				keyboard?.hide()
+			},
+			onDiscard = if (draft.isNotEmpty() && !threads.isBusy(key)) {
+				{ confirmDiscard = true }
+			} else {
+				null
+			},
+		)
+	}
+
+	if (confirmDiscard) {
+		DiscardSnapDialog(
+			onKeepEditing = { confirmDiscard = false },
+			onDiscard = {
+				confirmDiscard = false
+				// Scoped to this account and this parent comment, and refused
+				// outright while the reply's outcome is unknown — see
+				// [SnapThreadController.discard].
+				threads.discard(target)
+			},
+		)
+	}
+
+	if (confirmDiscardCorrupt) {
+		DiscardCorruptDraftDialog(
+			onKeep = { confirmDiscardCorrupt = false },
+			onDiscard = {
+				confirmDiscardCorrupt = false
+				threads.discard(target)
+			},
+		)
+	}
+}
+
+/**
+ * The one input row: a face, a pill, and the way to send it.
+ *
+ * Replaces a bordered multi-line box that carried its own close control, its
+ * own counter row and a separate Post button underneath — four rows of chrome
+ * for one sentence of typing. At rest this is a single row about as tall as any
+ * other input, and it grows a few lines at most as the text does.
+ *
+ * The 200-character rule is unchanged and simply stops being *narrated*: the
+ * count appears only once the limit is actually in sight, and Send is inert
+ * until [SnapText.isValid] agrees — the same gate that was there before.
+ */
+@Composable
+private fun ComposerPill(
+	viewer: String,
+	draft: String,
+	hint: String,
+	canSend: Boolean,
+	focus: FocusRequester,
+	onDraftChange: (String) -> Unit,
+	onSend: () -> Unit,
+	/** Absent for an empty draft: asking about nothing trains people to tap No. */
+	onDiscard: (() -> Unit)?,
+) {
+	val overflowing = SnapText.isOverflowing(draft)
+	Row(
+		Modifier.fillMaxWidth().padding(top = 6.dp),
+		verticalAlignment = Alignment.Bottom,
+	) {
+		HiveAvatar(account = viewer, size = 30.dp)
+		Spacer(Modifier.width(8.dp))
+		Column(Modifier.weight(1f)) {
+			Row(
+				Modifier
+					.fillMaxWidth()
+					.clip(RoundedCornerShape(22.dp))
+					.background(MaterialTheme.colorScheme.surfaceContainerHighest)
+					.padding(start = 14.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+				verticalAlignment = Alignment.CenterVertically,
+			) {
+				BasicTextField(
+					value = draft,
+					onValueChange = onDraftChange,
+					textStyle = MaterialTheme.typography.bodyMedium.copy(
+						color = MaterialTheme.colorScheme.onSurface,
+					),
+					cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+					// Grows a little, never into a page. Past this the field
+					// scrolls rather than pushing the conversation off screen.
+					maxLines = 5,
+					modifier = Modifier
+						.weight(1f)
+						.focusRequester(focus)
+						.padding(vertical = 10.dp),
+					decorationBox = { field ->
+						if (draft.isEmpty()) {
+							Text(
+								hint,
+								style = MaterialTheme.typography.bodyMedium,
+								color = MaterialTheme.colorScheme.onSurfaceVariant,
+								maxLines = 1,
+								overflow = TextOverflow.Ellipsis,
+							)
+						}
+						field()
+					},
+				)
+				// Inside the pill, on the right, where the thumb already is.
+				IconButton(onClick = onSend, enabled = canSend, modifier = Modifier.size(36.dp)) {
+					Icon(
+						WaxIcons.Send,
+						contentDescription = "Send",
+						tint = if (canSend) {
+							MaterialTheme.colorScheme.primary
+						} else {
+							MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+						},
+						modifier = Modifier.size(18.dp),
+					)
+				}
+			}
+			// Only ever shown when it is about to matter, and it is the one
+			// thing that must still be said out loud when it does.
+			if (overflowing || SnapText.count(draft) > SnapText.LIMIT - 20) {
+				Row(
+					Modifier.fillMaxWidth().padding(top = 2.dp, end = 4.dp),
+					horizontalArrangement = Arrangement.End,
+					verticalAlignment = Alignment.CenterVertically,
+				) {
+					onDiscard?.let {
+						TextButton(onClick = it) {
+							Text(
+								"Discard",
+								style = MaterialTheme.typography.labelSmall,
+								color = MaterialTheme.colorScheme.error,
+							)
+						}
+						Spacer(Modifier.width(4.dp))
+					}
+					Text(
+						SnapText.counterLabel(draft),
+						style = MaterialTheme.typography.labelSmall,
+						color = if (overflowing) {
+							MaterialTheme.colorScheme.error
+						} else {
+							MaterialTheme.colorScheme.onSurfaceVariant
+						},
+					)
+				}
+			}
+		}
+	}
+}
+
+/**
+ * The quick reactions, on one line directly above the box.
+ *
+ * The same seventeen the inline composer offered behind a toggle — the strip is
+ * simply always out now, which is what makes a one-tap reaction one tap.
+ */
+@Composable
+private fun QuickEmojiRow(onPick: (String) -> Unit) {
+	Row(
+		Modifier
+			.fillMaxWidth()
+			.horizontalScroll(rememberScrollState())
+			.padding(vertical = 2.dp),
+		horizontalArrangement = Arrangement.spacedBy(2.dp),
+		verticalAlignment = Alignment.CenterVertically,
+	) {
+		QUICK_EMOJI.forEach { emoji ->
+			Text(
+				emoji,
+				fontSize = 20.sp,
+				modifier = Modifier
+					.clip(RoundedCornerShape(50))
+					.clickable(onClickLabel = "Add $emoji") { onPick(emoji) }
+					.padding(horizontal = 6.dp, vertical = 5.dp),
+			)
+		}
+	}
+}
+
+/**
+ * The box the first Snap for a row is written in.
+ *
+ * The same pill the conversation uses, for the same reason the sheet is the
+ * same sheet: writing the first Snap and answering one are the same act. It
+ * owns no draft, no key and no publication of its own — everything arrives
+ * through [SnapRootComposing], built at the History call site out of the state
+ * and the `posts.post` call the card has always used.
+ */
+@Composable
+private fun RootComposerBar(composing: SnapRootComposing, viewer: String?) {
+	val focus = remember { FocusRequester() }
+	val focusManager = LocalFocusManager.current
+	val keyboard = LocalSoftwareKeyboardController.current
+	Column(Modifier.fillMaxWidth()) {
+		QuickEmojiRow { composing.onDraftChange(composing.draft + it) }
+		ComposerPill(
+			viewer = viewer.orEmpty(),
+			draft = composing.draft,
+			hint = "Write a Snap…",
+			canSend = composing.canPost,
+			focus = focus,
+			onDraftChange = composing.onDraftChange,
+			onSend = {
+				composing.onPost()
+				// See [ThreadComposerBar]: the IME session has to end with the
+				// send, or its next update writes the words back.
+				focusManager.clearFocus()
+				keyboard?.hide()
+			},
+			onDiscard = null,
+		)
+	}
+}
+
+/**
+ * The sheet's chrome: what this is, and which media it belongs to.
+ *
+ * Centred and deliberately small. An earlier draft drew a thumbnail and three
+ * stacked lines here, which turned the top of the sheet into a second copy of
+ * the History card — the one thing §7 says not to do ("Do not duplicate large
+ * History-card metadata"). The card itself is still on screen above the sheet,
+ * so repeating it bought nothing and cost the conversation its space.
+ *
+ * The media is still named, because §7 asks that the reader always know which
+ * item the conversation belongs to and because the routes that matter most for
+ * that — the bell and an Android notification — open threads with **no** card
+ * behind them at all. One quiet line answers that; a picture of the video does
+ * not answer it any better.
+ */
+@Composable
+private fun ThreadHeader(media: SnapThreadMedia?) {
+	Column(
+		Modifier.fillMaxWidth().padding(bottom = 2.dp),
+		horizontalAlignment = Alignment.CenterHorizontally,
+	) {
+		Text("Comments", style = MaterialTheme.typography.titleMedium)
+		media?.let {
+			// Artist and title on one line, in the order History already says
+			// them, and clipped rather than wrapped: a long title may not push
+			// the conversation down the screen.
+			val line = it.artist?.takeIf { a -> a.isNotBlank() }
+				?.let { a -> "$a — ${it.title}" }
+				?: it.title
+			Text(
+				line,
+				style = MaterialTheme.typography.labelSmall,
+				color = MaterialTheme.colorScheme.onSurfaceVariant,
+				maxLines = 1,
+				overflow = TextOverflow.Ellipsis,
+			)
 		}
 	}
 }
@@ -230,6 +748,7 @@ private fun ReplyBlock(
 	threads: SnapThreadController,
 	likes: SnapLikeController,
 	nowEpochSec: Long,
+	onReplyTo: (SnapReplyTarget) -> Unit,
 ) {
 	val reply: SnapReply = node.reply
 	CommentBlock(
@@ -252,6 +771,7 @@ private fun ReplyBlock(
 		// parsed from — no extra request, and never an authorization. Tapping
 		// the heart re-reads the chain before anything is signed.
 		viewerVote = reply.viewerVote,
+		onReplyTo = onReplyTo,
 	)
 }
 
@@ -277,19 +797,15 @@ private fun CommentBlock(
 	viewerVote: ViewerVote,
 	/** Positive votes the chain last showed here. Presentation only. */
 	likeCount: Int,
+	/** Aims the sheet's one composer at this comment. */
+	onReplyTo: (SnapReplyTarget) -> Unit,
 ) {
 	val key = target?.let { threads.replyKey(it) }
-	val replying = key != null && threads.isReplying(key)
 	val status = key?.let { threads.status(it) } ?: SnapPostStatus.Idle
-	// Bound to the draft it is asking about. This is the one control that
-	// destroys typed text, so a recycled composition in the thread list must
-	// not be able to carry a live dialog onto a different comment's draft.
-	var confirmDiscard by remember(key) { mutableStateOf(false) }
-	var confirmDiscardCorrupt by remember(key) { mutableStateOf(false) }
 
-	Row(Modifier.fillMaxWidth().padding(start = (depth * 14).dp, top = 4.dp)) {
-		HiveAvatar(account = author, size = 22.dp)
-		Spacer(Modifier.width(8.dp))
+	Row(Modifier.fillMaxWidth().padding(start = (depth * 14).dp, top = 6.dp)) {
+		HiveAvatar(account = author, size = 30.dp)
+		Spacer(Modifier.width(10.dp))
 		Column(Modifier.weight(1f)) {
 			Row(verticalAlignment = Alignment.CenterVertically) {
 				Text(
@@ -330,93 +846,19 @@ private fun CommentBlock(
 					else -> Unit
 				}
 
-				val corrupt = threads.corruptReason(key)
-				if (replying && corrupt != null) {
-					// A draft whose saved state cannot be decoded may already be
-					// on Hive under an intent that was lost with it, so there is
-					// no composer here and no Send: the only ways out are leaving
-					// it alone and throwing it away on purpose.
-					ThreadNotice(corrupt)
-					Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-						TextButton(onClick = { confirmDiscardCorrupt = true }) {
-							Text(
-								"Discard draft",
-								style = MaterialTheme.typography.labelMedium,
-								color = MaterialTheme.colorScheme.error,
-							)
-						}
-						TextButton(onClick = { threads.cancelReply() }) {
-							Text("Leave it", style = MaterialTheme.typography.labelMedium)
-						}
-					}
-				} else if (replying) {
-					val draft = threads.draft(key)
-					SnapComposer(
-						text = draft,
-						// Closing is not discarding. The composer collapses and
-						// the draft stays exactly as typed, here and on the
-						// History card — throwing text away needs the explicit
-						// control beside Send.
-						onTextChange = { threads.edit(key, it) },
-						onClose = { threads.cancelReply() },
-					)
-					Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-						WaxOutlinedButton(
-							onClick = { threads.send(root, target) },
-							// One explicit send. Locked while an attempt owns
-							// this slot, so a second tap cannot start a second
-							// broadcast — though in practice the composer is
-							// already gone by then.
-							enabled = SnapText.isValid(draft) && !threads.isBusy(key),
-							icon = WaxIcons.Send,
-						) {
-							// No "Sending…". The composer closes on the durable
-							// write and the reply appears below it; what Hive
-							// does after that is not something to sit and watch.
-							Text("Send")
-						}
-						// Offered only for a draft with something in it: asking
-						// about nothing is the kind of dialog people learn to
-						// dismiss without reading.
-						if (draft.isNotEmpty() && !threads.isBusy(key)) {
-							TextButton(onClick = { confirmDiscard = true }) {
-								Text(
-									"Discard",
-									style = MaterialTheme.typography.labelMedium,
-									color = MaterialTheme.colorScheme.error,
-								)
-							}
-						}
-					}
-				} else {
+				// The composer is no longer here. Every comment's Reply aims the
+				// one composer at the bottom of the sheet — see
+				// [ThreadComposerBar] — so the conversation is never pushed
+				// around by a text box opening inside it.
+				run {
 					// Whatever the last Like attempt had to say. Ambiguity reads
 					// differently from a refusal on purpose: one offers a re-read
 					// and the other does not.
 					likes.notice(target)?.let { ThreadNotice(it) }
 					Row(
-						horizontalArrangement = Arrangement.spacedBy(8.dp),
+						horizontalArrangement = Arrangement.spacedBy(4.dp),
 						verticalAlignment = Alignment.CenterVertically,
 					) {
-						// The heart sits beside Reply, in the one action row both
-						// the root Snap and every reply already go through — so
-						// there is a single Like control rather than two that can
-						// drift apart. Absent entirely on this user's own
-						// comments.
-						if (likes.showsHeart(author)) {
-							LikeHeart(
-								heart = likes.heart(target, viewerVote),
-								count = likes.likeCount(target, viewerVote, likeCount),
-								pending = likes.isPending(target),
-								onLike = { likes.like(target) },
-								onRecheck = { likes.recheck(target) },
-							)
-						} else {
-							// This user's own comment. They cannot Like it, so
-							// there is no control — but how many other people
-							// did is theirs to see, and it is the one number a
-							// Snap's author actually wants.
-							SocialLikeCount(likeCount)
-						}
 						// An ambiguous reply offers a *read* and nothing else:
 						// sending again could duplicate a live comment.
 						if (status is SnapPostStatus.Uncertain) {
@@ -433,45 +875,51 @@ private fun CommentBlock(
 								Text("Finish reply", style = MaterialTheme.typography.labelMedium)
 							}
 						} else {
-							TextButton(onClick = { threads.startReply(key) }) {
-								Icon(
-									WaxIcons.SpeechBubble,
-									contentDescription = null,
-									modifier = Modifier.size(13.dp),
-								)
-								Spacer(Modifier.width(4.dp))
-								Text("Reply", style = MaterialTheme.typography.labelMedium)
-							}
+							// Plain word under the text, as a comment thread
+							// writes it — the icon belonged to an action row
+							// that no longer exists.
+							Text(
+								"Reply",
+								style = MaterialTheme.typography.labelMedium,
+								color = MaterialTheme.colorScheme.onSurfaceVariant,
+								modifier = Modifier
+									.clip(RoundedCornerShape(6.dp))
+									.clickable(onClickLabel = "Reply to @$author") {
+										onReplyTo(target)
+									}
+									.padding(vertical = 4.dp, horizontal = 2.dp),
+							)
 						}
 					}
 				}
 			}
 		}
+		// The Like rail, on the right edge and aligned with the comment it
+		// belongs to: heart above, count under it. Absent entirely on this
+		// user's own comments, where `SocialLikeCount` shows the number alone —
+		// a filled heart there would claim they voted for themselves.
+		Column(
+			horizontalAlignment = Alignment.CenterHorizontally,
+			modifier = Modifier.padding(start = 6.dp, top = 2.dp),
+		) {
+			if (likes.showsHeart(author)) {
+				// Null only for a comment whose own identity did not survive
+				// validation: no target, no Like control, and nothing drawn.
+				target?.let {
+					LikeHeart(
+						heart = likes.heart(target, viewerVote),
+						count = likes.likeCount(target, viewerVote, likeCount),
+						pending = likes.isPending(target),
+						onLike = { likes.like(target) },
+						onRecheck = { likes.recheck(target) },
+					)
+				}
+			} else {
+				SocialLikeCount(likeCount)
+			}
+		}
 	}
 	Box(Modifier.height(2.dp))
-
-	if (confirmDiscard && target != null) {
-		DiscardSnapDialog(
-			onKeepEditing = { confirmDiscard = false },
-			onDiscard = {
-				confirmDiscard = false
-				// Scoped to this account and this parent comment, and refused
-				// outright while the reply's outcome is unknown — see
-				// [SnapThreadController.discard].
-				threads.discard(target)
-			},
-		)
-	}
-
-	if (confirmDiscardCorrupt && target != null) {
-		DiscardCorruptDraftDialog(
-			onKeep = { confirmDiscardCorrupt = false },
-			onDiscard = {
-				confirmDiscardCorrupt = false
-				threads.discard(target)
-			},
-		)
-	}
 }
 
 /**
@@ -505,40 +953,40 @@ private fun LikeHeart(
 	onRecheck: () -> Unit,
 ) {
 	val filled = heart == SnapHeart.FILLED
-	TextButton(
-		onClick = onLike,
-		// Only an outline heart is a live control. Filled has nothing left to
-		// do, and inert never had anything to do.
-		enabled = heart == SnapHeart.OUTLINE,
-	) {
-		Icon(
-			if (filled) WaxIcons.HeartFilled else WaxIcons.Heart,
-			contentDescription = if (filled) "Liked" else "Like",
-			tint = if (filled) {
-				MaterialTheme.colorScheme.primary
-			} else {
-				MaterialTheme.colorScheme.onSurfaceVariant
-			},
-			modifier = Modifier.size(13.dp),
+	Icon(
+		if (filled) WaxIcons.HeartFilled else WaxIcons.Heart,
+		contentDescription = if (filled) "Liked" else "Like",
+		tint = if (filled) {
+			MaterialTheme.colorScheme.primary
+		} else {
+			MaterialTheme.colorScheme.onSurfaceVariant
+		},
+		modifier = Modifier
+			.size(19.dp)
+			.then(
+				// Only an outline heart is a live control. Filled has nothing
+				// left to do, and inert never had anything to do.
+				if (heart == SnapHeart.OUTLINE) {
+					Modifier.clickable(onClickLabel = "Like", onClick = onLike)
+				} else {
+					Modifier
+				},
+			),
+	)
+	// Nothing at zero: "0" beside every new comment is noise, and an absence
+	// already reads as none.
+	if (count > 0) {
+		Text(
+			"$count",
+			style = MaterialTheme.typography.labelSmall,
+			color = MaterialTheme.colorScheme.onSurfaceVariant,
 		)
-		Spacer(Modifier.width(4.dp))
-		Text("Like", style = MaterialTheme.typography.labelMedium)
-		// Two facts, side by side and never conflated: the heart is whether
-		// *you* liked this, the number is how many people did. Nothing is
-		// drawn at zero — "0" beside every new comment is noise, and an
-		// absence already reads as none.
-		if (count > 0) {
-			Spacer(Modifier.width(4.dp))
-			Text("$count", style = MaterialTheme.typography.labelMedium)
-		}
 	}
 	if (pending) {
-		// Named rather than a bare "Check again": the reply beside it has a
-		// re-check of its own, and on a comment where both a reply and a Like
-		// ended up ambiguous, two identically-labelled buttons would be a
-		// choice nobody can make.
-		TextButton(onClick = onRecheck) {
-			Text("Check Like", style = MaterialTheme.typography.labelMedium)
+		// Named rather than a bare "Check again": the comment beside it may
+		// have a re-check of its own.
+		TextButton(onClick = onRecheck, contentPadding = PaddingValues(2.dp)) {
+			Text("Check", style = MaterialTheme.typography.labelSmall)
 		}
 	}
 }
@@ -555,20 +1003,17 @@ private fun LikeHeart(
 @Composable
 private fun SocialLikeCount(count: Int) {
 	if (count <= 0) return
-	Row(verticalAlignment = Alignment.CenterVertically) {
-		Icon(
-			WaxIcons.Heart,
-			contentDescription = "Likes",
-			tint = MaterialTheme.colorScheme.onSurfaceVariant,
-			modifier = Modifier.size(13.dp),
-		)
-		Spacer(Modifier.width(4.dp))
-		Text(
-			"$count",
-			style = MaterialTheme.typography.labelMedium,
-			color = MaterialTheme.colorScheme.onSurfaceVariant,
-		)
-	}
+	Icon(
+		WaxIcons.Heart,
+		contentDescription = "Likes",
+		tint = MaterialTheme.colorScheme.onSurfaceVariant,
+		modifier = Modifier.size(19.dp),
+	)
+	Text(
+		"$count",
+		style = MaterialTheme.typography.labelSmall,
+		color = MaterialTheme.colorScheme.onSurfaceVariant,
+	)
 }
 
 /**

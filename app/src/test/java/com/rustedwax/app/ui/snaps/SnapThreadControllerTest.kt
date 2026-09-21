@@ -531,17 +531,18 @@ class SnapThreadControllerTest {
 		assertEquals("opening must re-read", 2, reader.reads)
 		val thread = threads.thread(root)!!
 		assertEquals(3, thread.total)
-		// Depth-first reading order: the RustedWax reply, then what hangs off
-		// it, then the later top-level reply.
+		// Depth-first reading order, with the top level newest first: the later
+		// third-party reply to the root, then the older RustedWax reply, then
+		// what hangs off that one — a child never leaves its parent.
 		assertEquals(
 			listOf(
+				"palomap3/re-external-root",
 				"skiptvads.vidz/rustedwax-reply-1",
 				"skiptvads/re-external-nested",
-				"palomap3/re-external-root",
 			),
 			thread.rows.map { it.reply.contentId },
 		)
-		assertEquals(listOf(0, 1, 0), thread.rows.map { it.depth })
+		assertEquals(listOf(0, 0, 1), thread.rows.map { it.depth })
 	}
 
 	/** The refreshed tree keeps the real parent/child shape, at both depths. */
@@ -1580,6 +1581,85 @@ class SnapThreadControllerTest {
 		assertTrue(aliceKey != threads.replyKey(root))
 	}
 
+	/**
+	 * A draft may not be hidden by an attempt that was abandoned mid-flight.
+	 *
+	 * `submitted` answers one question — *should the composer draw this draft?*
+	 * — and it is keyed by account, because reply slots are. So a copy of it
+	 * left behind by an account switch is not a stale flag, it is one account's
+	 * draft made invisible: the box draws empty over words that are still on
+	 * disk, and the next keystroke writes over them.
+	 *
+	 * Both guards in `send` abandon the attempt when the account changes under
+	 * it, and neither used to release the marker. It is released in the same
+	 * `finally` as `running` now, so no path can strand one.
+	 */
+	@Test
+	fun `a send abandoned by an account switch does not hide the draft`() {
+		val hive = Hive(inBlock())
+		var signedIn = "alice"
+		val threads = controller(hive) { signedIn }
+		val aliceKey = threads.replyKey(root)
+		threads.edit(aliceKey, "alice's words")
+
+		// The switch lands while the attempt is in flight, which is exactly
+		// where the account guards fire.
+		hive.duringPrepare = { signedIn = "bob" }
+		threads.send(root, root)
+
+		signedIn = "alice"
+		assertEquals("the draft is still on disk", "alice's words", threads.draft(aliceKey))
+		assertEquals(
+			"and the composer draws it again rather than an empty box",
+			"alice's words",
+			threads.composerText(aliceKey),
+		)
+	}
+
+	/** And the other account never sees those words, before or after. */
+	@Test
+	fun `a send abandoned by an account switch leaks nothing to the other account`() {
+		val hive = Hive(inBlock())
+		var signedIn = "alice"
+		val threads = controller(hive) { signedIn }
+		threads.edit(threads.replyKey(root), "alice's words")
+
+		hive.duringPrepare = { signedIn = "bob" }
+		threads.send(root, root)
+
+		// Bob's own slot for the same comment is a different key entirely.
+		val bobKey = threads.replyKey(root)
+		assertEquals("", threads.draft(bobKey))
+		assertEquals("", threads.composerText(bobKey))
+	}
+
+	/**
+	 * The parent is captured before any of this and cannot move.
+	 *
+	 * `send` is handed its target and closes over it; an account changing
+	 * underneath decides whether the attempt continues, never where it would
+	 * have gone.
+	 */
+	@Test
+	fun `an account switch cannot change the parent a reply was aimed at`() {
+		val hive = Hive(inBlock())
+		var signedIn = "alice"
+		val bob = reply("bob", "r1", root)
+		val target = SnapReplyTarget.of("bob", "r1")!!
+		val threads = controller(hive, reader = Reader(listOf(bob))) { signedIn }
+		threads.open(root, null)
+		val key = threads.replyKey(target)
+		threads.edit(key, "aimed at bob")
+
+		hive.duringPrepare = { signedIn = "carol" }
+		threads.send(root, target)
+
+		val prepared = hive.preparedOps.last()
+		assertEquals("the comment tapped is the parent that was prepared", "bob", prepared.parentAuthor)
+		assertEquals("r1", prepared.parentPermlink)
+		assertEquals("and it was signed for alice, not the new account", "alice", prepared.author)
+	}
+
 	@Test
 	fun `after a switch, Send finds nothing of the previous account to send`() {
 		val hive = Hive(inBlock())
@@ -1793,8 +1873,8 @@ class SnapThreadControllerTest {
 	@Test
 	fun `the reply is in the thread before the network is asked`() {
 		val hive = Hive(inBlock())
-		// Older than the clock the controller stages under, so the two order
-		// the way the conversation actually happened.
+		// Older than the clock the controller stages under, so the reply just
+		// written is the newer of the two — and therefore the top one.
 		val bob = SnapReply("bob", "r1", root.author, root.permlink, "hi", 900L)
 		val threads = controller(hive, reader = Reader(listOf(bob))) { "alice" }
 		threads.open(root, null)
@@ -1807,7 +1887,9 @@ class SnapThreadControllerTest {
 
 		threads.send(root, root)
 
-		assertEquals(listOf("hi", "nice one"), bodiesDuringPrepare)
+		// Top-level entries read newest first, so the reply staged a moment ago
+		// is already at the top — before the network has been asked anything.
+		assertEquals(listOf("nice one", "hi"), bodiesDuringPrepare)
 		// Under the comment it answers, not floating at the top.
 		val mine = threads.thread(root)!!.rows.single { it.reply.body == "nice one" }
 		assertEquals("alice", mine.reply.author)
@@ -1831,6 +1913,149 @@ class SnapThreadControllerTest {
 		assertEquals("bob", mine.reply.parentAuthor)
 		assertEquals("r1", mine.reply.parentPermlink)
 		assertEquals("one level in", 1, mine.depth)
+	}
+
+	/**
+	 * The keyboard's parting shot must not put a sent reply back in the box.
+	 *
+	 * A soft keyboard holds a composing region over the text it last had, and
+	 * ending that session posts one more update carrying it. That update reaches
+	 * `edit` exactly like a keystroke — and before this guard it un-submitted the
+	 * slot and wrote the words back, so a sent reply sat in the box until the
+	 * draft was discarded on confirmation a Hive block later. The user read that
+	 * as the app waiting for the network.
+	 */
+	@Test
+	fun `an echo of the words just sent does not put them back in the box`() {
+		val hive = Hive(inBlock())
+		val bob = reply("bob", "r1", root)
+		val target = SnapReplyTarget.of("bob", "r1")!!
+		val threads = controller(hive, reader = Reader(listOf(bob))) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(target)
+		threads.edit(key, "agreed")
+
+		// Mid-flight is the only moment this can happen: the attempt still owns
+		// the slot, and the keyboard is finishing the session it opened.
+		var boxDuringFlight: String? = null
+		hive.duringPrepare = {
+			threads.edit(key, "agreed")
+			boxDuringFlight = threads.composerText(key)
+		}
+
+		threads.send(root, target)
+
+		assertEquals("the box stays empty while the attempt runs", "", boxDuringFlight)
+	}
+
+	/**
+	 * And the guard is not a lock: anything the user actually types takes the
+	 * slot straight back, including while the attempt is still in flight.
+	 */
+	@Test
+	fun `typing after a send takes the box back`() {
+		val bob = reply("bob", "r1", root)
+		val target = SnapReplyTarget.of("bob", "r1")!!
+		val threads = controller(reader = Reader(listOf(bob))) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(target)
+		threads.edit(key, "agreed")
+
+		threads.send(root, target)
+		threads.edit(key, "something else")
+
+		assertEquals("something else", threads.composerText(key))
+	}
+
+	/**
+	 * The status the sheet retires its "Replying to @…" band on.
+	 *
+	 * The band may not go on the tap: a draft is keyed by the comment it
+	 * answers, so re-aiming the box at the root before the attempt is recorded
+	 * would file the user's words under a comment the box no longer points at.
+	 * It goes at the durable boundary instead, and this is the transition that
+	 * boundary is visible as.
+	 */
+	@Test
+	fun `a staged targeted reply reports Optimistic for its own slot`() {
+		val bob = reply("bob", "r1", root)
+		val target = SnapReplyTarget.of("bob", "r1")!!
+		val threads = controller(reader = Reader(listOf(bob))) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(target)
+		threads.edit(key, "agreed")
+
+		threads.send(root, target)
+
+		assertTrue(
+			"the slot that was sent must report a staged status, which is what " +
+				"retires the band",
+			threads.status(key) is SnapPostStatus.Optimistic ||
+				threads.status(key) is SnapPostStatus.Posted,
+		)
+		// And the root's own slot is untouched, so the composer returning to
+		// root-level finds an empty box rather than somebody else's words.
+		assertEquals("", threads.draft(threads.replyKey(root)))
+		assertEquals(SnapPostStatus.Idle, threads.status(threads.replyKey(root)))
+	}
+
+	/**
+	 * A reply that never reached disk keeps both its words and its aim.
+	 *
+	 * The sheet leaves the band up for exactly this case, so the two have to
+	 * agree: the draft stays under the target's own slot, and the status says
+	 * the attempt did not land.
+	 */
+	@Test
+	fun `a targeted reply that cannot be staged keeps its draft under its own slot`() {
+		val bob = reply("bob", "r1", root)
+		val target = SnapReplyTarget.of("bob", "r1")!!
+		val drafts = Drafts().apply { writable = false }
+		val threads = controller(drafts = drafts, reader = Reader(listOf(bob))) { "alice" }
+		threads.open(root, null)
+		val key = threads.replyKey(target)
+		threads.edit(key, "agreed")
+
+		threads.send(root, target)
+
+		assertTrue(
+			"nothing was recorded, so the attempt must not read as staged",
+			threads.status(key) !is SnapPostStatus.Optimistic &&
+				threads.status(key) !is SnapPostStatus.Posted,
+		)
+		assertEquals("the words stay under the comment they answer", "agreed", threads.draft(key))
+		// The box shows them again rather than staying blank.
+		assertEquals("agreed", threads.composerText(key))
+	}
+
+	/**
+	 * The next message after a successful targeted reply is a root-level one.
+	 *
+	 * The sheet drops its aim once the reply is recorded, so the following send
+	 * resolves its target to the root. What this pins is the half that lives
+	 * down here: the two slots are genuinely separate, so a root-level send
+	 * after a targeted one is parented on the root Snap.
+	 */
+	@Test
+	fun `a root-level send after a targeted one is parented on the root`() {
+		val bob = reply("bob", "r1", root)
+		val target = SnapReplyTarget.of("bob", "r1")!!
+		val threads = controller(reader = Reader(listOf(bob))) { "alice" }
+		threads.open(root, null)
+		threads.edit(threads.replyKey(target), "agreed")
+		threads.send(root, target)
+
+		threads.edit(threads.replyKey(root), "and separately")
+		threads.send(root, root)
+
+		val rows = threads.thread(root)!!.rows
+		val targeted = rows.single { it.reply.body == "agreed" }
+		assertEquals("bob", targeted.reply.parentAuthor)
+		assertEquals("r1", targeted.reply.parentPermlink)
+		val rootLevel = rows.single { it.reply.body == "and separately" }
+		assertEquals(root.author, rootLevel.reply.parentAuthor)
+		assertEquals(root.permlink, rootLevel.reply.parentPermlink)
+		assertEquals("a root-level reply sits at depth 0", 0, rootLevel.depth)
 	}
 
 	/**

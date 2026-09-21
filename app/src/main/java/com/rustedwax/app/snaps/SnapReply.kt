@@ -104,7 +104,7 @@ data class SnapThreadNode(
  */
 data class SnapThread(
 	val rootId: String,
-	/** Direct replies to the root, oldest first. */
+	/** Direct replies to the root, **newest first** — see [SnapThreadBuilder]. */
 	val children: List<SnapThreadNode>,
 	/** Depth-first, in reading order — every node, exactly once. */
 	val rows: List<SnapThreadNode>,
@@ -225,9 +225,22 @@ object SnapThreadBuilder {
 
 		fun push(parentId: String, parentIndex: Int) {
 			val kids = children[parentId] ?: return
-			// Pushed in reverse so the oldest child is popped first, which is what
-			// makes the pop order a pre-order walk.
-			kids.sortedWith(order).asReversed().forEach { stack.addLast(Visit(it, parentIndex)) }
+			// Top-level entries newest first, every subtree oldest first.
+			//
+			// The two are not in tension: what the reader wants from a
+			// conversation is the newest *thing said to them*, and what they want
+			// from one exchange is to read it forwards. So the root's own
+			// children are reversed and nothing below them is — a reply never
+			// leaves its parent, and the tree is never flattened into one
+			// timestamp-sorted list.
+			val sorted = if (parentId == rootId) {
+				kids.sortedWith(order.reversed())
+			} else {
+				kids.sortedWith(order)
+			}
+			// Pushed in reverse so the first of `sorted` is popped first, which is
+			// what makes the pop order a pre-order walk.
+			sorted.asReversed().forEach { stack.addLast(Visit(it, parentIndex)) }
 		}
 
 		push(rootId, ROOT)

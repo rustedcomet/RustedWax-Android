@@ -81,6 +81,8 @@ import com.rustedwax.app.ui.snaps.SnapNoticeController
 import com.rustedwax.app.ui.snaps.SnapPostController
 import com.rustedwax.app.ui.snaps.SnapPostStatus
 import com.rustedwax.app.ui.snaps.SnapThreadController
+import com.rustedwax.app.ui.snaps.SnapRootComposing
+import com.rustedwax.app.ui.snaps.SnapThreadMedia
 import com.rustedwax.app.ui.snaps.SnapThreadPreviewStrip
 import com.rustedwax.app.ui.snaps.SnapLikeController
 import com.rustedwax.app.ui.snaps.SnapThreadSheet
@@ -480,6 +482,7 @@ fun MainScreen(
 							recent,
 							mutedIds,
 							youTubeScrobbling,
+							account?.username,
 							snaps,
 							posts,
 							threads,
@@ -1287,6 +1290,45 @@ private fun AppearanceRow(choice: ThemeChoice, onChoice: (ThemeChoice) -> Unit) 
  *
  * The tap target is the thumbnail and the title, and nothing else in the row.
  */
+/**
+ * A History row's media, drawn the way the v1.1 mockup draws it: the thumbnail
+ * full width, and the title underneath rather than beside it.
+ *
+ * A separate composable from [VideoLink] on purpose. Not-logged rows are a
+ * dense list of refusals the reader scans, and a full-width image per refusal
+ * would bury the reason each one is there — so that list keeps the compact
+ * row, and only History gets the banner.
+ *
+ * The tap target is the same as it always was: the image and the title, and
+ * nothing else. [YouTubeProbe.canonicalWatchUrl] still decides whether there is
+ * one at all.
+ */
+@Composable
+private fun VideoBanner(
+	videoId: String?,
+	thumbnails: Boolean,
+	onOpenVideo: (String) -> Unit,
+	details: @Composable ColumnScope.(titleModifier: Modifier) -> Unit,
+) {
+	val url = remember(videoId) { YouTubeProbe.canonicalWatchUrl(videoId) }
+	val tap = url?.let { link ->
+		Modifier.clickable(onClickLabel = "Open on YouTube") { onOpenVideo(link) }
+	} ?: Modifier
+	Column(Modifier.fillMaxWidth()) {
+		VideoThumbnail(
+			videoId,
+			enabled = thumbnails,
+			modifier = tap.fillMaxWidth(),
+			// Null width: fill the card and take the height from the aspect
+			// ratio instead, so the image is the same shape on every screen
+			// rather than a number that happens to suit one phone.
+			width = null,
+		)
+		Spacer(Modifier.height(8.dp))
+		details(tap)
+	}
+}
+
 @Composable
 private fun VideoLink(
 	/**
@@ -1321,6 +1363,8 @@ private fun HistoryList(
 	recent: List<FinalizationRuntime.ScrobbleRecord>,
 	mutedIds: Set<String>,
 	thumbnails: Boolean,
+	/** The signed-in Hive handle, for the face beside the sheet's composer. */
+	viewer: String?,
 	snaps: SnapComposerState,
 	posts: SnapPostController,
 	threads: SnapThreadController,
@@ -1365,14 +1409,78 @@ private fun HistoryList(
 		// rule is stated once instead of beside three click handlers, one of
 		// which would eventually be added without it.
 		LaunchedEffect(root.contentId) { notices.markThreadRead(root) }
+		// Which History row this conversation belongs to, if History is still
+		// showing it. Found by asking each row for the Snap it posted and
+		// matching that Snap's identity against the thread that is open — the
+		// same `posted` map the card above already reads, so this adds no state
+		// and no lookup of its own.
+		//
+		// Account-scoped for free: `snaps.key` is built from the account signed
+		// in now, so a row belonging to another account cannot be matched here
+		// any more than it can be drawn above.
+		//
+		// Null is an ordinary answer, not a failure. The bell and an Android
+		// notification both open threads for Snaps whose History row has long
+		// since fallen off the list, and the header is built to say less in
+		// exactly that case.
+		val media = recent
+			.firstOrNull { posts.posted(snaps.key(it.eventId))?.contentId == root.contentId }
+			?.let { SnapThreadMedia(videoId = it.videoId, title = it.title, artist = it.artist) }
 		SnapThreadSheet(
 			root = root,
 			rootSnap = threads.openRootSnap,
 			threads = threads,
 			likes = likes,
 			nowEpochSec = System.currentTimeMillis() / 1000,
+			media = media,
+			viewer = viewer,
+			rootComposer = null,
 			onDismiss = { threads.close() },
 		)
+	}
+
+	// The same sheet, opened on a row that has not been Snapped yet. There is no
+	// conversation to show and nothing is read from the chain — only the box the
+	// first Snap is written in.
+	if (threads.openThread == null) {
+		threads.openEvent?.let { eventId ->
+			recent.firstOrNull { it.eventId == eventId }?.let { record ->
+				val composeKey = snaps.key(record.eventId)
+				val composeDraft = snaps.draft(composeKey)
+				SnapThreadSheet(
+					root = null,
+					rootSnap = null,
+					threads = threads,
+					likes = likes,
+					nowEpochSec = System.currentTimeMillis() / 1000,
+					media = SnapThreadMedia(
+						videoId = record.videoId,
+						title = record.title,
+						artist = record.artist,
+					),
+					viewer = viewer,
+					rootComposer = SnapRootComposing(
+						draft = composeDraft,
+						canPost = SnapText.isValid(composeDraft) && !posts.isBusy(composeKey),
+						onDraftChange = { snaps.edit(composeKey, it) },
+						onPost = {
+							posts.post(
+								key = composeKey,
+								eventId = record.eventId,
+								media = SnapMedia(videoId = record.videoId),
+								userText = composeDraft,
+								onStaged = { snaps.collapse() },
+								onPublished = { snaps.discard(composeKey) },
+							)
+							// The sheet has done its job the moment the Snap is
+							// durably ours; the card behind it carries the rest.
+							threads.close()
+						},
+					),
+					onDismiss = { threads.close() },
+				)
+			}
+		}
 	}
 
 	if (recent.isEmpty()) {
@@ -1441,6 +1549,32 @@ private fun HistoryList(
 			if (index >= 0) listState.animateScrollToItem(index)
 			onFocusConsumed()
 		}
+		// A scrobble that lands while History is open should arrive whole.
+		//
+		// Rows are prepended, and a keyed `LazyColumn` holds the row the reader
+		// was looking at rather than the index — which is the right default, but
+		// it means a new card is inserted *above* the viewport. Someone sitting
+		// at the top of History then sees the new entry's title with its
+		// thumbnail cut off above the fold, and has to drag the list down to
+		// find the rest of a card that just appeared on its own.
+		//
+		// Only for a reader who was already at the top. Somebody scrolled into
+		// older entries has chosen where to be, and yanking them to the top
+		// because something finished playing would be worse than the problem
+		// this fixes — so `firstVisibleItemIndex <= 1` is the whole condition:
+		// after a prepend, the row that was first sits at 1.
+		val newestId = recent.firstOrNull()?.eventId
+		var seenNewest by remember { mutableStateOf(newestId) }
+		LaunchedEffect(newestId) {
+			if (newestId != null && newestId != seenNewest) {
+				// The bell asked for a particular row; that request outranks
+				// this one and is allowed to finish without a fight.
+				if (focusEventId == null && listState.firstVisibleItemIndex <= 1) {
+					listState.animateScrollToItem(0)
+				}
+			}
+			seenNewest = newestId
+		}
 		LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
 			// Keyed by the row's own identity, because rows are *prepended*: a
 			// new scrobble lands at index 0 and shifts every existing row down
@@ -1455,7 +1589,7 @@ private fun HistoryList(
 			// and a duplicate key here is the same bug wearing a better name.
 			items(recent, key = { it.eventId }) { r ->
 				SettingCard {
-					VideoLink(r.videoId, thumbnails, onOpenVideo) { titleModifier ->
+					VideoBanner(r.videoId, thumbnails, onOpenVideo) { titleModifier ->
 						Text(
 							r.artist?.let { "$it — ${r.title}" } ?: r.title,
 							style = MaterialTheme.typography.titleSmall,
@@ -1471,16 +1605,12 @@ private fun HistoryList(
 								else -> if (dark) Wax.SuccessGreenLight else Wax.SuccessGreen
 							},
 						)
-						r.txId?.let {
-							Text(
-								"tx $it",
-								fontFamily = FontFamily.Monospace,
-								fontSize = 9.sp,
-								color = MaterialTheme.colorScheme.onSurfaceVariant,
-								maxLines = 1,
-								overflow = TextOverflow.Ellipsis,
-							)
-						}
+						// The transaction id is no longer drawn here. It is not
+						// gone — `record.txId` is untouched, the engine still
+						// logs "scrobbled (block): … — tx …", and every
+						// diagnostic path still carries it. It simply stopped
+						// being the third line of a card whose reader is not
+						// auditing a chain.
 					}
 					// The escape hatch for promoted content no rule can identify.
 					// Only offered where there's an id to key it on, and worded so
@@ -1633,7 +1763,6 @@ private fun SnapActionRow(
 		threads.preview(root)?.let { preview ->
 			SnapThreadPreviewStrip(
 				preview = preview,
-				onOpenThread = { threads.open(root, published) },
 			)
 		}
 	}
@@ -1696,10 +1825,17 @@ private fun SnapActionRow(
 				WaxOutlinedButton(
 					onClick = { root?.let { threads.open(it, published) } },
 					enabled = root != null,
-					icon = WaxIcons.SpeechBubble,
+					// No icon. The mockup gives this control its label and
+					// nothing else, and the count is what the reader is looking
+					// for here.
 					modifier = Modifier.weight(1f),
 				) {
-					Text("Thread")
+					// The same count the card's summary already carries — the
+					// conversation is not asked a second question for it. Bare
+					// while nobody has answered yet, because "Comments (0)" is a
+					// number nobody needs told.
+					val replies = root?.let { threads.preview(it)?.total } ?: 0
+					Text(if (replies > 0) "Comments ($replies)" else "Comments")
 				}
 
 			// Unknown outcome. The only thing offered is another *read* — posting
@@ -1744,7 +1880,10 @@ private fun SnapActionRow(
 			}
 
 			else -> WaxOutlinedButton(
-				onClick = { snaps.open(key) },
+				// Up from the bottom, in the same sheet a thread opens in.
+				// Writing the first Snap and answering one are the same act in
+				// the same place; the card no longer grows a box of its own.
+				onClick = { threads.openComposer(record.eventId) },
 				selected = true,
 				icon = WaxIcons.SpeechBubble,
 				modifier = Modifier.weight(1f),
