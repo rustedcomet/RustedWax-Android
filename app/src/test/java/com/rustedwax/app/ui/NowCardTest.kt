@@ -5,6 +5,7 @@ import com.rustedwax.app.detect.SessionSnapshot
 import com.rustedwax.app.detect.YouTubeProbe
 import com.rustedwax.hive.HiveScrobblePayload
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -42,6 +43,73 @@ class NowCardTest {
 	@Test
 	fun `an unknown package still gets a readable platform`() {
 		assertEquals(NowCard.Platform.OTHER, NowCard.platformFor("com.example.player"))
+	}
+
+	/**
+	 * The badge names the service; the label names the app. They differ, and
+	 * the browsers are where they differ.
+	 *
+	 * This is the whole point of the mapping existing at all: a person watching
+	 * YouTube in Brave is watching YouTube, and a Brave mark on the frame would
+	 * answer a question nobody asked. The row still says Brave above the image,
+	 * which is the honest place for it.
+	 */
+	@Test
+	fun `the thumbnail badge names the service, not the app`() {
+		assertEquals(ServiceBadge.YOUTUBE, NowCard.Platform.YOUTUBE.badge)
+		assertEquals(ServiceBadge.YOUTUBE_MUSIC, NowCard.Platform.YOUTUBE_MUSIC.badge)
+		assertEquals(ServiceBadge.YOUTUBE, NowCard.Platform.BRAVE.badge)
+		assertEquals(ServiceBadge.YOUTUBE, NowCard.Platform.CHROME.badge)
+		assertEquals(
+			"the browsers keep their own names on the row above the frame",
+			"Brave",
+			NowCard.Platform.BRAVE.label,
+		)
+	}
+
+	/** End to end from the package, which is what the card actually holds. */
+	@Test
+	fun `a browser package still badges as YouTube`() {
+		assertEquals(
+			ServiceBadge.YOUTUBE,
+			NowCard.platformFor("com.brave.browser").badge,
+		)
+		assertEquals(
+			ServiceBadge.YOUTUBE,
+			NowCard.platformFor("com.android.chrome").badge,
+		)
+		assertEquals(
+			ServiceBadge.YOUTUBE_MUSIC,
+			NowCard.platformFor("com.google.android.apps.youtube.music").badge,
+		)
+		assertEquals(
+			ServiceBadge.YOUTUBE,
+			NowCard.platformFor("com.google.android.youtube").badge,
+		)
+	}
+
+	/**
+	 * An unknown source claims no service at all.
+	 *
+	 * The assertion that matters is the negative one, and it is worth stating
+	 * twice over: a badge is a *branded* claim about whose service the frame
+	 * belongs to, so the fallback for "the app does not know" cannot be a brand.
+	 * Nothing is the only honest mark.
+	 */
+	@Test
+	fun `an unknown source claims no service`() {
+		assertNull(
+			"an unnamed source must not be stamped with somebody's brand",
+			NowCard.Platform.OTHER.badge,
+		)
+		assertNull(NowCard.platformFor("com.example.player").badge)
+	}
+
+	/** Both marks are labelled, because a badge is the one thing on the frame. */
+	@Test
+	fun `each badge carries a readable label`() {
+		assertEquals("YouTube", ServiceBadge.YOUTUBE.label)
+		assertEquals("YouTube Music", ServiceBadge.YOUTUBE_MUSIC.label)
 	}
 
 	@Test
@@ -369,6 +437,59 @@ class NowCardTest {
 		)
 
 		assertEquals("Advertisement — not counted", card.status)
+	}
+
+	/**
+	 * Two sessions in one source, on one title, stay two cards.
+	 *
+	 * This is the property the Now list key has to have and the old one did
+	 * not. Package-plus-title makes these the same key, and a Compose list
+	 * given one key for two items draws one of them; two sessions still being
+	 * read — both titles null — collapsed the same way.
+	 */
+	@Test
+	fun `same-titled sessions in one source remain distinct cards`() {
+		val first = session(title = "Dear Jessie", artist = "Madonna", durationMs = 1, playedMs = 0)
+			.copy(trackInstanceToken = 41)
+		val second = session(title = "Dear Jessie", artist = "Madonna", durationMs = 1, playedMs = 0)
+			.copy(trackInstanceToken = 42)
+
+		assertNotEquals(
+			"one logical listen per card, whatever the two are called",
+			first.trackInstance.toString(),
+			second.trackInstance.toString(),
+		)
+	}
+
+	/** And two unread sessions are not one card merely for having no title yet. */
+	@Test
+	fun `untitled sessions in one source remain distinct cards`() {
+		val first = session(title = null, artist = null, durationMs = null, playedMs = 0)
+			.copy(trackInstanceToken = 7)
+		val second = session(title = null, artist = null, durationMs = null, playedMs = 0)
+			.copy(trackInstanceToken = 8)
+
+		assertNotEquals(
+			first.trackInstance.toString(),
+			second.trackInstance.toString(),
+		)
+	}
+
+	/**
+	 * And one listen keeps one card when its metadata finally lands.
+	 *
+	 * The old key changed the moment the title arrived, which threw away the
+	 * composition mid-listen. This is the same continuity the token already
+	 * provides across MediaSession recreation.
+	 */
+	@Test
+	fun `a card survives the title arriving`() {
+		val reading = session(title = null, artist = null, durationMs = null, playedMs = 0)
+			.copy(trackInstanceToken = 11)
+		val read = session(title = "Dear Jessie", artist = "Madonna", durationMs = 1, playedMs = 0)
+			.copy(trackInstanceToken = 11)
+
+		assertEquals(reading.trackInstance.toString(), read.trackInstance.toString())
 	}
 
 	private fun session(

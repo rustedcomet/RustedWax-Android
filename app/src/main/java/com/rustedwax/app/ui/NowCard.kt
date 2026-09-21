@@ -37,6 +37,32 @@ internal data class NowCard(
 		 * readable name rather than a package one the day it is added.
 		 */
 		OTHER("Media"),
+		;
+
+		/**
+		 * The mark drawn on this session's thumbnail, or null for no mark.
+		 *
+		 * The badge names the **service**, which is not the same question the
+		 * label answers. A browser is an honest thing to call the row's source —
+		 * it is where the sound is coming from — but it is the wrong thing to
+		 * stamp on the frame, because the frame is a YouTube video and the
+		 * person is watching YouTube. So the two browsers fold into YouTube here
+		 * and keep their own names above.
+		 *
+		 * [OTHER] gets **nothing**, and that is the point of the null. It is the
+		 * one case where the app does not know the service, and a badge is a
+		 * branded claim about whose service the frame belongs to. Folding it
+		 * into YouTube would make that claim on the app's behalf about a source
+		 * nothing has identified — cheap to write, and wrong in exactly the way
+		 * this project refuses everywhere else. No badge says no more than is
+		 * known.
+		 */
+		val badge: ServiceBadge?
+			get() = when (this) {
+				YOUTUBE_MUSIC -> ServiceBadge.YOUTUBE_MUSIC
+				YOUTUBE, BRAVE, CHROME -> ServiceBadge.YOUTUBE
+				OTHER -> null
+			}
 	}
 
 	companion object {
