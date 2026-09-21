@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -275,6 +276,19 @@ fun VideoThumbnail(
 	enabled: Boolean,
 	modifier: Modifier = Modifier,
 	/**
+	 * Which service the frame came from, or **null** to mark it with nothing.
+	 *
+	 * Defaults to [ServiceBadge.YOUTUBE] because that is what every caller drew
+	 * before there was a choice, and History and Not logged still draw exactly
+	 * that. Only a caller that actually knows the service — Now, which holds the
+	 * package — passes anything else.
+	 *
+	 * Null is not the same as a default. It is what an unrecognised source gets,
+	 * and it draws no chip at all: a badge is a claim about whose service this
+	 * is, and the honest mark for a source the app cannot name is no mark.
+	 */
+	badge: ServiceBadge? = ServiceBadge.YOUTUBE,
+	/**
 	 * A fixed width, or **null** to fill whatever the caller gives it and take
 	 * the height from the 16:9 ratio.
 	 *
@@ -327,25 +341,48 @@ fun VideoThumbnail(
 				modifier = Modifier.size(20.dp),
 			)
 		}
-		if (frame != null) {
+		// No frame, or a source with no service to name, means no chip. An
+		// unnamed source draws nothing rather than borrowing somebody's mark.
+		if (frame != null && badge != null) {
+			// Scaled with the frame. The badge was sized for a 68dp row; left at
+			// that size on a full-width banner it reads as a speck rather than a
+			// mark.
+			val chipHeight = if (width != null) 14.dp else 22.dp
+			val chipWidth = when (badge) {
+				ServiceBadge.YOUTUBE -> if (width != null) 20.dp else 32.dp
+				// Round, because the mark inside it is.
+				ServiceBadge.YOUTUBE_MUSIC -> chipHeight
+			}
 			Box(
 				modifier = Modifier
 					.align(Alignment.BottomStart)
 					.padding(if (width != null) 4.dp else 8.dp)
-					// Scaled with the frame. The badge was sized for a 68dp
-					// row; left at that size on a full-width banner it reads as
-					// a speck rather than a mark.
-					.size(
-						width = if (width != null) 20.dp else 32.dp,
-						height = if (width != null) 14.dp else 22.dp,
+					.size(width = chipWidth, height = chipHeight)
+					.clip(
+						when (badge) {
+							ServiceBadge.YOUTUBE -> RoundedCornerShape(4.dp)
+							ServiceBadge.YOUTUBE_MUSIC -> CircleShape
+						},
 					)
-					.clip(RoundedCornerShape(4.dp))
 					.background(YOUTUBE_RED),
 				contentAlignment = Alignment.Center,
 			) {
 				Icon(
-					WaxIcons.PlayTriangle,
-					contentDescription = null,
+					// The glyph is what separates the two, not the chip around
+					// it. A red circle holding the same play triangle was tried
+					// first and rendered at the sizes this actually draws at:
+					// against the YouTube chip it differs only by corner radius,
+					// so on a card showing one badge it reads as "a round play
+					// button" rather than as a service. The note is legible at
+					// 1x, and it is already this app's mark for YouTube Music —
+					// `platformIcon` draws the same glyph on the row above.
+					when (badge) {
+						ServiceBadge.YOUTUBE -> WaxIcons.PlayTriangle
+						ServiceBadge.YOUTUBE_MUSIC -> WaxIcons.MusicNote
+					},
+					// The one thing on the frame carrying information a screen
+					// reader cannot get from the row's own text.
+					contentDescription = badge.label,
 					tint = Color.White,
 					modifier = Modifier.size(if (width != null) 11.dp else 17.dp),
 				)
@@ -356,3 +393,22 @@ fun VideoThumbnail(
 
 /** YouTube's own badge colour — it identifies the source, so it isn't themed. */
 private val YOUTUBE_RED = Color(0xFFFF0033)
+
+/**
+ * The media service a thumbnail's corner mark names.
+ *
+ * Deliberately **not** the Android package. A browser playing YouTube is
+ * YouTube: the person is watching YouTube, and stamping a Brave or Chrome mark
+ * on the frame would name the window rather than the thing in it. The set is
+ * therefore the services RustedWax can observe, not the apps it observes them
+ * through, and it stays that size until a genuinely different service arrives.
+ *
+ * There is no member for "something else". A source this app cannot name gets
+ * **no badge**, which is why callers pass a nullable one: the alternative was a
+ * fallback that stamped YouTube on a frame nobody had shown came from YouTube,
+ * and a branded claim is the one thing a fallback must not invent.
+ */
+enum class ServiceBadge(val label: String) {
+	YOUTUBE("YouTube"),
+	YOUTUBE_MUSIC("YouTube Music"),
+}

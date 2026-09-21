@@ -550,6 +550,11 @@ fun MainScreen(
 
 					else -> SessionList(
 						sessions = sessions,
+						// The same switch History's banners ride, for the same
+						// reason: a Now thumbnail is the identical request to
+						// i.ytimg.com, so it cannot have a quieter consent than
+						// the one already asked for.
+						thumbnails = youTubeScrobbling,
 						monitoring = monitoring,
 						thresholdPercent = thresholdPercent,
 						autoScrobble = autoScrobble && account != null,
@@ -2032,6 +2037,7 @@ private fun AccessBanner(onGrantAccess: () -> Unit) {
 @Composable
 private fun SessionList(
 	sessions: () -> List<SessionSnapshot>,
+	thumbnails: Boolean,
 	monitoring: Boolean,
 	thresholdPercent: Int,
 	autoScrobble: Boolean,
@@ -2065,8 +2071,22 @@ private fun SessionList(
 		verticalArrangement = Arrangement.spacedBy(8.dp),
 		modifier = Modifier.fillMaxSize(),
 	) {
-		items(liveSessions, key = { it.packageName + it.title }) { s ->
-			SessionCard(s, thresholdPercent, autoScrobble)
+		// Keyed by the logical listen rather than by package-plus-title.
+		//
+		// The old key was two things that repeat. A title is not unique — one
+		// source can legitimately hold two sessions on the same title, and a
+		// null title made every unread session in a package the *same* key — and
+		// package-plus-title changes the instant the metadata callback lands, so
+		// a card was silently a different card mid-listen. `trackInstance` is
+		// the identity the engine already uses for "which listen is this": it is
+		// allocated per instance and carried across MediaSession recreation, so
+		// one continuous listen keeps one composition across the rebuild that
+		// used to throw it away.
+		//
+		// Presentation-only. Nothing here reads or writes the token; it is asked
+		// for the value the snapshot already exposes.
+		items(liveSessions, key = { it.trackInstance.toString() }) { s ->
+			SessionCard(s, thumbnails, thresholdPercent, autoScrobble)
 		}
 	}
 }
@@ -2074,6 +2094,7 @@ private fun SessionList(
 @Composable
 private fun SessionCard(
 	s: SessionSnapshot,
+	thumbnails: Boolean,
 	thresholdPercent: Int,
 	autoScrobble: Boolean,
 ) {
@@ -2094,6 +2115,28 @@ private fun SessionCard(
 			thresholdPercent = thresholdPercent,
 			autoScrobble = autoScrobble,
 		)
+
+		// The banner History draws, in the same geometry and off the same cache.
+		//
+		// Not `VideoBanner`: that composable carries History's tap-to-open, and
+		// giving Now a new gesture is a behaviour change this stage has no
+		// business making. The image is the same call History's banner makes
+		// underneath — `width = null`, so the height comes from the shared
+		// aspect rather than a number — and nothing else.
+		//
+		// Drawn even before identity resolves. `VideoThumbnail` always occupies
+		// its space, so a card does not jump when the id lands, and a session
+		// still being read keeps its place in the list with the placeholder.
+		VideoThumbnail(
+			preview.videoId,
+			enabled = thumbnails,
+			modifier = Modifier.fillMaxWidth(),
+			width = null,
+			// Now is the one surface holding the package, so it is the one
+			// surface that can tell YouTube Music from YouTube.
+			badge = card.platform.badge,
+		)
+		Spacer(Modifier.height(8.dp))
 
 		Row(verticalAlignment = Alignment.CenterVertically) {
 			WaxRowIcon(platformIcon(card.platform))
