@@ -106,6 +106,7 @@ class SnapComposerStateTest {
 			queued = true,
 			videoId = videoId,
 			eventId = eventId,
+			account = "alice",
 		)
 
 	/** What `HistoryList` passes to `items(key = …)`. */

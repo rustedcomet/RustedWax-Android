@@ -244,7 +244,9 @@ class MainActivity : ComponentActivity() {
 		// lambda can confine the read to its destination.
 		val nativeShortsStatus = NativeShortsObserver.status.collectAsStateWithLifecycle()
 		val logLines = EventLog.lines.collectAsStateWithLifecycle()
-		val recent by FinalizationRuntime.recent.collectAsStateWithLifecycle()
+		// The whole process's rows. Never handed to the screen as they are —
+		// `recent` below is the account-scoped view, and that is what History draws.
+		val allRecent by FinalizationRuntime.recent.collectAsStateWithLifecycle()
 		val skipped by FinalizationRuntime.skipped.collectAsStateWithLifecycle()
 		val quietBar by FinalizationRuntime.tracksWithoutVideoId.collectAsStateWithLifecycle()
 		val queued by FinalizationRuntime.queueSize.collectAsStateWithLifecycle()
@@ -289,6 +291,21 @@ class MainActivity : ComponentActivity() {
 		// Handed in by the warm-up, which already paid for the Keystore unlock.
 		// Reading it again here would repeat that on the main thread.
 		var account by remember { mutableStateOf(startupAccount) }
+		// History, through the account boundary.
+		//
+		// The engine's list is a process-global held in memory, so it outlives an
+		// account change: before this, switching left the previous account's rows
+		// on screen for the new one — visible, counted in the tab strip, and
+		// tappable straight into this account's Snap, thread and Like state.
+		//
+		// Derived from `account` rather than cleared on switch, which is what
+		// makes it immediate — the same recomposition that changes the signed-in
+		// account changes the list — and what lets switching back restore the
+		// rows the first account already had. They are memory-only either way and
+		// still die with the process.
+		val recent = remember(allRecent, account) {
+			FinalizationRuntime.recentFor(allRecent, account?.username)
+		}
 		// History Snap drafts and the one open composer. Held here rather than in
 		// History itself, which is destroyed and rebuilt on every tab change, and
 		// keyed by account so one Hive user never sees another's unsent text.

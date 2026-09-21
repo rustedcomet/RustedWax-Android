@@ -160,6 +160,24 @@ object FinalizationRuntime {
 		 * record is built, which is how a missing one stops being noticed.
 		 */
 		val eventId: String,
+		/**
+		 * The Hive account this row belongs to, stamped when the row is made.
+		 *
+		 * History is per-account state: a row describes a listen that one
+		 * identity broadcast, and the Snap, thread, Like and notification state
+		 * hanging off it is stored under that same account. Without this the
+		 * list was process-global, so switching accounts left the previous
+		 * one's rows on screen for the new one to act on.
+		 *
+		 * Never read from the vault at display time. The vault says who is
+		 * signed in *now*; this says who the row was made for, and those differ
+		 * for exactly the rows that matter — one finalized as the switch lands,
+		 * or a queued entry retried later. Taken from the account the payload
+		 * was signed for, or from the queue entry's own `username`.
+		 *
+		 * No default, for the same reason [eventId] has none.
+		 */
+		val account: String,
 	)
 
 	/**
@@ -206,6 +224,29 @@ object FinalizationRuntime {
 
 	private val _recent = MutableStateFlow<List<ScrobbleRecord>>(emptyList())
 	val recent: StateFlow<List<ScrobbleRecord>> = _recent.asStateFlow()
+
+	/**
+	 * The rows [account] is allowed to see, and only those.
+	 *
+	 * [recent] is the whole process's list, kept in memory and never written to
+	 * disk, so it outlives an account change the way any singleton does. This is
+	 * the boundary the UI reads through: rows stamped for anybody else are not
+	 * shown, not counted and not reachable by a tap, so no History action can
+	 * land on a listen belonging to an account that is not signed in.
+	 *
+	 * A blank or absent [account] sees nothing. Signed out is not a viewer.
+	 *
+	 * Takes the list rather than reading [_recent] so the caller can hand in the
+	 * value it is already observing, and so this rule is testable without the
+	 * runtime being initialised.
+	 */
+	fun recentFor(
+		rows: List<ScrobbleRecord>,
+		account: String?,
+	): List<ScrobbleRecord> {
+		val viewer = account?.takeIf { it.isNotBlank() } ?: return emptyList()
+		return rows.filter { it.account.equals(viewer, ignoreCase = true) }
+	}
 
 	private val _skipped = MutableStateFlow<List<SkipRecord>>(emptyList())
 	val skipped: StateFlow<List<SkipRecord>> = _skipped.asStateFlow()
@@ -1789,6 +1830,7 @@ object FinalizationRuntime {
 				)
 				logSettlement(settled, entry.label)
 				note(
+					entry.username,
 					entry.label,
 					if (initialAttempt) {
 						if (result.evidence == HiveRpc.BroadcastResult.Evidence.BLOCK) {
@@ -1819,6 +1861,7 @@ object FinalizationRuntime {
 				)
 				logSettlement(settled, entry.label)
 				note(
+					entry.username,
 					entry.label,
 					if (initialAttempt) {
 						"accepted — confirmation unavailable; not retried" + settlementSuffix(settled)
@@ -1862,6 +1905,7 @@ object FinalizationRuntime {
 	private fun recordInitialQueueFailure(entry: BroadcastQueue.Entry, status: String) {
 		EventLog.append("engine", "$status: ${entry.label}")
 		note(
+			entry.username,
 			entry.label,
 			status,
 			null,
@@ -1883,6 +1927,7 @@ object FinalizationRuntime {
 		)
 		logSettlement(settled, entry.label)
 		note(
+			entry.username,
 			entry.label,
 			(if (initialAttempt) "rejected: $message" else "queue failed permanently: $message") +
 				settlementSuffix(settled),
@@ -1932,6 +1977,7 @@ object FinalizationRuntime {
 					"queued scrobble exhausted retry limit and was removed: ${entry.label}",
 				)
 				note(
+					entry.username,
 					entry.label,
 					"failed after 8 queued attempts: $message",
 					null,
@@ -1952,6 +1998,7 @@ object FinalizationRuntime {
 					"STORAGE ERROR recording retry failure for ${entry.label}",
 				)
 				note(
+					entry.username,
 					entry.label,
 					"retry state could not be persisted — export the log",
 					null,
@@ -1983,6 +2030,7 @@ object FinalizationRuntime {
 				val settled = queue.settle(entry)
 				logSettlement(settled, entry.label)
 				note(
+					entry.username,
 					entry.label,
 					"reconciled after ambiguous retry" + settlementSuffix(settled),
 					prepared.txId,
@@ -1999,6 +2047,7 @@ object FinalizationRuntime {
 					"queued scrobble exhausted retry limit and was absent: ${entry.label}",
 				)
 				note(
+					entry.username,
 					entry.label,
 					"failed after 8 queued attempts: $message" + settlementSuffix(settled),
 					null,
@@ -2102,6 +2151,7 @@ object FinalizationRuntime {
 				if (entry == null) {
 					EventLog.append("queue", "QUEUE STORAGE FAILURE before broadcast: $label; nothing sent")
 					note(
+						account.username,
 						label,
 						"failed to persist pre-send state — nothing sent",
 						null,
@@ -2157,6 +2207,7 @@ object FinalizationRuntime {
 				val evidence = result.evidence.name.lowercase()
 				EventLog.append("engine", "scrobbled ($evidence): $label — tx ${result.txId}")
 				note(
+					username,
 					label,
 					if (result.evidence == HiveRpc.BroadcastResult.Evidence.BLOCK) {
 						"confirmed in block"
@@ -2172,6 +2223,7 @@ object FinalizationRuntime {
 			is HiveRpc.BroadcastResult.AcceptedUnconfirmed -> {
 				EventLog.append("engine", "accepted but confirmation unavailable: $label — tx ${result.txId}")
 				note(
+					username,
 					label,
 					"accepted — confirmation unavailable; not retried",
 					result.txId,
@@ -2186,7 +2238,14 @@ object FinalizationRuntime {
 			}
 			is HiveRpc.BroadcastResult.Rejected -> {
 				EventLog.append("engine", "rejected: ${result.message}")
-				note(label, "rejected: ${result.message}", null, payload.percentPlayed, videoId = videoId)
+				note(
+					username,
+					label,
+					"rejected: ${result.message}",
+					null,
+					payload.percentPlayed,
+					videoId = videoId,
+				)
 				onFeedback?.invoke("Chain rejected it: ${result.message}", true)
 			}
 			is HiveRpc.BroadcastResult.Deferred -> onFeedback?.invoke(
@@ -2315,6 +2374,8 @@ object FinalizationRuntime {
 	}
 
 	private fun note(
+		/** Who this row belongs to. See [ScrobbleRecord.account]. */
+		account: String,
 		label: String,
 		status: String,
 		txId: String?,
@@ -2341,6 +2402,7 @@ object FinalizationRuntime {
 					// Once, here, for this row. Every other field is shared with
 					// the listen and can repeat; this one cannot.
 					eventId = UUID.randomUUID().toString(),
+					account = account,
 				),
 			) + _recent.value
 			).take(50)
