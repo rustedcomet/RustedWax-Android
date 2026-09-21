@@ -29,7 +29,10 @@ internal sealed interface Fetched {
 internal object ThumbnailFetch {
 
 	/** Bodies above this were not read whole, so they are not bodies. */
-	const val MAX_BYTES = 512 * 1024
+	// A `maxresdefault` frame is a 1280x720 JPEG and occasionally clears half a
+	// megabyte; the cap is what refuses a response that is not a thumbnail at
+	// all, so it has to sit above the largest one that legitimately is.
+	const val MAX_BYTES = 1024 * 1024
 
 	/**
 	 * A thumbnail YouTube does not have is answered with a tiny grey

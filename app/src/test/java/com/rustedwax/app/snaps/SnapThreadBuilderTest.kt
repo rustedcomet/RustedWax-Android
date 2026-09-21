@@ -27,7 +27,7 @@ class SnapThreadBuilderTest {
 	}
 
 	@Test
-	fun `direct replies hang off the root, oldest first`() {
+	fun `direct replies hang off the root, newest first`() {
 		val thread = SnapThreadBuilder.build(
 			root,
 			listOf(
@@ -37,7 +37,8 @@ class SnapThreadBuilderTest {
 		)
 
 		assertEquals(2, thread.total)
-		assertEquals(listOf("carol/r1", "bob/r2"), thread.children.map { it.reply.contentId })
+		// Newest first at the top level — see [SnapThreadBuilder.build].
+		assertEquals(listOf("bob/r2", "carol/r1"), thread.children.map { it.reply.contentId })
 		assertTrue(thread.children.all { it.depth == 0 })
 	}
 
