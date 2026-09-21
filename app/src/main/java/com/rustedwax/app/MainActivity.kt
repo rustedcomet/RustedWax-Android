@@ -247,7 +247,9 @@ class MainActivity : ComponentActivity() {
 		// The whole process's rows. Never handed to the screen as they are —
 		// `recent` below is the account-scoped view, and that is what History draws.
 		val allRecent by FinalizationRuntime.recent.collectAsStateWithLifecycle()
-		val skipped by FinalizationRuntime.skipped.collectAsStateWithLifecycle()
+		// As `allRecent` above: the whole process's declined listens, never drawn
+		// as they are. `skipped` below is the account-scoped view.
+		val allSkipped by FinalizationRuntime.skipped.collectAsStateWithLifecycle()
 		val quietBar by FinalizationRuntime.tracksWithoutVideoId.collectAsStateWithLifecycle()
 		val queued by FinalizationRuntime.queueSize.collectAsStateWithLifecycle()
 
@@ -305,6 +307,20 @@ class MainActivity : ComponentActivity() {
 		// still die with the process.
 		val recent = remember(allRecent, account) {
 			FinalizationRuntime.recentFor(allRecent, account?.username)
+		}
+		// Not logged, through its own account boundary.
+		//
+		// The same leak History had, found while verifying that fix: the engine's
+		// skip list is a process-global too, so A's declined listens stayed on
+		// screen and in the tab count for B. Derived from `account` for the same
+		// reasons — immediate on the switch, and switching back restores the rows
+		// that account already had.
+		//
+		// Not the same rule, though. A signed-out device still files rows here,
+		// and they are shown to the signed-out device and to nobody else; see
+		// `skippedFor`.
+		val skipped = remember(allSkipped, account) {
+			FinalizationRuntime.skippedFor(allSkipped, account?.username)
 		}
 		// History Snap drafts and the one open composer. Held here rather than in
 		// History itself, which is destroyed and rebuilt on every tab change, and

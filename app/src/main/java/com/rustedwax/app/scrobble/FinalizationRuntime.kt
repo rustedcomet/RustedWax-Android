@@ -211,6 +211,28 @@ object FinalizationRuntime {
 		 * guess that opens somebody else's re-upload.
 		 */
 		val videoId: String?,
+		/**
+		 * The Hive account this row belongs to, or null if nobody was signed in.
+		 *
+		 * Not-logged rows are per-account state for the same reason History rows
+		 * are: the row names a title somebody watched, and which titles you
+		 * watched is not the next identity's business. Without this the list was
+		 * process-global, so switching accounts left the previous one's declined
+		 * listens on screen, counted in the tab strip and one tap from opening.
+		 *
+		 * Nullable, where [ScrobbleRecord.account] is not, and the difference is
+		 * the whole reason this field could not simply copy that one. A scrobble
+		 * cannot exist without an account to sign it; a refusal can. Three of the
+		 * gates that file a row — a source never proven to be YouTube, Shorts
+		 * turned off, the prefilter — run before the posting key is ever
+		 * consulted, so a signed-out install produces rows with no owner. Null
+		 * says that, and says it durably: it is a real owner, "the signed-out
+		 * device", and never a placeholder waiting to be filled in by whoever
+		 * signs in next. See [skippedFor].
+		 *
+		 * No default, for the same reason [ScrobbleRecord.eventId] has none.
+		 */
+		val account: String?,
 	)
 
 	private const val MIN_NOTABLE_PLAYED_MS = 3_000L
@@ -250,6 +272,42 @@ object FinalizationRuntime {
 
 	private val _skipped = MutableStateFlow<List<SkipRecord>>(emptyList())
 	val skipped: StateFlow<List<SkipRecord>> = _skipped.asStateFlow()
+
+	/**
+	 * The declined listens [account] is allowed to see, and only those.
+	 *
+	 * The same boundary [recentFor] draws around History, over a list with one
+	 * more kind of owner in it. Rows carry [SkipRecord.account], stamped when
+	 * the row was filed, and this is the only way the UI reads them: another
+	 * account's refusals are not shown, not counted in the tab strip, and not
+	 * reachable by a tap into the video they name.
+	 *
+	 * Where it parts company with [recentFor] is the signed-out case. There,
+	 * signed out is not a viewer and sees nothing, because every row in that
+	 * list was signed by somebody. Here a signed-out device files rows of its
+	 * own — the gates above the posting-key check still run — and they are the
+	 * only answer it has to "why wasn't this scrobbled", which is the entire
+	 * job of this tab. So signed out sees exactly the rows made while signed
+	 * out: the null stamp is matched, not treated as a wildcard.
+	 *
+	 * That cuts both ways, deliberately. Signing in does not hand those rows to
+	 * the account that arrives — activity nobody was logged in for is never
+	 * retroactively attributed to whoever logs in later — and signing out does
+	 * not expose the rows an account left behind. Each set waits for its own
+	 * owner to come back, for as long as the process lives.
+	 *
+	 * Takes the list rather than reading [_skipped] for the reasons [recentFor]
+	 * does: the caller hands in the value it is already observing, and the rule
+	 * is testable without the runtime being initialised.
+	 */
+	fun skippedFor(
+		rows: List<SkipRecord>,
+		account: String?,
+	): List<SkipRecord> {
+		val viewer = account?.takeIf { it.isNotBlank() }
+			?: return rows.filter { it.account == null }
+		return rows.filter { it.account != null && it.account.equals(viewer, ignoreCase = true) }
+	}
 
 	private val _tracksWithoutVideoId = MutableStateFlow(0)
 	val tracksWithoutVideoId: StateFlow<Int> = _tracksWithoutVideoId.asStateFlow()
@@ -2323,6 +2381,13 @@ object FinalizationRuntime {
 			playedSeconds = session.playedMs / 1000,
 			durationSeconds = durationMs?.takeIf { it > 0 }?.div(1000),
 			videoId = linkedVideoId,
+			// Read here, as the row is filed, and not at display time. This is
+			// the one moment the answer is authoritative: a refusal is decided
+			// and written in one go, with no queue to outlive it and no later
+			// retry to be re-filed by, so whoever the vault holds now is exactly
+			// whose listen this was. Null when nobody is signed in, which is a
+			// stamp like any other. See [SkipRecord.account].
+			account = vault.account?.username,
 		)
 		// `update` rather than a plain assignment: unlike every other list here,
 		// this one is written from two threads — the prefilter rejects on the
