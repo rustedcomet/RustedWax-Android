@@ -12,7 +12,7 @@ android {
 		applicationId = "com.rustedwax.app"
 		minSdk = 26
 		targetSdk = 35
-		versionCode = 61
+		versionCode = 62
 		versionName = rootProject.version.toString()
 
 		// The instrumented suite covers the real Android callback boundary;
