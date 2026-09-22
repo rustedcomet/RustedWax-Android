@@ -5,8 +5,8 @@
 <h1 align="center">RustedWax</h1>
 
 <p align="center">
-  <strong>Android scrobbling for Hive.</strong><br>
-  Turn verified YouTube listens into a listening history on the Hive blockchain.
+  <strong>Android media scrobbling, with conversations around what you play.</strong><br>
+  Keep a verified listening and viewing history on Hive.
 </p>
 
 RustedWax observes playback from YouTube, YouTube Music, Brave, and Chrome. It
@@ -15,10 +15,10 @@ locally on the Android device.
 
 ## Download
 
-The current public release is **RustedWax v0.11.3**.
+The current public release is **RustedWax v0.12.0**.
 
-1. Open the [latest GitHub Release](https://github.com/rustedcomet/RustedWax-Android/releases/latest).
-2. Download `rustedwax-v0.11.3-release.apk`.
+1. Open the [v0.12.0 GitHub Release](https://github.com/rustedcomet/RustedWax-Android/releases/tag/v0.12.0).
+2. Download `rustedwax-v0.12.0-release.apk`.
 3. Optionally verify it against the published
    [release identity and checksum](Documentation/Product/RELEASE_VERIFICATION.md).
 4. Install it on Android 8.0 or newer and follow the
@@ -26,9 +26,9 @@ The current public release is **RustedWax v0.11.3**.
 
 Regular users should install the signed release APK, not a debug build.
 
-RustedWax supplies Android media observation and local signing for users who
-cannot use the desktop browser-extension flow on their phone. It uses the
-shared Hive scrobbling format with mobile-specific identity and playback rules.
+RustedWax brings media scrobbling to Android and uses a shared Hive scrobbling
+format that can interoperate with [Scrobble.life](https://scrobble.life/). It
+complements that service; it is not a replacement for it.
 
 ## Features
 
@@ -40,22 +40,38 @@ shared Hive scrobbling format with mobile-specific identity and playback rules.
 - Shows successful broadcasts and clear refusal reasons.
 - Keeps diagnostic logging optional, bounded, and off by default.
 - Signs Hive transactions on-device.
+- Shows account-scoped History and Not logged results. History includes
+  full-width media artwork without displaying transaction IDs on its cards.
+- Lets you publish a media-linked Snap from a finalized History item, discuss
+  it in a Comments sheet, reply to replies, and Like eligible Snaps and replies
+  with a Hive vote. Default Like strength is configurable in Settings.
+- Keeps Snap drafts, conversations, and reply attention separate per Hive account.
+- Shows full-width artwork and YouTube / YouTube Music badges on Now.
+- Can show Android alerts for qualifying replies discovered when the running
+  app reads a conversation, if alerts are enabled. These are not instant push.
+
+Snaps cannot yet be created from Now; they start with finalized History items.
 
 ## Screenshots
 
+These owner-approved images show earlier UI, not the v0.12.0 layout. In the
+current release, History uses full-width artwork and does not display
+transaction IDs on its cards; Now also uses full-width artwork.
+
 <p align="center">
-	<img src="Documentation/Assets/screenshots/now-dark.png" alt="RustedWax Now screen in dark mode" width="31%">
-	<img src="Documentation/Assets/screenshots/history-light.png" alt="RustedWax History screen in light mode" width="31%">
-	<img src="Documentation/Assets/screenshots/not-logged-dark.png" alt="RustedWax Not logged screen in dark mode" width="31%">
+	<img src="Documentation/Assets/screenshots/now-dark.png" alt="Earlier RustedWax Now screen in dark mode" width="31%">
+	<img src="Documentation/Assets/screenshots/history-light.png" alt="Earlier RustedWax History screen in light mode" width="31%">
+	<img src="Documentation/Assets/screenshots/not-logged-dark.png" alt="Earlier RustedWax Not logged screen in dark mode" width="31%">
 </p>
 
 <p align="center">
-	<img src="Documentation/Assets/screenshots/history-dark.png" alt="RustedWax History screen in dark mode" width="31%">
-	<img src="Documentation/Assets/screenshots/not-logged-light.png" alt="RustedWax Not logged screen in light mode" width="31%">
-	<img src="Documentation/Assets/screenshots/settings-light.png" alt="RustedWax settings in light mode" width="31%">
+	<img src="Documentation/Assets/screenshots/history-dark.png" alt="Earlier RustedWax History screen in dark mode" width="31%">
+	<img src="Documentation/Assets/screenshots/not-logged-light.png" alt="Earlier RustedWax Not logged screen in light mode" width="31%">
+	<img src="Documentation/Assets/screenshots/settings-light.png" alt="Earlier RustedWax settings in light mode" width="31%">
 </p>
 
-The gallery shows owner-approved real usage, including public Hive activity.
+The images remain as examples of earlier real usage, including public Hive
+activity.
 
 ## Account safety
 

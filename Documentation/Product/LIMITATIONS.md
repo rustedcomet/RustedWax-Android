@@ -35,7 +35,7 @@ access that can be revoked or disrupted by the operating system.
 ## YouTube Music presentation and metadata
 
 Switching between Music and Video presentations can affect playback-progress
-continuity. This remains a known issue in v0.11.2; a verified item does not by
+continuity. A verified item does not by
 itself prove that progress belongs to the current presentation.
 
 Artist/title metadata is best-effort and can be incorrect. Independent performer
@@ -73,6 +73,16 @@ RustedWax checks node freshness and seeks independent confirmation. If an
 automatic transaction may have been accepted but independent status remains
 unavailable, it waits fail-closed; delivery can be delayed indefinitely rather
 than risk a newly signed duplicate.
+
+## Snaps and reply attention
+
+Snaps can be published from finalized History items, not directly from the
+live Now page in v0.12.0. New replies are discovered when the running app reads
+or re-reads a conversation, such as when a visible History Snap or its Comments
+sheet loads. Alerts are neither instant push nor independent background
+polling, and require Android notifications to be enabled. More proactive
+delivery is planned, but not yet part of this release. Likes do not generate
+notifications.
 
 ## Local security
 

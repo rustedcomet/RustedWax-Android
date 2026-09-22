@@ -1,20 +1,20 @@
 # Release verification
 
-The current public release is **RustedWax v0.11.2** for application ID
+The current public release is **RustedWax v0.12.0** for application ID
 `com.rustedwax.app`.
 
 Download the APK from the
-[v0.11.2 GitHub Release](https://github.com/rustedcomet/RustedWax-Android/releases/tag/v0.11.2).
+[v0.12.0 GitHub Release](https://github.com/rustedcomet/RustedWax-Android/releases/tag/v0.12.0).
 
 ## APK checksum
 
 ```text
-SHA-256  903eb83eabb5390f777c811246628e0965f483bf9cff495fc1a0de66f44ba3d7
-File    rustedwax-v0.11.2-release.apk
-Version code  59
+SHA-256  d97c29caa9a6c88f5302ae3062d87328b646a98185eb996374ea4798bbc3d8a2
+File    rustedwax-v0.12.0-release.apk
+Version code  62
 ```
 
-The release also includes `rustedwax-v0.11.2-release.apk.sha256`.
+The release also includes `rustedwax-v0.12.0-release.apk.sha256`.
 
 ## Signing certificate
 

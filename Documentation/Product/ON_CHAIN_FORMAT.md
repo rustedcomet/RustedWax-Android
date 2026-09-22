@@ -4,6 +4,9 @@ RustedWax uses the shared Hive scrobbling schema. Matching field names and
 meaning matters for indexers; Android classification and metadata normalization
 need not be identical to the desktop extension.
 
+This page describes scrobble operations, not the separate Hive posts, comments,
+and votes used for History Snaps, replies, and Likes.
+
 [← Back to the README](../../README.md)
 
 ## Hive operation

@@ -8,7 +8,7 @@ needed for the sources you use.
 ## Install the public release
 
 1. Open the [latest RustedWax release](https://github.com/rustedcomet/RustedWax-Android/releases/latest).
-2. Download the signed `rustedwax-v0.11.2-release.apk` asset.
+2. Download the signed `rustedwax-v0.12.0-release.apk` asset.
 3. Open the APK on Android 8.0 or newer. Android may ask you to allow installs
    from the browser or file manager that opened it.
 4. Launch RustedWax.
@@ -32,12 +32,26 @@ the [project README](../../README.md#build-from-source).
 4. Turn on **Automatic scrobbling** when you are ready for qualifying listens
    to be published. It is off on a fresh install and stays unavailable until a
    valid Hive key is saved.
-5. Play something. **Now** shows the active platform, title, channel or artist,
-   duration, progress, category, and a short status. **History** shows the
-   newest 50 results for the current app process, including transaction IDs.
-   **Not logged** explains refusals for eligible user-facing targets, including
-   unidentified items without a link. Neither list guarantees a record of every
-   playback.
+5. Play something. **Now** shows the current media with full-width artwork,
+   service badge, progress, and status. **History** shows recent successful or
+   accepted scrobbles with media artwork, without transaction IDs on its cards.
+   From a finalized History item you can publish a Snap and open its Comments
+   sheet to read or write replies. **Not logged** explains recorded refusals,
+   including unidentified items without a link. History and Not logged are
+   scoped to the connected Hive account; neither is a complete playback record.
+
+Snaps cannot be created directly from Now in v0.12.0. Replies can be nested,
+and eligible Snaps and replies can be Liked with a Hive vote. **Settings →
+Snaps & Likes** controls the default strength of future Likes. While RustedWax
+is running, loading a visible History Snap or opening its Comments conversation
+can discover new replies and update reply attention. A newly discovered
+qualifying reply can produce an Android alert if enabled; alerts are not instant
+push. Likes do not generate notifications.
+
+On Android 13 or newer, RustedWax may ask once for permission to **show reply
+alerts** after a Hive account is connected. This is separate from the
+**Notification Access** used to observe media. If alerts are declined or
+disabled, in-app reply attention can still appear when conversations are read.
 
 The always-visible **Stop** button is stronger than Automatic scrobbling: Stop
 ends observation and discards the in-flight track. Turning Automatic scrobbling
@@ -75,8 +89,8 @@ offers **Clear log** and **Export**.
 
 **Test Hive connection** reads node health, posting authority, and whether the
 saved key derives to an authorized public key. It does not sign or broadcast a
-test scrobble. Everything RustedWax writes on-chain comes from automatic
-finalization of real playback.
+test scrobble. Scrobbles come from automatic finalization of real playback;
+Snaps, replies, and Likes require separate user actions.
 
 ## Fresh-install defaults
 
