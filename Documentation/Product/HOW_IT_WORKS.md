@@ -124,9 +124,33 @@ a guessed link. Unsupported or unproven-source sessions are omitted. These
 bounded UI lists are not a complete record of everything played or every
 callback Android might have missed.
 
+History and Not logged are scoped to the connected Hive account. History cards
+show full-width media artwork rather than transaction IDs; Now cards show
+full-width artwork and distinct YouTube / YouTube Music badges.
+
 Private mode is not exposed in current settings. Stored privacy preferences
 and the compatible encrypted envelope remain implemented; see
 [Private envelope compatibility](ON_CHAIN_FORMAT.md#private-envelope-compatibility).
+
+## History Snaps and conversations
+
+After a media item is finalized in History, its card can publish a root Snap
+linked to that media. Its Comments sheet shows the conversation, including
+replies to replies. Eligible Snaps and replies can be Liked using Hive votes;
+the default strength for future Likes is configurable in Settings. These are
+explicit social actions, separate from automatic scrobbling. Snaps from the
+live Now page are not included in v0.12.0.
+
+Snap drafts, their History media links, cached conversations, reply attention,
+and notification/read state stay with the connected Hive account.
+Switching accounts does not show another account's local social state.
+
+While RustedWax is running, reading or re-reading a conversation can discover
+new qualifying replies and update reply attention. A newly recorded reply can
+produce an Android alert if enabled. This is not instant push or independent
+background polling; Likes do not generate notifications. On Android 13 or
+newer, alerts also require the separate notification permission, not the
+media-observation Notification Access described above.
 
 ## Stop and Automatic scrobbling
 

@@ -3,6 +3,10 @@
 These are possible future directions, not current support claims or release
 commitments. Current behavior is documented in the other product guides.
 
+History Snaps, replies, and Likes are already available in v0.12.0. Creating
+Snaps directly from Now and more proactive reply-notification delivery are not
+part of this release.
+
 [← Back to the README](../../README.md)
 
 ---

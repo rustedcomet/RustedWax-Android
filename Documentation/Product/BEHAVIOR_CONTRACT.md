@@ -1,7 +1,9 @@
 # RustedWax behavior contract
 
-This document defines intended current behavior. Shipping source and executable
-tests remain authoritative for a particular checkout.
+This document defines intended current scrobbling behavior. History Snaps,
+replies, and Likes are separate explicit social actions; see
+[How it works](HOW_IT_WORKS.md#history-snaps-and-conversations). Shipping source
+and executable tests remain authoritative for a particular checkout.
 
 ## Safety priorities
 
@@ -112,8 +114,9 @@ available posting account/key.
 
 The implementation supports automatic, manual, and shadow triggers through the
 same finalization use case. They share identity, enrichment, classification,
-eligibility, payload, and deduplication rules. The shipping UI publishes through
-automatic playback finalization; the connection check is read-only.
+eligibility, payload, and deduplication rules. The shipping UI publishes
+scrobbles through automatic playback finalization; the connection check is
+read-only.
 
 - Automatic dispatch requires a committed automatic-write authorization.
 - Manual dispatch requires an explicit separate action and reports its result;
@@ -181,6 +184,8 @@ confirmation is distinguished from block confirmation.
 
 - **Now** describes the currently observed logical listen.
 - **History** contains successful or accepted operations with a verified link.
+- **History** and **Not logged** are scoped to the connected Hive account;
+  History cards no longer display transaction IDs in normal presentation.
 - **Not logged** contains one understandable terminal refusal for an eligible
   user-facing target. A verified link is a requirement of broadcasting, not of
   recording a refusal: a refused target whose exact item was never proven is
