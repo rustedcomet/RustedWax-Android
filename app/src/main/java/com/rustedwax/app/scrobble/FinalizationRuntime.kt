@@ -134,6 +134,19 @@ object FinalizationRuntime {
 	@Volatile
 	private var initialised = false
 
+	/**
+	 * Where [recent] and [skipped] are kept between processes, once [init] has
+	 * supplied one.
+	 *
+	 * Null until then, and null for the whole of a replay run. A replay asserts
+	 * on what one scenario produced, so it starts from two empty lists and must
+	 * not read or write anything a previous scenario left behind; leaving this
+	 * unset is what guarantees that, rather than a flag each scenario remembers
+	 * to pass.
+	 */
+	@Volatile
+	private var retained: RetainedRecordStore? = null
+
 	data class ScrobbleRecord(
 		val title: String,
 		val artist: String?,
@@ -309,6 +322,57 @@ object FinalizationRuntime {
 		return rows.filter { it.account != null && it.account.equals(viewer, ignoreCase = true) }
 	}
 
+	/**
+	 * Restored rows placed under whatever this process has already filed.
+	 *
+	 * Restoration is not an assignment, because it is not guaranteed to be the
+	 * first thing that happens. [init] runs from three entry points and a
+	 * listener callback can finalize a track while one of them is still on its
+	 * way through; a plain overwrite would throw that row away, and a plain
+	 * concatenation would show it twice once the next write re-saved the merged
+	 * list.
+	 *
+	 * So: [current] first, because anything this process filed is newer than
+	 * anything a previous one left; then the stored rows that are not already
+	 * here; then the same cap the writers apply. Identity is [ScrobbleRecord
+	 * .eventId], which is the only field on a History row that cannot repeat.
+	 *
+	 * Idempotent by construction — running it twice restores nothing the second
+	 * time — which is what makes it safe for [init] to be called again by a
+	 * second activity or by the service.
+	 */
+	internal fun mergeRestoredHistory(
+		current: List<ScrobbleRecord>,
+		restored: List<ScrobbleRecord>,
+	): List<ScrobbleRecord> {
+		if (restored.isEmpty()) return current
+		val known = current.mapTo(HashSet()) { it.eventId }
+		return (current + restored.filterNot { it.eventId in known }).take(RETAINED_ROWS)
+	}
+
+	/**
+	 * The same merge for Not Logged, over rows that have no minted identity.
+	 *
+	 * A skip row carries no `eventId` — nothing downstream keys UI state on one,
+	 * so there was never a reason to mint it. Whole-row equality stands in: the
+	 * data class compares every field, including the second it was filed at and
+	 * the account that owns it, so a restored row is dropped exactly when this
+	 * process has already filed one describing the same refusal.
+	 *
+	 * Two genuinely distinct refusals that agree on every field are
+	 * indistinguishable here and one of them is dropped. That is accepted: they
+	 * would draw as two identical rows, and a duplicate across a restart reads
+	 * as a bug where a missing identical twin does not.
+	 */
+	internal fun mergeRestoredSkipped(
+		current: List<SkipRecord>,
+		restored: List<SkipRecord>,
+	): List<SkipRecord> {
+		if (restored.isEmpty()) return current
+		val known = current.toHashSet()
+		return (current + restored.filterNot { it in known }).take(RETAINED_ROWS)
+	}
+
 	private val _tracksWithoutVideoId = MutableStateFlow(0)
 	val tracksWithoutVideoId: StateFlow<Int> = _tracksWithoutVideoId.asStateFlow()
 
@@ -334,6 +398,60 @@ object FinalizationRuntime {
 			),
 			CoroutineScope(SupervisorJob() + Dispatchers.IO),
 		)
+		// After `install`, so a restored list cannot be cleared by the wiring,
+		// and inside the same `@Synchronized` call, so the lists are populated
+		// before this method returns to the activity or service that asked. The
+		// UI collects both as state, so a restore that lands a moment later
+		// still draws — but nothing has to rely on that.
+		restoreFrom(SharedPreferencesRetainedRecords(appContext))
+	}
+
+	/**
+	 * Put back what the last process left, and keep writing there from now on.
+	 *
+	 * Separate from [init] so the restore rule can be exercised against a store
+	 * that is not Android's. Guarded end to end: a store that throws on the way
+	 * in leaves both lists exactly as they were and leaves [retained] unset, so
+	 * a failure here costs the retained view and nothing else. Scrobbling does
+	 * not read these lists and is not reached from this path.
+	 */
+	@Synchronized
+	internal fun restoreFrom(store: RetainedRecordStore) {
+		val restored = runCatching {
+			store.loadHistory() to store.loadSkipped()
+		}.getOrElse {
+			EventLog.append(
+				"retained",
+				"could not read the retained History and Not Logged lists " +
+					"(${it.javaClass.simpleName}); both start empty this run. " +
+					"Scrobbling is unaffected.",
+			)
+			return
+		}
+		retained = store
+		_recent.update { mergeRestoredHistory(it, restored.first) }
+		_skipped.update { mergeRestoredSkipped(it, restored.second) }
+		// A row can be filed while the store is being read. Persist the merged
+		// value so that row and the restored tail both survive another process
+		// death even if no later row is filed in this process.
+		persistHistory()
+		persistSkipped()
+	}
+
+	/**
+	 * Write the retained lists after restoration or after a row has been filed.
+	 *
+	 * Called from restore and the two row writers. Failure is swallowed on
+	 * purpose: the row is already on screen and the scrobble has already happened,
+	 * so the only thing a thrown write could still do is take down the caller —
+	 * which for [skip] is the media-session callback.
+	 */
+	private fun persistHistory() {
+		runCatching { retained?.saveHistory(_recent.value) }
+	}
+
+	private fun persistSkipped() {
+		runCatching { retained?.saveSkipped(_skipped.value) }
 	}
 
 	@Synchronized
@@ -586,6 +704,9 @@ object FinalizationRuntime {
 		synchronized(this) { initialised = false }
 		prefetches.reset()
 		verifiedPlaybackSequence.clear()
+		// Replay never persists and never restores. Dropping the store here is
+		// what keeps one scenario's rows out of the next one's assertions.
+		retained = null
 		_recent.value = emptyList()
 		_skipped.value = emptyList()
 		_tracksWithoutVideoId.value = 0
@@ -612,6 +733,7 @@ object FinalizationRuntime {
 		finalizationObserver = FinalizationObserver.None
 		prefetches.reset()
 		verifiedPlaybackSequence.clear()
+		retained = null
 		_recent.value = emptyList()
 		_skipped.value = emptyList()
 		_tracksWithoutVideoId.value = 0
@@ -2393,7 +2515,8 @@ object FinalizationRuntime {
 		// this one is written from two threads — the prefilter rejects on the
 		// media-session callback while the post-enrichment rules reject on the IO
 		// scope, and a shorts feed can have both in flight.
-		_skipped.update { (listOf(record) + it).take(50) }
+		_skipped.update { (listOf(record) + it).take(RETAINED_ROWS) }
+		persistSkipped()
 	}
 
 	/**
@@ -2453,8 +2576,8 @@ object FinalizationRuntime {
 			?: return
 		val artist = label.substringBefore(" — ", "").ifEmpty { null }
 		val title = label.substringAfter(" — ", label)
-		_recent.value = (
-			listOf(
+		_recent.update {
+			(listOf(
 				ScrobbleRecord(
 					title = title,
 					artist = artist,
@@ -2469,7 +2592,8 @@ object FinalizationRuntime {
 					eventId = UUID.randomUUID().toString(),
 					account = account,
 				),
-			) + _recent.value
-			).take(50)
+			) + it).take(RETAINED_ROWS)
+		}
+		persistHistory()
 	}
 }
