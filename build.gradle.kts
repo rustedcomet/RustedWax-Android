@@ -7,5 +7,5 @@ plugins {
 }
 
 allprojects {
-	version = "0.12.0"
+	version = "0.12.1"
 }
