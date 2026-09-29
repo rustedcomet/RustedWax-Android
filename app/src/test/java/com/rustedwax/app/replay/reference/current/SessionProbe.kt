@@ -2243,7 +2243,12 @@ class SessionProbe(
 
 		private fun playedMsNow(): Long = listen.playedMsAt(SystemClock.elapsedRealtime())
 
-		private fun speedOf(ps: PlaybackState?): Double = speedFactor(ps?.playbackSpeed)
+		private fun speedOf(ps: PlaybackState?): Double = transportSpeed(
+			playing = isPlaying(ps),
+			reportedSpeed = ps?.playbackSpeed,
+			positionMs = ps?.position,
+			chromiumHost = observesHostScreenEvidence,
+		)
 
 		private fun unobservedLeadInNote(snapshot: SessionSnapshot): String {
 			val unobserved = snapshot.unobservedLeadInMs
@@ -2764,6 +2769,38 @@ class SessionProbe(
 		 * Implemented in [PlaybackReducer] alongside the accumulation it feeds.
 		 */
 		fun speedFactor(reported: Float?): Double = PlaybackReducer.speedFactor(reported)
+
+		/**
+		 * The rate a transport callback is measured at.
+		 *
+		 * [speedFactor], with one exception: a Chromium host that says PLAYING at a
+		 * known position with a rate of exactly zero. Chromium never publishes
+		 * BUFFERING — a stalled `<video>` is not paused, so the session stays
+		 * PLAYING, and the renderer reports its effective rate as 0 until data
+		 * arrives again. On the A36 a network stall held that state for four
+		 * minutes, with the position frozen, and scaling it to 1× credited every
+		 * second of the freeze and let the idle deadline end an 8-minute song at
+		 * 100% while it sat at 0:54. Taken at its word, the window runs at zero:
+		 * nothing accrues, and no content end is derived from it.
+		 *
+		 * Nothing already measured is touched. The reducer banks the running
+		 * window at the rate it ran at before it adopts this one, which is why the
+		 * old "a zero sample would erase real time" objection does not apply here.
+		 * An unknown position (`-1`, Chromium's "no MediaPosition"), a native
+		 * source, and every other non-positive or unreadable rate keep
+		 * [speedFactor]'s answer.
+		 */
+		fun transportSpeed(
+			playing: Boolean,
+			reportedSpeed: Float?,
+			positionMs: Long?,
+			chromiumHost: Boolean,
+		): Double =
+			if (chromiumHost && playing && reportedSpeed == 0f && positionMs != null && positionMs >= 0) {
+				0.0
+			} else {
+				speedFactor(reportedSpeed)
+			}
 
 		/** True if the app's notification listener is currently enabled. */
 		fun hasNotificationAccess(context: Context): Boolean {
