@@ -6,6 +6,7 @@ import com.rustedwax.app.scrobble.ConnectivityRetryTrigger
 import com.rustedwax.app.scrobble.FinalizationRuntime
 import com.rustedwax.hive.HiveRpc
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -207,23 +208,23 @@ class OfflineRecoveryReplayTest : ReplayScenarioTest() {
 
 		// Queued, and already visible as such while it waits.
 		assertEquals(1, harness.queuedForRetry)
-		assertTrue(FinalizationRuntime.recent.value.single().queued)
+		val queued = FinalizationRuntime.recent.value.single()
+		assertTrue(queued.queued)
 
 		harness.env.clock.advance(25_000)
 		connectivityReturns(harness)
 
-		// Two rows for one listen, oldest last: "queued — offline" while it
-		// waited, then the send that cleared it. The list prepends.
-		assertEquals(2, FinalizationRuntime.recent.value.size)
-		val entry = FinalizationRuntime.recent.value.first()
+		// One listen, one row (Issue #9 B2). The send that cleared the queue
+		// updates the row that said "queued — offline" instead of adding a second
+		// one beside it, which used to keep claiming "not on-chain yet" for ever.
+		// The row keeps its identity, so a draft or open dialog stays with it.
+		val entry = FinalizationRuntime.recent.value.single()
 		assertEquals(videoId, entry.videoId)
+		assertEquals("the settled row is not the queued row", queued.eventId, entry.eventId)
+		assertFalse("the settled row still claims to be queued", entry.queued)
+		assertEquals("sent from queue", entry.status)
 		assertTrue("the drained entry did not record a transaction", entry.txId != null)
-		// One listen, one video, two rows — and the UI has to tell them apart.
-		// Every other field they share can repeat, so the row's own identity is
-		// the only thing that can carry a draft or an open dialog.
-		val ids = FinalizationRuntime.recent.value.map { it.eventId }
-		assertEquals("two History rows shared one identity", 2, ids.toSet().size)
-		assertTrue("a row was created without an identity", ids.none { it.isBlank() })
+		assertTrue("a row was created without an identity", entry.eventId.isNotBlank())
 		assertEquals(emptyList<ReplayHarness.Refusal>(), harness.refusals)
 	}
 

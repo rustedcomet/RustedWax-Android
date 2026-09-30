@@ -72,7 +72,10 @@ internal object RetainedRecordCodec {
 					.put("queued", row.queued)
 					.put("videoId", row.videoId)
 					.put("eventId", row.eventId)
-					.put("account", row.account),
+					.put("account", row.account)
+					// Absent, not null, when the row never came from the queue, so
+					// rows written before this field existed read back identically.
+					.putOpt("queueOperationId", row.queueOperationId),
 			)
 		}
 		return array.toString()
@@ -109,6 +112,8 @@ internal object RetainedRecordCodec {
 				videoId = videoId,
 				eventId = eventId,
 				account = account,
+				// Optional: older rows have no such key, and that is not damage.
+				queueOperationId = (o.opt("queueOperationId") as? String)?.takeIf { it.isNotBlank() },
 			)
 		}
 

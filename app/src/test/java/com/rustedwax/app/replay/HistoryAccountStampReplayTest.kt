@@ -82,13 +82,14 @@ class HistoryAccountStampReplayTest : ReplayScenarioTest() {
 			nowMs = { harness.env.clock.nowMillis() },
 		).onUsableNetwork()
 
-		// Two rows for one listen. The second is written by the queue drain,
-		// minutes or days later, and takes its account from the entry it is
-		// retrying rather than from the vault it happens to find.
+		// One row for one listen (Issue #9 B2): the queue drain, minutes or days
+		// later, updates the queued row in place. It matches that row by the
+		// entry's own account and operation, never by the vault it happens to
+		// find, so the row stays filed under the account that signed it.
 		val rows = FinalizationRuntime.recent.value
-		assertEquals(2, rows.size)
+		assertEquals(1, rows.size)
 		assertTrue("the drained row was not stamped", rows.all { it.account == "alice" })
-		assertTrue("the drained entry did not record a transaction", rows.first().txId != null)
+		assertTrue("the drained entry did not record a transaction", rows.single().txId != null)
 	}
 
 	@Test

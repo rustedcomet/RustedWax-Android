@@ -191,7 +191,40 @@ object FinalizationRuntime {
 		 * No default, for the same reason [eventId] has none.
 		 */
 		val account: String,
-	)
+		/**
+		 * The retry-queue operation this row reports on, when it came from one.
+		 *
+		 * Issue #9 B2: a listen queued offline got a "queued" row, and its later
+		 * outcome arrived as a second row with a fresh [eventId], leaving the first
+		 * one claiming "not on-chain yet" for ever. With this id the outcome
+		 * updates the row it belongs to instead. Optional: rows made before it
+		 * existed, and rows that never went through the queue, have none — and
+		 * nothing is ever inferred for them.
+		 */
+		val queueOperationId: String? = null,
+	) {
+		/** A queued listen that will never reach the chain: the queue gave up on it. */
+		val queueFailed: Boolean
+			get() = status.startsWith(QUEUE_FAILED_PERMANENTLY) || status.startsWith(QUEUE_ATTEMPTS_EXHAUSTED)
+
+		/**
+		 * A node accepted the transaction but inclusion could not be confirmed.
+		 * Not retried, and not known to be on chain — so never shown as confirmed.
+		 */
+		val acceptedUnconfirmed: Boolean
+			get() = status.startsWith(ACCEPTED_UNCONFIRMED)
+
+		companion object {
+			/** Status prefix when a node accepted a send but confirmation was unavailable. */
+			const val ACCEPTED_UNCONFIRMED = "accepted — confirmation unavailable"
+
+			/** Status prefix when the chain rejected a queued send. */
+			const val QUEUE_FAILED_PERMANENTLY = "queue failed permanently"
+
+			/** Status prefix when a queued send ran out of attempts and is not on chain. */
+			const val QUEUE_ATTEMPTS_EXHAUSTED = "failed after 8 queued attempts"
+		}
+	}
 
 	/**
 	 * A track that finished and did *not* become an entry, with the reason.
@@ -2044,6 +2077,19 @@ object FinalizationRuntime {
 					"reconciled prepared transaction ${prepared.txId} as ${evidence.name.lowercase()}",
 				)
 				logSettlement(settled, entry.label)
+				// The row that has been saying "queued" for this operation is told
+				// it reached the chain. If that row has aged out, the outcome is
+				// still recorded as a row of its own: the listen is on chain and
+				// must not vanish from History.
+				note(
+					entry.username,
+					entry.label,
+					"reconciled after ambiguous retry" + settlementSuffix(settled),
+					prepared.txId,
+					entry.percentPlayed,
+					videoId = entry.videoId,
+					queueOperationId = entry.operationId,
+				)
 			}
 
 			HiveRpc.TransactionEvidence.UNAVAILABLE -> EventLog.append(
@@ -2118,6 +2164,7 @@ object FinalizationRuntime {
 					result.txId,
 					entry.percentPlayed,
 					videoId = entry.videoId,
+					queueOperationId = entry.operationId,
 				)
 				onFeedback?.invoke("Confirmed in a block — tx ${result.txId}", false)
 			}
@@ -2138,13 +2185,14 @@ object FinalizationRuntime {
 					entry.username,
 					entry.label,
 					if (initialAttempt) {
-						"accepted — confirmation unavailable; not retried" + settlementSuffix(settled)
+						"${ScrobbleRecord.ACCEPTED_UNCONFIRMED}; not retried" + settlementSuffix(settled)
 					} else {
-						"accepted — confirmation unavailable" + settlementSuffix(settled)
+						ScrobbleRecord.ACCEPTED_UNCONFIRMED + settlementSuffix(settled)
 					},
 					result.txId,
 					entry.percentPlayed,
 					videoId = entry.videoId,
+					queueOperationId = entry.operationId,
 				)
 				onFeedback?.invoke(
 					"Accepted, but confirmation was unavailable — do not retry" +
@@ -2186,6 +2234,7 @@ object FinalizationRuntime {
 			entry.percentPlayed,
 			queued = true,
 			videoId = entry.videoId,
+			queueOperationId = entry.operationId,
 		)
 	}
 
@@ -2203,11 +2252,17 @@ object FinalizationRuntime {
 		note(
 			entry.username,
 			entry.label,
-			(if (initialAttempt) "rejected: $message" else "queue failed permanently: $message") +
-				settlementSuffix(settled),
+			(
+				if (initialAttempt) {
+					"rejected: $message"
+				} else {
+					"${ScrobbleRecord.QUEUE_FAILED_PERMANENTLY}: $message"
+				}
+			) + settlementSuffix(settled),
 			null,
 			entry.percentPlayed,
 			videoId = entry.videoId,
+			queueOperationId = entry.operationId,
 		)
 	}
 
@@ -2253,10 +2308,11 @@ object FinalizationRuntime {
 				note(
 					entry.username,
 					entry.label,
-					"failed after 8 queued attempts: $message",
+					"${ScrobbleRecord.QUEUE_ATTEMPTS_EXHAUSTED}: $message",
 					null,
 					entry.percentPlayed,
 					videoId = entry.videoId,
+					queueOperationId = entry.operationId,
 				)
 			}
 
@@ -2310,6 +2366,7 @@ object FinalizationRuntime {
 					prepared.txId,
 					entry.percentPlayed,
 					videoId = entry.videoId,
+					queueOperationId = entry.operationId,
 				)
 			}
 
@@ -2323,10 +2380,11 @@ object FinalizationRuntime {
 				note(
 					entry.username,
 					entry.label,
-					"failed after 8 queued attempts: $message" + settlementSuffix(settled),
+					"${ScrobbleRecord.QUEUE_ATTEMPTS_EXHAUSTED}: $message" + settlementSuffix(settled),
 					null,
 					entry.percentPlayed,
 					videoId = entry.videoId,
+					queueOperationId = entry.operationId,
 				)
 			}
 
@@ -2500,7 +2558,7 @@ object FinalizationRuntime {
 				note(
 					username,
 					label,
-					"accepted — confirmation unavailable; not retried",
+					"${ScrobbleRecord.ACCEPTED_UNCONFIRMED}; not retried",
 					result.txId,
 					payload.percentPlayed,
 					videoId = videoId,
@@ -2665,10 +2723,38 @@ object FinalizationRuntime {
 		percent: Int? = null,
 		queued: Boolean = false,
 		videoId: String? = null,
+		/**
+		 * The queue operation this row reports on. When a row for the same
+		 * account already carries it, that row is updated in place — same
+		 * [ScrobbleRecord.eventId], video, title and listen time; new status,
+		 * transaction and queued flag — instead of a second row being added.
+		 */
+		queueOperationId: String? = null,
 	) {
 		val linkedVideoId = videoId
 			?.takeIf { YouTubeProbe.canonicalWatchUrl(it) != null }
 			?: return
+		val operationId = queueOperationId?.takeIf { it.isNotBlank() }
+		if (operationId != null) {
+			var updated = false
+			_recent.update { rows ->
+				val index = rows.indexOfFirst {
+					it.queueOperationId == operationId && it.account.equals(account, ignoreCase = true)
+				}
+				updated = index >= 0
+				if (!updated) {
+					rows
+				} else {
+					rows.toMutableList().also {
+						it[index] = it[index].copy(status = status, txId = txId, queued = queued)
+					}
+				}
+			}
+			if (updated) {
+				persistHistory()
+				return
+			}
+		}
 		val artist = label.substringBefore(" — ", "").ifEmpty { null }
 		val title = label.substringAfter(" — ", label)
 		_recent.update {
@@ -2686,6 +2772,7 @@ object FinalizationRuntime {
 					// the listen and can repeat; this one cannot.
 					eventId = UUID.randomUUID().toString(),
 					account = account,
+					queueOperationId = operationId,
 				),
 			) + it).take(RETAINED_ROWS)
 		}

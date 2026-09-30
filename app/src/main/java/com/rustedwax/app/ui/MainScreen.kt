@@ -1501,7 +1501,11 @@ private fun HistoryList(
 	// The header only gets to say "on-chain" when every row is. A queued or
 	// rejected row makes that a claim about entries that aren't there, and the
 	// whole point of this pair of tabs is that the app doesn't do that.
-	val unsettled = recent.count { it.queued || it.status.startsWith("rejected") }
+	// A queued send the queue gave up on is not on chain either, and an accepted
+	// send whose confirmation was unavailable is not known to be (Issue #9 B2).
+	val unsettled = recent.count {
+		it.queued || it.status.startsWith("rejected") || it.queueFailed || it.acceptedUnconfirmed
+	}
 	Column {
 		Row(
 			verticalAlignment = Alignment.CenterVertically,
@@ -1604,9 +1608,10 @@ private fun HistoryList(
 							"${r.percentPlayed}% · ${r.status}",
 							style = MaterialTheme.typography.bodySmall,
 							color = when {
-								r.status.startsWith("rejected") ->
+								r.status.startsWith("rejected") || r.queueFailed ->
 									MaterialTheme.colorScheme.error
-								r.queued -> if (dark) Wax.AmberLight else Wax.Amber
+								r.queued || r.acceptedUnconfirmed ->
+									if (dark) Wax.AmberLight else Wax.Amber
 								else -> if (dark) Wax.SuccessGreenLight else Wax.SuccessGreen
 							},
 						)
