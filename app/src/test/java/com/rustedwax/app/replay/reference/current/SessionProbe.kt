@@ -1151,6 +1151,9 @@ class SessionProbe(
 		/** Position reset/restore signature proving the native playback surface disappeared. */
 		private var nativeStoppedResetFromPositionMs: Long? = null
 		private var nativeStoppedSurfaceDisappearanceConfirmed = false
+		/** The same signature before 30 s; only a RustedWax-in-front hold may use it. */
+		private var nativeStoppedForegroundResetFromPositionMs: Long? = null
+		private var nativeStoppedForegroundSurfaceDisappearanceConfirmed = false
 		/** Generation/signature for one bounded in-flight native carry lookup. */
 		private var nativeResolutionGeneration: Long = 0
 		private var nativeResolutionSignature: String? = null
@@ -1797,6 +1800,8 @@ class SessionProbe(
 				nowMillis + StoppedInterruption.SCREEN_OFF_HOLD_CAP_MS
 			nativeStoppedResetFromPositionMs = null
 			nativeStoppedSurfaceDisappearanceConfirmed = false
+			nativeStoppedForegroundResetFromPositionMs = null
+			nativeStoppedForegroundSurfaceDisappearanceConfirmed = false
 			EventLog.append(
 				"native-identity",
 				"$packageName exact-ID-less STOPPED state waiting " +
@@ -1825,20 +1830,30 @@ class SessionProbe(
 					if (token != nativeStoppedFinalizeToken || finalized) return@postDelayed
 					if (state?.state != PlaybackState.STATE_STOPPED) return@postDelayed
 					val stoppedForMs = SystemClock.elapsedRealtime() - stoppedSinceElapsedMs
+					val displayOn = displayInteractive()
+					val rustedWaxForeground = RustedWaxUiVisibility.isResumed
 					if (StoppedInterruption.holdsListenOpen(
-							displayInteractive = displayInteractive(),
+							displayInteractive = displayOn,
 							stoppedForMs = stoppedForMs,
 							surfaceDisappearanceConfirmed =
 								nativeStoppedSurfaceDisappearanceConfirmed,
 							stoppedAtMs = extrapolatedPosition(state),
 							durationMs = durationOf(currentMetadata),
+							rustedWaxForeground = rustedWaxForeground,
+							foregroundSurfaceDisappearanceConfirmed =
+								nativeStoppedForegroundSurfaceDisappearanceConfirmed,
 						)
 					) {
 						if (!nativeStoppedScreenOffNoted) {
 							nativeStoppedScreenOffNoted = true
+							val cause = if (displayOn && rustedWaxForeground) {
+								"a surface interruption caused by RustedWax being in front"
+							} else {
+								"a display-off surface interruption"
+							}
 							EventLog.append(
 								"native-identity",
-								"$packageName proved a display-off surface interruption — holding " +
+								"$packageName proved $cause — holding " +
 									"this listen open for the same item to continue into rather " +
 									"than finalizing an interruption nobody asked for",
 							)
@@ -1880,6 +1895,18 @@ class SessionProbe(
 			) {
 				nativeStoppedSurfaceDisappearanceConfirmed = true
 			}
+			if (nativeStoppedForegroundResetFromPositionMs == null) {
+				nativeStoppedForegroundResetFromPositionMs = StoppedInterruption.foregroundResetCandidate(
+					previousPositionMs,
+					newPositionMs,
+				)
+			} else if (StoppedInterruption.confirmsForegroundSurfaceDisappearance(
+					nativeStoppedForegroundResetFromPositionMs,
+					newPositionMs,
+				)
+			) {
+				nativeStoppedForegroundSurfaceDisappearanceConfirmed = true
+			}
 		}
 
 		private fun clearNativeStoppedInterruption() {
@@ -1888,6 +1915,8 @@ class SessionProbe(
 			nativeStoppedInterruptionDeadlineMillis = null
 			nativeStoppedResetFromPositionMs = null
 			nativeStoppedSurfaceDisappearanceConfirmed = false
+			nativeStoppedForegroundResetFromPositionMs = null
+			nativeStoppedForegroundSurfaceDisappearanceConfirmed = false
 		}
 
 		/**

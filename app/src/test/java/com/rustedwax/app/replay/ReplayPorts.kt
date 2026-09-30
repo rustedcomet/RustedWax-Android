@@ -82,7 +82,7 @@ class ReplayPolicy(
 	autoScrobble: Boolean = true,
 	override val enrichment: Boolean = true,
 	override val scrobbleThreshold: Double = 0.6,
-	override val disableShorts: Boolean = false,
+	override var disableShorts: Boolean = false,
 	override var watchHistory: Boolean = true,
 	private val privateCategories: Set<PrivateScrobble.Category> = emptySet(),
 ) : ScrobblePolicy {

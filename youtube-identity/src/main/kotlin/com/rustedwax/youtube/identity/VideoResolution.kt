@@ -52,6 +52,20 @@ data class VideoResolution(
 	val musicVideoRow: Boolean = false,
 	val playlistVerified: Boolean = false,
 	val historyVerified: Boolean = false,
+	/**
+	 * This id is already proven to be a Short: it came from the account's own
+	 * *Shorts* history and was corroborated on its own watch page, or it is a
+	 * run-local candidate that was first verified as a Short in one of those ways
+	 * (Shorts history, or a `/shorts/` source proof).
+	 *
+	 * A browser session whose address bar never showed `/shorts/` reaches
+	 * finalization with no Short proof, so the `Disable Shorts` rule — which runs
+	 * before resolution — cannot see it. This is the first moment anything knows
+	 * the item was a Short, and finalization re-asks that rule here. It is not
+	 * Short proof for any other purpose: floors, caps and the payload still read
+	 * the session's own source proof.
+	 */
+	val provenShort: Boolean = false,
 	val localizedTitle: String? = null,
 	/**
 	 * This proof required the length the player was publishing to be the resolved

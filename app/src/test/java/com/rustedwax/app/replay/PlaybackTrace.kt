@@ -213,6 +213,8 @@ class PlaybackTrace(
 	private var stoppedInterruptionDeadlineMillis: Long? = null
 	private var stoppedResetFromPositionMs: Long? = null
 	private var stoppedSurfaceDisappearanceConfirmed = false
+	private var stoppedForegroundResetFromPositionMs: Long? = null
+	private var stoppedForegroundSurfaceDisappearanceConfirmed = false
 
 	/** Set once a display-off STOPPED held this listen open rather than ending it. */
 	var stoppedInterruptionHeld: Boolean = false
@@ -347,6 +349,8 @@ class PlaybackTrace(
 					clock.nowMillis() + StoppedInterruption.SCREEN_OFF_HOLD_CAP_MS
 				stoppedResetFromPositionMs = null
 				stoppedSurfaceDisappearanceConfirmed = false
+				stoppedForegroundResetFromPositionMs = null
+				stoppedForegroundSurfaceDisappearanceConfirmed = false
 			}
 			PlaybackEffect.CancelStoppedFinalizationGrace -> {
 				stoppedGracePending = false
@@ -493,6 +497,7 @@ class PlaybackTrace(
 				val transport = when {
 					event.playing -> TransportState.PLAYING
 					event.stopped -> TransportState.STOPPED
+					event.buffering -> TransportState.OTHER
 					else -> TransportState.PAUSED
 				}
 				dispatch(
@@ -753,6 +758,9 @@ class PlaybackTrace(
 						surfaceDisappearanceConfirmed = stoppedSurfaceDisappearanceConfirmed,
 						stoppedAtMs = positionMs,
 						durationMs = bundle.durationMs,
+						rustedWaxForeground = event.rustedWaxForeground,
+						foregroundSurfaceDisappearanceConfirmed =
+							stoppedForegroundSurfaceDisappearanceConfirmed,
 					)
 				) {
 					stoppedInterruptionHeld = true
@@ -1174,6 +1182,18 @@ class PlaybackTrace(
 		) {
 			stoppedSurfaceDisappearanceConfirmed = true
 		}
+		if (stoppedForegroundResetFromPositionMs == null) {
+			stoppedForegroundResetFromPositionMs = StoppedInterruption.foregroundResetCandidate(
+				previousPositionMs,
+				newPositionMs,
+			)
+		} else if (StoppedInterruption.confirmsForegroundSurfaceDisappearance(
+				stoppedForegroundResetFromPositionMs,
+				newPositionMs,
+			)
+		) {
+			stoppedForegroundSurfaceDisappearanceConfirmed = true
+		}
 	}
 
 	private fun clearStoppedInterruption() {
@@ -1183,6 +1203,8 @@ class PlaybackTrace(
 		stoppedInterruptionDeadlineMillis = null
 		stoppedResetFromPositionMs = null
 		stoppedSurfaceDisappearanceConfirmed = false
+		stoppedForegroundResetFromPositionMs = null
+		stoppedForegroundSurfaceDisappearanceConfirmed = false
 	}
 
 	private fun cancelContinuation() {

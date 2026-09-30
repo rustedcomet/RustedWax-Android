@@ -598,6 +598,7 @@ object FinalizationRuntime {
 							channel = session.artist,
 							durationMs = session.durationMs,
 							ownerHandle = session.ownerHandle,
+							provenShort = resolution.provenShort || session.hasShortSourceProof,
 						)
 						EventLog.append(
 							"resolve",
@@ -1079,6 +1080,20 @@ object FinalizationRuntime {
 		)
 	}
 
+	/** Marks a verified id already proven to be a Short; see [VideoResolution.provenShort]. */
+	private fun VideoResolutionAttempt.asProvenShort(): VideoResolutionAttempt =
+		resolution?.let { copy(resolution = it.copy(provenShort = true)) } ?: this
+
+	/**
+	 * A run-local candidate keeps what its first verification proved. A Short
+	 * remembered while `Disable Shorts` was off is still a Short when the same
+	 * title comes back after it was turned on.
+	 */
+	private fun VideoResolutionAttempt.withCachedShortProof(packageName: String): VideoResolutionAttempt {
+		val videoId = resolution?.videoId ?: return this
+		return if (VerifiedIdentityCandidateCache.provesShort(packageName, videoId)) asProvenShort() else this
+	}
+
 	private suspend fun watchHistoryResolution(
 		session: SessionSnapshot,
 		title: String?,
@@ -1133,7 +1148,7 @@ object FinalizationRuntime {
 					channel = session.artist,
 					durationSec = durationSec,
 					ownerHandle = handle,
-				)
+				).asProvenShort()
 				lastAttempt = attempt
 				// The account's own feed named this id and its own watch page then
 				// agreed on title, owner and duration. That is the same fact an
@@ -1209,7 +1224,7 @@ object FinalizationRuntime {
 					title = title,
 					channel = session.artist,
 					durationSec = durationSec,
-				)
+				).asProvenShort()
 				EventLog.append(
 					"history",
 					attempt.resolution?.let {
@@ -1523,7 +1538,7 @@ object FinalizationRuntime {
 						session.artist,
 						durationSec,
 						session.ownerHandle,
-					)
+					).withCachedShortProof(session.packageName)
 				}.getOrElse {
 					VideoResolutionAttempt(
 						refusalReason = "run-local candidate re-fetch failed: ${it.message}",
@@ -1778,7 +1793,7 @@ object FinalizationRuntime {
 				)
 				val cachedAttempt = idResolver.resolveVerifiedCandidates(
 					cachedIds, title, session.artist, durationSec, session.ownerHandle,
-				)
+				).withCachedShortProof(session.packageName)
 				if (cachedAttempt.resolution != null ||
 					cachedAttempt.failure == VideoResolutionFailure.AMBIGUOUS
 				) {

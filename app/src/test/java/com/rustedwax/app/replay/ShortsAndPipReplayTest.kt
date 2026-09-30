@@ -436,4 +436,224 @@ class ShortsAndPipReplayTest : ReplayScenarioTest() {
 		assertEquals(1, harness.broadcasts.size)
 		assertEquals("braveShort1", harness.broadcasts.single().videoId)
 	}
+
+	// ---- a browser Short the address bar never named (Issue #3) --------------
+
+	/**
+	 * Brave was not on screen when this Short started, so the address bar never
+	 * said `/shorts/` and the session reached finalization site-only. The first
+	 * thing to learn what it was is the account's Shorts history; the switch the
+	 * user set has to be asked again at that point, in the same words.
+	 */
+	private fun siteOnlyBraveShort(disableShorts: Boolean): ReplayHarness {
+		val harness = ReplayHarness(
+			ReplaySource.BRAVE,
+			ReplayEnvironment(policy = ReplayPolicy(disableShorts = disableShorts)),
+		)
+		harness.env.facts.put(shortFacts("braveShort4", "#siteonly", 40))
+		historyNames(harness, "braveShort4", "#siteonly", 40)
+		harness.feed(
+			PlaybackEvent.NotificationObserved(host = "youtube.com"),
+			PlaybackEvent.SessionMetadata(
+				title = "#siteonly",
+				artist = "Mr Time Edits",
+				durationMs = 40_000,
+			),
+			PlaybackEvent.PlaybackStateChanged(playing = true),
+			PlaybackEvent.Advance(40_000),
+			PlaybackEvent.Finalized(),
+		)
+		return harness
+	}
+
+	@Test
+	fun `a site-only browser Short named by Shorts history is refused when Shorts are off`() {
+		val harness = siteOnlyBraveShort(disableShorts = true)
+
+		assertEquals(emptyList<ReplayHarness.BroadcastPayload>(), harness.broadcasts)
+		assertEquals(listOf(RefusalKind.SHORTS_DISABLED), harness.terminalRefusalKinds)
+		assertTrue(
+			"the history route is what named it",
+			ReplayIdentitySource.Route.VERIFIED_CANDIDATES in harness.identityRoutes,
+		)
+	}
+
+	@Test
+	fun `a site-only browser Short named by Shorts history still scrobbles when Shorts are on`() {
+		val harness = siteOnlyBraveShort(disableShorts = false)
+
+		assertEquals(listOf("braveShort4"), harness.broadcasts.map { it.videoId })
+		assertEquals(emptyList<RefusalKind>(), harness.terminalRefusalKinds)
+	}
+
+	@Test
+	fun `an ordinary site-only browser video is untouched by Disable Shorts`() {
+		val harness = ReplayHarness(
+			ReplaySource.BRAVE,
+			ReplayEnvironment(policy = ReplayPolicy(disableShorts = true)),
+		)
+		harness.env.facts.put(
+			VideoFacts(
+				videoId = "braveVideo1",
+				title = "An ordinary video",
+				author = "Some Channel",
+				ownerHandle = null,
+				lengthSeconds = 200,
+				category = "Entertainment",
+				watchPageResolved = true,
+				isUnlisted = false,
+			),
+		)
+		harness.env.watchHistory.hasSession = true
+		harness.env.watchHistory.evidence = {
+			VideoResolutionAttempt(
+				resolution = VideoResolution(
+					videoId = "braveVideo1",
+					source = "watch history",
+					title = "An ordinary video",
+					channel = "Some Channel",
+					lengthSeconds = 200,
+					uniquelyResolved = true,
+					historyVerified = true,
+				),
+			)
+		}
+
+		harness.feed(
+			PlaybackEvent.NotificationObserved(host = "youtube.com"),
+			PlaybackEvent.SessionMetadata(
+				title = "An ordinary video",
+				artist = "Some Channel",
+				durationMs = 200_000,
+			),
+			PlaybackEvent.PlaybackStateChanged(playing = true),
+			PlaybackEvent.Advance(200_000),
+			PlaybackEvent.Finalized(),
+		)
+
+		assertEquals(listOf("braveVideo1"), harness.broadcasts.map { it.videoId })
+		assertEquals(emptyList<RefusalKind>(), harness.terminalRefusalKinds)
+	}
+
+	@Test
+	fun `a browser Short proven by its address bar is still refused before resolution`() {
+		val harness = ReplayHarness(
+			ReplaySource.BRAVE,
+			ReplayEnvironment(policy = ReplayPolicy(disableShorts = true)),
+		)
+		harness.env.facts.put(shortFacts("braveShort5", "#proven", 15))
+
+		harness.feed(
+			PlaybackEvent.NotificationObserved(host = "youtube.com"),
+			PlaybackEvent.UrlObserved(host = "m.youtube.com", videoId = "braveShort5", isShort = true),
+			PlaybackEvent.SessionMetadata(
+				title = "#proven",
+				artist = "Mr Time Edits",
+				durationMs = 15_000,
+			),
+			PlaybackEvent.PlaybackStateChanged(playing = true),
+			PlaybackEvent.Advance(15_000),
+			PlaybackEvent.Finalized(),
+		)
+
+		assertEquals(emptyList<ReplayHarness.BroadcastPayload>(), harness.broadcasts)
+		assertEquals(listOf(RefusalKind.SHORTS_DISABLED), harness.terminalRefusalKinds)
+		assertEquals(emptyList<ReplayIdentitySource.Route>(), harness.identityRoutes)
+	}
+
+	// ---- the same Short, named again by the run-local cache (Issue #3) --------
+
+	private fun ReplayHarness.listenSiteOnly(title: String, artist: String, durationMs: Long) = feed(
+		PlaybackEvent.NotificationObserved(host = "youtube.com"),
+		PlaybackEvent.SessionMetadata(title = title, artist = artist, durationMs = durationMs),
+		PlaybackEvent.PlaybackStateChanged(playing = true),
+		PlaybackEvent.Advance(durationMs),
+		PlaybackEvent.Finalized(),
+	)
+
+	/**
+	 * Verified from Shorts history while the switch was off, then remembered as a
+	 * run-local candidate. The switch goes on, history no longer offers it, and
+	 * the same title comes back: only the cache can name it, and it has to
+	 * remember what it named.
+	 */
+	@Test
+	fun `a Short cached while Disable Shorts was off is refused once it is turned on`() {
+		val harness = ReplayHarness(
+			ReplaySource.BRAVE,
+			ReplayEnvironment(policy = ReplayPolicy(disableShorts = false)),
+		)
+		harness.env.facts.put(shortFacts("braveShort6", "Would you take her offer? #goth", 40))
+		historyNames(harness, "braveShort6", "Would you take her offer? #goth", 40)
+
+		harness.listenSiteOnly("Would you take her offer? #goth", "Mr Time Edits", 40_000)
+		assertEquals(listOf("braveShort6"), harness.broadcasts.map { it.videoId })
+
+		harness.env.policy.disableShorts = true
+		harness.env.watchHistory.shortIds = { emptyList() }
+		harness.listenSiteOnly("Would you take her offer? #goth", "Mr Time Edits", 40_000)
+
+		assertEquals("no second broadcast", listOf("braveShort6"), harness.broadcasts.map { it.videoId })
+		assertEquals(
+			listOf(RefusalKind.SHORTS_DISABLED),
+			harness.terminalRefusalKinds,
+		)
+
+		harness.env.policy.disableShorts = false
+		harness.listenSiteOnly("Would you take her offer? #goth", "Mr Time Edits", 40_000)
+
+		assertEquals(
+			"Disable Shorts off again, the same cached route scrobbles",
+			listOf("braveShort6", "braveShort6"),
+			harness.broadcasts.map { it.videoId },
+		)
+		assertEquals(listOf(RefusalKind.SHORTS_DISABLED), harness.terminalRefusalKinds)
+	}
+
+	@Test
+	fun `an ordinary video named by the run-local cache is untouched by Disable Shorts`() {
+		val harness = ReplayHarness(
+			ReplaySource.BRAVE,
+			ReplayEnvironment(policy = ReplayPolicy(disableShorts = false)),
+		)
+		harness.env.facts.put(
+			VideoFacts(
+				videoId = "braveVideo2",
+				title = "Another ordinary video",
+				author = "Some Channel",
+				ownerHandle = null,
+				lengthSeconds = 200,
+				category = "Entertainment",
+				watchPageResolved = true,
+				isUnlisted = false,
+			),
+		)
+		val resolution = VideoResolutionAttempt(
+			resolution = VideoResolution(
+				videoId = "braveVideo2",
+				source = "watch history",
+				title = "Another ordinary video",
+				channel = "Some Channel",
+				lengthSeconds = 200,
+				uniquelyResolved = true,
+				historyVerified = true,
+			),
+		)
+		harness.env.watchHistory.hasSession = true
+		harness.env.watchHistory.evidence = { resolution }
+		harness.env.identity.verifiedCandidates = { ids ->
+			if (ids == listOf("braveVideo2")) resolution
+			else VideoResolutionAttempt(refusalReason = "no candidate corroborated")
+		}
+
+		harness.listenSiteOnly("Another ordinary video", "Some Channel", 200_000)
+		harness.env.policy.disableShorts = true
+		harness.env.watchHistory.evidence = {
+			VideoResolutionAttempt(refusalReason = "watch history named no video for \"$it\"")
+		}
+		harness.listenSiteOnly("Another ordinary video", "Some Channel", 200_000)
+
+		assertEquals(listOf("braveVideo2", "braveVideo2"), harness.broadcasts.map { it.videoId })
+		assertEquals(emptyList<RefusalKind>(), harness.terminalRefusalKinds)
+	}
 }

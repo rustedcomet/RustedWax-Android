@@ -348,7 +348,7 @@ internal class ProductionFinalizationOrchestrator(
 			return
 		}
 		if (settings.disableShorts && session.hasShortSourceProof) {
-			val reason = "Shorts are turned off — you asked never to scrobble a Short"
+			val reason = SHORTS_DISABLED_REASON
 			effects.skip(report, session, reason)
 			onFeedback?.invoke(reason, true)
 			return
@@ -467,6 +467,18 @@ internal class ProductionFinalizationOrchestrator(
 					finalizedSession.confirmed?.videoId, resolution,
 				) +
 				"; no scrobble was broadcast because every YouTube entry requires a hyperlink"
+			effects.skip(report, finalizedSession, reason)
+			onFeedback?.invoke(reason, true)
+			return
+		}
+
+		// The rule above could only read source proof. A page whose address bar never
+		// said `/shorts/` reaches here unmarked, and the account's Shorts history — or
+		// a run-local candidate first verified as a Short — is the first thing to say
+		// what it was, so the same rule is asked again, with the same words, before
+		// anything is remembered, enriched or broadcast.
+		if (settings.disableShorts && resolution.provenShort) {
+			val reason = SHORTS_DISABLED_REASON
 			effects.skip(report, finalizedSession, reason)
 			onFeedback?.invoke(reason, true)
 			return
@@ -746,3 +758,5 @@ internal class ProductionFinalizationOrchestrator(
 		"automatic-scrobble authorization changed after the target began"
 	}
 }
+
+private const val SHORTS_DISABLED_REASON = "Shorts are turned off — you asked never to scrobble a Short"

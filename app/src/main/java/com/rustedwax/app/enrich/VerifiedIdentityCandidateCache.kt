@@ -22,9 +22,15 @@ object VerifiedIdentityCandidateCache {
 		val ownerHandleKey: String?,
 		val durationSeconds: Long,
 		val verifiedAtMillis: Long,
+		/** Some verification of this upload proved it a Short; see [provesShort]. */
+		val provenShort: Boolean,
 	)
 
 	private val entries = ConcurrentHashMap<String, Entry>()
+
+	/** Test seam: runs where a remember has read the current entry and not yet stored its own. */
+	@Volatile
+	internal var beforeStore: ((String) -> Unit)? = null
 
 	fun remember(
 		packageName: String,
@@ -33,6 +39,7 @@ object VerifiedIdentityCandidateCache {
 		channel: String?,
 		durationMs: Long?,
 		ownerHandle: String? = null,
+		provenShort: Boolean = false,
 		now: Long = System.currentTimeMillis(),
 	) {
 		val titleKey = title?.let(SearchResultsParser::titleKey)?.takeIf(String::isNotBlank)
@@ -47,15 +54,23 @@ object VerifiedIdentityCandidateCache {
 		val durationSeconds = durationMs?.takeIf { it > 0 }?.div(1000) ?: return
 		if (!VIDEO_ID.matches(videoId)) return
 		prune(now)
-		entries["$packageName|$videoId"] = Entry(
-			packageName = packageName,
-			videoId = videoId,
-			titleKey = titleKey,
-			channelKey = channelKey,
-			ownerHandleKey = ownerHandleKey,
-			durationSeconds = durationSeconds,
-			verifiedAtMillis = now,
-		)
+		// One atomic read-and-replace per key. Finalizations run concurrently, and
+		// a separate read then write let a remember that could not tell store its
+		// stale "not a Short" over a proof that landed in between. Being a Short
+		// is a property of the upload, so the stored proof only ever turns on.
+		entries.compute("$packageName|$videoId") { key, current ->
+			beforeStore?.invoke(key)
+			Entry(
+				packageName = packageName,
+				videoId = videoId,
+				titleKey = titleKey,
+				channelKey = channelKey,
+				ownerHandleKey = ownerHandleKey,
+				durationSeconds = durationSeconds,
+				verifiedAtMillis = now,
+				provenShort = provenShort || current?.provenShort == true,
+			)
+		}
 		trimToSize()
 	}
 
@@ -92,6 +107,16 @@ object VerifiedIdentityCandidateCache {
 			.distinct()
 			.toList()
 	}
+
+	/**
+	 * Whether [videoId] was ever proven a Short while remembered for [packageName].
+	 *
+	 * Not a route and not a candidate filter: the cache still only names
+	 * candidates, which must be corroborated again. This only lets the result
+	 * keep the fact its first verification established.
+	 */
+	fun provesShort(packageName: String, videoId: String): Boolean =
+		entries["$packageName|$videoId"]?.provenShort == true
 
 	fun clear(packageName: String) {
 		entries.entries.removeIf { it.value.packageName == packageName }
