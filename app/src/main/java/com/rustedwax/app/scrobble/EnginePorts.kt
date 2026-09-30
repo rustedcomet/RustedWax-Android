@@ -101,6 +101,9 @@ internal class ShadowClaims(private val live: DedupClaims) : DedupClaims {
 internal interface RetryQueue {
 	fun size(): Int
 	fun due(): List<BroadcastQueue.Entry>
+
+	/** Every operation not yet settled, due or not. Read to arm the next wake-up. */
+	fun pending(): List<BroadcastQueue.Entry>
 	fun enqueue(
 		username: String,
 		json: String,
@@ -400,6 +403,8 @@ internal class LedgerClaims(private val ledger: DedupLedger) : DedupClaims {
 internal class StoredRetryQueue(private val queue: BroadcastQueue) : RetryQueue {
 	override fun size(): Int = queue.size()
 	override fun due(): List<BroadcastQueue.Entry> = queue.due()
+	override fun pending(): List<BroadcastQueue.Entry> =
+		queue.all().filter { it.state != BroadcastQueue.State.SETTLED }
 	override fun enqueue(
 		username: String,
 		json: String,

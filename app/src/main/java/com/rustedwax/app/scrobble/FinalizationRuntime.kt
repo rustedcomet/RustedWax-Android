@@ -382,6 +382,15 @@ object FinalizationRuntime {
 	private val _queueSize = MutableStateFlow(0)
 	val queueSize: StateFlow<Int> = _queueSize.asStateFlow()
 
+	/**
+	 * The one later reconsideration of the queue — see [QueueWakeup].
+	 *
+	 * Null until [init] installs the device's; replay installs its own through
+	 * [installQueueWakeupForReplay] or runs without one.
+	 */
+	@Volatile
+	private var queueWakeup: QueueWakeup? = null
+
 	@Synchronized
 	fun init(context: Context) {
 		if (initialised) return
@@ -397,6 +406,14 @@ object FinalizationRuntime {
 				metadata = YouTubePageResolver(factsCache),
 			),
 			CoroutineScope(SupervisorJob() + Dispatchers.IO),
+		)
+		// Not reconsidered here: the job and the alarm receiver call init first,
+		// and cancelling the job id from inside its own run would make the
+		// platform stop it. Every drain ends with a reconsideration, and the
+		// listener and activity drain on start.
+		queueWakeup = QueueWakeup(
+			alarm = QueueRetryAlarmReceiver.Alarm(appContext),
+			jobs = QueueRetryJobService.Jobs(appContext),
 		)
 		// After `install`, so a restored list cannot be cleared by the wiring,
 		// and inside the same `@Synchronized` call, so the lists are populated
@@ -502,7 +519,9 @@ object FinalizationRuntime {
 				onFeedback = onFeedback,
 			)
 
-			override fun retryDue() = retryQueuedPayloads()
+			override fun retryDue() {
+				retryQueuedPayloads()
+			}
 		}
 		finalizeTrack = FinalizeTrackUseCase(ProductionFinalizationOrchestrator(
 			scope = scope,
@@ -710,6 +729,7 @@ object FinalizationRuntime {
 		_recent.value = emptyList()
 		_skipped.value = emptyList()
 		_tracksWithoutVideoId.value = 0
+		queueWakeup = null
 		install(replayPorts, replayScope)
 	}
 
@@ -738,6 +758,12 @@ object FinalizationRuntime {
 		_skipped.value = emptyList()
 		_tracksWithoutVideoId.value = 0
 		_queueSize.value = 0
+		queueWakeup = null
+	}
+
+	/** Replay only: observe the wake-up the engine arms, against a scripted alarm. */
+	internal fun installQueueWakeupForReplay(wakeup: QueueWakeup?) {
+		queueWakeup = wakeup
 	}
 
 	val isReady: Boolean get() = initialised
@@ -1879,8 +1905,76 @@ object FinalizationRuntime {
 		dispatcher.retryDue()
 	}
 
+	/**
+	 * The drain [QueueRetryJobService] runs. Marks the wake-up as running first,
+	 * so the drain's own recompute does not re-arm — and so stop — the job doing
+	 * the work.
+	 *
+	 * The run is finished from the drain's own completion, not from anything the
+	 * service holds: the drain lives in this object's application-lifetime scope,
+	 * and the platform can stop the job or destroy the service while it is still
+	 * under the broadcast lock. When it ends — normally, failed or cancelled —
+	 * [onDrained] runs first (the service's `jobFinished`, if the job is still
+	 * its own), then the wake-up is re-armed from the queue. Both exactly once.
+	 */
+	internal fun flushQueueForWakeup(onDrained: () -> Unit = {}): Job? {
+		if (!initialised) return null
+		val wakeup = queueWakeup
+		val run = wakeup?.runStarted()
+		val drain = retryQueuedPayloads()
+		drain.invokeOnCompletion {
+			// A completion handler must not throw; neither half may stop the other.
+			runCatching(onDrained)
+			if (wakeup != null && run != null) runCatching { finishQueueWakeupRun(wakeup, run) }
+		}
+		return drain
+	}
+
+	/**
+	 * The wake-up alarm went off. Reads the durable queue only — no network —
+	 * and asks for the expedited drain job if something this account can send
+	 * is due. Returns what it did, or null without an engine or a wake-up.
+	 */
+	internal fun onQueueWakeupAlarm(): QueueWakeup.Delivery? {
+		if (!initialised) return null
+		val wakeup = queueWakeup ?: return null
+		val now = clock.nowMillis()
+		return wakeup.alarmFired(
+			nowMs = now,
+			dueNow = { queueDueNow(now) },
+			nextDueAtMs = { nextQueueDueAtMs(now) },
+		)
+	}
+
+	/** A wake-up drain ended; arm for whatever the queue owes next, or nothing. */
+	private fun finishQueueWakeupRun(wakeup: QueueWakeup, run: Long) {
+		val now = clock.nowMillis()
+		wakeup.runFinished(
+			run = run,
+			nowMs = now,
+			nextDueAtMs = { if (initialised) nextQueueDueAtMs(now) else null },
+			dueNow = { initialised && queueDueNow(now) },
+		)
+	}
+
+	/**
+	 * Recompute the wake-up after the queue changed. Called at the end of both
+	 * paths that write it, inside the broadcast lock, so it sees what they wrote.
+	 */
+	private fun reconsiderQueueWakeup() {
+		val wakeup = queueWakeup ?: return
+		val now = clock.nowMillis()
+		wakeup.reconsider(now, nextDueAtMs = { nextQueueDueAtMs(now) }, dueNow = { queueDueNow(now) })
+	}
+
+	private fun nextQueueDueAtMs(nowMs: Long): Long? =
+		QueueWakeup.nextDueAtMs(queue.pending(), vault.account?.username, nowMs)
+
+	private fun queueDueNow(nowMs: Long): Boolean =
+		QueueWakeup.hasDueEntry(queue.pending(), vault.account?.username, nowMs)
+
 	/** Transport-only queue retry. No finalized listen can enter this method. */
-	private fun retryQueuedPayloads() {
+	private fun retryQueuedPayloads(): Job =
 		scope.launch {
 			broadcastLock.withLock {
 				val account = vault.account ?: return@withLock
@@ -1902,10 +1996,10 @@ object FinalizationRuntime {
 					}
 				}
 				_queueSize.value = queue.size()
+				reconsiderQueueWakeup()
 				if (account.username.isNotEmpty()) ledger.prune()
 			}
 		}
-	}
 
 	private fun prepareQueuedEntry(entry: BroadcastQueue.Entry, key: com.rustedwax.hive.HiveKey) {
 		when (val preparation = broadcaster.prepareJson(entry.username, key, entry.json)) {
@@ -2366,6 +2460,7 @@ object FinalizationRuntime {
 					}
 				}
 				_queueSize.value = queue.size()
+				reconsiderQueueWakeup()
 			}
 		}
 	}
