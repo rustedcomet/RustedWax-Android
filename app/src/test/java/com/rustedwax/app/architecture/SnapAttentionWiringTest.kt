@@ -258,7 +258,6 @@ class SnapAttentionWiringTest {
 			"FOREGROUND_SERVICE",
 			"WAKE_LOCK",
 			"SCHEDULE_EXACT_ALARM",
-			"<receiver",
 			"androidx.work",
 		).forEach {
 			assertFalse(
@@ -266,10 +265,25 @@ class SnapAttentionWiringTest {
 				manifest.contains(it),
 			)
 		}
+		// Issue #9 B1's one exception, owner-authorized: the scrobble queue's
+		// retry alarm. It belongs to scrobbling, not to Snaps, and is held to its
+		// own gate in QueueWakeupWiringTest. No other receiver may appear.
+		val receivers = Regex("""<receiver[^>]*>""").findAll(manifest).map { it.value }.toList()
 		assertEquals(
-			"the three services that were already there, and no fourth",
-			3,
+			"a receiver other than the queue retry alarm was added",
+			listOf(".scrobble.QueueRetryAlarmReceiver"),
+			receivers.map { Regex("""android:name="([^"]+)"""").find(it)?.groupValues?.get(1) },
+		)
+		// Issue #9 added one: the queue's retry job. It belongs to scrobbling,
+		// not to Snaps, and is held to its own gate in QueueWakeupWiringTest.
+		assertEquals(
+			"the three services that were already there plus the queue retry job, and no other",
+			4,
 			Regex("""<service""").findAll(manifest).count(),
+		)
+		assertTrue(
+			"the fourth service is the queue retry job",
+			manifest.contains(".scrobble.QueueRetryJobService"),
 		)
 	}
 

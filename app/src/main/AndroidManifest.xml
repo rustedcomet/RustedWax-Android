@@ -82,6 +82,28 @@
 		</service>
 
 		<!--
+			Issue #9: one retry of the durable scrobble queue when an entry's
+			backoff elapses with nothing else awake to ask. The receiver is the
+			timing half: one inexact alarm, armed only while an entry is waiting
+			on a backoff and cancelled when the queue empties. It does no network
+			work; it schedules the job below. Not exported and no intent filter,
+			so only this app's own PendingIntent reaches it.
+		-->
+		<receiver
+			android:name=".scrobble.QueueRetryAlarmReceiver"
+			android:exported="false" />
+
+		<!--
+			The work half: one expedited run of the ordinary queue drain, with a
+			network constraint. Not exported; only the system's job scheduler can
+			bind it.
+		-->
+		<service
+			android:name=".scrobble.QueueRetryJobService"
+			android:exported="false"
+			android:permission="android.permission.BIND_JOB_SERVICE" />
+
+		<!--
 			Optional browser-evidence watcher. Off unless the user
 			enables it in Accessibility settings. Reads the URL bar plus exact
 			visible YouTube Shorts ad labels, and is scoped to browser packages

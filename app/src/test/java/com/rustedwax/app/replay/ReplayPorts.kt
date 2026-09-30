@@ -200,6 +200,9 @@ class ReplayRetryQueue(private val clock: Clock) : RetryQueue {
 			it.nextAttemptAtMs <= clock.nowMillis() && it.state != BroadcastQueue.State.SETTLED
 		}
 
+	override fun pending(): List<BroadcastQueue.Entry> =
+		entries.filter { it.state != BroadcastQueue.State.SETTLED }
+
 	override fun enqueue(
 		username: String,
 		json: String,
