@@ -1,6 +1,7 @@
 package com.rustedwax.app.snaps
 
 import com.rustedwax.hive.HiveBroadcaster
+import com.rustedwax.hive.HiveCommentRead
 import com.rustedwax.hive.HiveKey
 import com.rustedwax.hive.HivePreparationResult
 import com.rustedwax.hive.HiveRpc
@@ -53,6 +54,28 @@ interface SnapHivePort {
 	 * Defaulted so the publication fakes, which never edit, need not answer it.
 	 */
 	fun readComment(author: String, permlink: String): SnapChainComment? = null
+
+	/**
+	 * Up to [limit] answers about `author/permlink` from distinct Hive nodes
+	 * proven current, as consensus state holds it. What [SnapDeleter] gates on.
+	 * Empty when no current node could answer — which authorizes nothing.
+	 *
+	 * Defaulted so the publication fakes, which never delete, need not answer.
+	 */
+	fun readCommentState(author: String, permlink: String, limit: Int): List<HiveCommentRead> =
+		emptyList()
+
+	/**
+	 * Sign a `delete_comment` **for [author] and nobody else** — the same
+	 * account binding as [prepareComment]. Defaulted to a refusal so nothing
+	 * that was not built to delete can.
+	 */
+	fun prepareDelete(
+		operation: TxSerializer.DeleteCommentOp,
+		author: String,
+	): HivePreparationResult = HivePreparationResult.Failed(
+		HiveRpc.BroadcastResult.Rejected("Deleting isn't available here."),
+	)
 }
 
 internal class HiveSnapPort(
@@ -104,6 +127,15 @@ internal class HiveSnapPort(
 	 */
 	private val send: (PreparedHiveTransaction) -> HiveRpc.BroadcastResult = {
 		broadcaster.broadcastPrepared(it)
+	},
+	/** [sign]'s counterpart for deletions, for the same reason and with the same default. */
+	private val signDelete: (TxSerializer.DeleteCommentOp) -> HivePreparationResult = { operation ->
+		when (val key = loadKey()) {
+			null -> HivePreparationResult.Failed(
+				HiveRpc.BroadcastResult.Rejected("RustedWax couldn't read your posting key."),
+			)
+			else -> broadcaster.prepareDeleteComment(key, operation)
+		}
 	},
 ) : SnapHivePort {
 	override fun resolveContainer() = resolver.resolve()
@@ -177,6 +209,22 @@ internal class HiveSnapPort(
 
 	private fun refusal(message: String) =
 		HivePreparationResult.Failed(HiveRpc.BroadcastResult.Rejected(message))
+
+	/**
+	 * Sign a deletion, having proved the key belongs to its author — the
+	 * same three-way agreement [prepareComment] demands, for the same reason:
+	 * one posting key may authorize more than one account.
+	 */
+	override fun prepareDelete(
+		operation: TxSerializer.DeleteCommentOp,
+		author: String,
+	): HivePreparationResult {
+		accountMismatch(operation.author, author)?.let { return it }
+		return signDelete(operation)
+	}
+
+	override fun readCommentState(author: String, permlink: String, limit: Int): List<HiveCommentRead> =
+		runCatching { rpc.readCommentState(author, permlink, limit) }.getOrDefault(emptyList())
 
 	override fun observeTransaction(txId: String, expirationEpochSec: Long) =
 		broadcaster.observeTransaction(txId, expirationEpochSec)

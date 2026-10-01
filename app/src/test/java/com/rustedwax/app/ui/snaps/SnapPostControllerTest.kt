@@ -239,6 +239,33 @@ class SnapPostControllerTest {
 	}
 
 	@Test
+	fun `a proven root deletion clears only that account's card for that Snap`() {
+		val hive = Hive(inBlock())
+		val store = Store()
+		val reader = object : PostedSnapReader {
+			override fun read(author: String, permlink: String): PostedSnapContent? = null
+		}
+		var who = "alice"
+		val posts = drawingController(hive, store, reader) { who }
+		val key = SnapDraftKey.of("alice", eventId)
+		posts.post(key, eventId, media, "hello") {}
+		val contentId = posts.posted(key)!!.contentId
+
+		// Another account's report, or another Snap's, changes nothing.
+		who = "bob"
+		posts.applyDelete("alice", contentId)
+		who = "alice"
+		posts.applyDelete("alice", "alice/rustedwax-snap-other")
+		assertTrue(posts.posted(key) != null)
+
+		posts.applyDelete("alice", contentId)
+
+		assertEquals(null, posts.posted(key))
+		assertEquals(SnapPostStatus.Idle, posts.status(key))
+		assertEquals("deleting is not a post", 1, hive.broadcasts)
+	}
+
+	@Test
 	fun `posts once and reports the published state`() {
 		val hive = Hive(inBlock())
 		val posts = controller(hive, Store()) { "alice" }

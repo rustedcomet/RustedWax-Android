@@ -88,6 +88,11 @@ class HiveSnapPortAccountBindingTest {
 				HivePreparationResult.Ready(signed)
 			},
 			send = { sends++; sent += it; sendResult },
+			signDelete = {
+				signs++
+				if (!maySign) throw AssertionError("signing must not be reached after a refusal")
+				HivePreparationResult.Ready(signed)
+			},
 		)
 	}
 
@@ -286,6 +291,31 @@ class HiveSnapPortAccountBindingTest {
 
 			assertEquals("$why must not transmit", 0, port.sends)
 			assertEquals(emptyList<PreparedHiveTransaction>(), port.sent)
+		}
+	}
+
+	// ── prepareDelete: the same three identities ──────────────────────
+
+	@Test
+	fun `a delete for the vault's own account reaches signing`() {
+		val port = Port(vault = "alice", maySign = true)
+		val result = port.real.prepareDelete(TxSerializer.DeleteCommentOp("alice", "re-x"), author = "alice")
+		assertEquals(1, port.signs)
+		assertTrue(result is HivePreparationResult.Ready)
+	}
+
+	@Test
+	fun `a delete naming another author, or after an account switch, is refused before signing`() {
+		listOf(
+			Triple("alice", "bob", "alice"),
+			Triple("alice", "alice", "bob"),
+			Triple(null, "alice", "alice"),
+		).forEach { (vault, opAuthor, captured) ->
+			val port = Port(vault = vault)
+			val result = port.real.prepareDelete(TxSerializer.DeleteCommentOp(opAuthor, "re-x"), author = captured)
+			assertTrue(result is HivePreparationResult.Failed)
+			assertEquals(0, port.signs)
+			assertEquals(0, port.keyReads)
 		}
 	}
 }

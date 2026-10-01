@@ -273,6 +273,11 @@ internal fun SnapThreadSheet(
 								} else {
 									null
 								},
+								onDelete = if (threads.canDelete(it.author)) {
+									{ threads.requestDelete(root, root, SnapEditKind.ROOT, it.userText) }
+								} else {
+									null
+								},
 							)
 							HorizontalDivider(Modifier.padding(vertical = 8.dp))
 						}
@@ -370,6 +375,7 @@ internal fun SnapThreadSheet(
 					else -> Unit
 				}
 			}
+			threads.deleting?.takeIf { it.root == root }?.let { DeleteDialog(it, threads) }
 			// Editing borrows the bar: one box at the bottom of the sheet, aimed
 			// either at a new comment or at an existing one of the viewer's own.
 			val editing = threads.editing?.takeIf { it.root == root }
@@ -879,6 +885,9 @@ private fun ReplyBlock(
 		onEdit = SnapReplyTarget.of(reply)
 			?.takeIf { threads.canEdit(reply.author) }
 			?.let { target -> { threads.startEdit(root, target, SnapEditKind.REPLY, reply.body) } },
+		onDelete = SnapReplyTarget.of(reply)
+			?.takeIf { threads.canDelete(reply.author) }
+			?.let { target -> { threads.requestDelete(root, target, SnapEditKind.REPLY, reply.body) } },
 	)
 }
 
@@ -908,6 +917,8 @@ private fun CommentBlock(
 	onReplyTo: (SnapReplyTarget) -> Unit,
 	/** Present only on the viewer's own comments: puts this one in the bar. */
 	onEdit: (() -> Unit)? = null,
+	/** Present only on the viewer's own comments: asks Hive, then confirms. */
+	onDelete: (() -> Unit)? = null,
 ) {
 	val key = target?.let { threads.replyKey(it) }
 	val status = key?.let { threads.status(it) } ?: SnapPostStatus.Idle
@@ -964,6 +975,12 @@ private fun CommentBlock(
 					// differently from a refusal on purpose: one offers a re-read
 					// and the other does not.
 					likes.notice(target)?.let { ThreadNotice(it) }
+					val deleteNotice = threads.deleteNotice(target)
+					when (deleteNotice) {
+						is SnapPostStatus.Failed -> ThreadNotice(deleteNotice.message)
+						is SnapPostStatus.Uncertain -> ThreadNotice(deleteNotice.message)
+						else -> Unit
+					}
 					Row(
 						horizontalArrangement = Arrangement.spacedBy(4.dp),
 						verticalAlignment = Alignment.CenterVertically,
@@ -1009,6 +1026,25 @@ private fun CommentBlock(
 									modifier = Modifier
 										.clip(RoundedCornerShape(6.dp))
 										.clickable(onClickLabel = "Edit", onClick = edit)
+										.padding(vertical = 4.dp, horizontal = 2.dp),
+								)
+							}
+							onDelete?.let { delete ->
+								Spacer(Modifier.width(10.dp))
+								// An unproven deletion offers a read, never a
+								// second delete — the controller settles it.
+								val label = if (deleteNotice is SnapPostStatus.Uncertain) {
+									"Check deletion"
+								} else {
+									"Delete"
+								}
+								Text(
+									label,
+									style = MaterialTheme.typography.labelMedium,
+									color = MaterialTheme.colorScheme.onSurfaceVariant,
+									modifier = Modifier
+										.clip(RoundedCornerShape(6.dp))
+										.clickable(onClickLabel = label, onClick = delete)
 										.padding(vertical = 4.dp, horizontal = 2.dp),
 								)
 							}
@@ -1166,6 +1202,70 @@ private fun DiscardCorruptDraftDialog(onKeep: () -> Unit, onDiscard: () -> Unit)
 			}
 		},
 		dismissButton = { TextButton(onClick = onKeep) { Text("Keep it") } },
+	)
+}
+
+/**
+ * The one confirmation a deletion gets, naming exactly what goes.
+ *
+ * Delete is live only once the chain has just said yes; the deleter asks
+ * again before it signs. Cancel sends nothing. While the deletion runs the
+ * dialog stays, so the result is never inferred from the dialog going away.
+ */
+@Composable
+private fun DeleteDialog(request: SnapThreadController.Deleting, threads: SnapThreadController) {
+	val what = if (request.kind == SnapEditKind.ROOT) "Snap" else "reply"
+	val running = request.phase == SnapThreadController.DeletePhase.RUNNING
+	AlertDialog(
+		onDismissRequest = { if (!running) threads.cancelDelete() },
+		title = { Text("Delete this $what from Hive?") },
+		text = {
+			Column {
+				Text(
+					request.body,
+					style = MaterialTheme.typography.bodyMedium,
+					maxLines = 4,
+					overflow = TextOverflow.Ellipsis,
+				)
+				Spacer(Modifier.height(6.dp))
+				Text(
+					"@${request.target.author}/${request.target.permlink}",
+					style = MaterialTheme.typography.labelSmall,
+					color = MaterialTheme.colorScheme.onSurfaceVariant,
+				)
+				Spacer(Modifier.height(8.dp))
+				Text(
+					when (request.phase) {
+						SnapThreadController.DeletePhase.CHECKING -> "Checking Hive…"
+						SnapThreadController.DeletePhase.CONFIRM ->
+							"This can't be undone. The History entry and its scrobble stay."
+						SnapThreadController.DeletePhase.RUNNING -> "Deleting and confirming on Hive…"
+					},
+					style = MaterialTheme.typography.bodySmall,
+				)
+			}
+		},
+		confirmButton = {
+			TextButton(
+				onClick = threads::confirmDelete,
+				enabled = request.phase == SnapThreadController.DeletePhase.CONFIRM,
+			) {
+				// Red only while it can actually be pressed; the disabled state
+				// must not read as live while checking or deleting.
+				val live = request.phase == SnapThreadController.DeletePhase.CONFIRM
+				Text(
+					"Delete",
+					color = if (live) {
+						MaterialTheme.colorScheme.error
+					} else {
+						MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+					},
+				)
+			}
+		},
+		dismissButton = {
+			TextButton(onClick = threads::cancelDelete, enabled = !running) { Text("Cancel") }
+		},
 	)
 }
 

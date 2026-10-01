@@ -154,6 +154,23 @@ class HiveBroadcaster(private val rpc: HiveRpc = HiveRpc()) {
 	}
 
 	/**
+	 * Build and sign a `delete_comment` without broadcasting.
+	 *
+	 * There is deliberately no broadcast-in-one-call companion: a deletion is
+	 * only ever sent by a caller that has read the object's current state
+	 * first and will read it again afterwards, and that caller needs the
+	 * prepared id to reconcile against.
+	 */
+	fun prepareDeleteComment(
+		key: HiveKey,
+		operation: TxSerializer.DeleteCommentOp,
+	): HivePreparationResult {
+		validateDelete(operation)?.let { return it }
+		val props = chainHead().getOrElse { return chainHeadUnavailable(it) }
+		return prepareOperation(key, operation, props)
+	}
+
+	/**
 	 * Prepare and broadcast a comment in one call.
 	 *
 	 * Convenience only, and *not* what a real Snap post should use: a caller
@@ -249,6 +266,13 @@ class HiveBroadcaster(private val rpc: HiveRpc = HiveRpc()) {
 		return null
 	}
 
+	private fun validateDelete(op: TxSerializer.DeleteCommentOp): HivePreparationResult.Failed? {
+		if (op.author.isBlank()) return reject("no signed-in Hive account to delete as")
+		if (op.permlink.isBlank()) return reject("nothing named to delete")
+		if (op.permlink.length > MAX_PERMLINK_LENGTH) return reject("permlink is too long")
+		return null
+	}
+
 	private fun validateVote(op: TxSerializer.VoteOp): HivePreparationResult.Failed? {
 		if (op.voter.isBlank()) return reject("no signed-in Hive account to vote as")
 		if (op.author.isBlank()) return reject("Like has no target author")
@@ -306,6 +330,10 @@ class HiveBroadcaster(private val rpc: HiveRpc = HiveRpc()) {
 			.put("title", op.title)
 			.put("body", op.body)
 			.put("json_metadata", op.jsonMetadata)
+
+		is TxSerializer.DeleteCommentOp -> "delete_comment" to JSONObject()
+			.put("author", op.author)
+			.put("permlink", op.permlink)
 
 		// `weight` is a JSON *number*, not a string — a quoted weight is
 		// rejected by some nodes and silently coerced by others.

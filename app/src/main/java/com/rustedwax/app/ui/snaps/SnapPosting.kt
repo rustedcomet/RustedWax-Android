@@ -198,6 +198,26 @@ class SnapPostController(
 	}
 
 	/**
+	 * A root Snap was proven deleted from Hive: stop drawing it on its card.
+	 *
+	 * Only after [com.rustedwax.app.snaps.SnapDeleter] proved the object gone
+	 * and retired its confirmed record, and matched by `author/permlink` within
+	 * [account]'s own keys. The History row itself — the scrobble — is not
+	 * this controller's and is untouched; the card simply has no Snap again.
+	 */
+	fun applyDelete(account: String, contentId: String) {
+		if (this.account()?.takeIf { it.isNotBlank() } != account) return
+		val prefix = SnapDraftKey.of(account, "")
+		posted.entries
+			.filter { it.key.startsWith(prefix) && it.value.contentId == contentId }
+			.map { it.key }
+			.forEach { key ->
+				posted.remove(key)
+				statuses.remove(key)
+			}
+	}
+
+	/**
 	 * True while this card must not accept another Post tap.
 	 *
 	 * Answered by whether an attempt is *running*, not by how the card reads.
