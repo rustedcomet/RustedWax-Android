@@ -90,9 +90,9 @@ object PostedSnapBody {
 	// shortens what this returns.
 	//
 	// An earlier revision cut the text at 1000 UTF-16 units before drawing it.
-	// That unit is the wrong one twice over: the composer's rule is 200 grapheme
-	// clusters, and a cluster can be many units — 200 family emoji are a legal
-	// Snap and about 2200 units, so a perfectly valid Snap was being cut in
+	// That unit is the wrong one twice over: the composer's rule is 280 grapheme
+	// clusters, and a cluster can be many units — 280 family emoji are a legal
+	// Snap and about 3000 units, so a perfectly valid Snap was being cut in
 	// half, and cut at a boundary that has nothing to do with where characters
 	// begin and end. Whatever the composer accepted, the card shows. All of it.
 

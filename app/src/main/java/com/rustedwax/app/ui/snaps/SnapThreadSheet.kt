@@ -50,6 +50,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rustedwax.app.snaps.PostedSnap
 import com.rustedwax.app.snaps.SnapAge
+import com.rustedwax.app.snaps.SnapEditKind
 import com.rustedwax.app.snaps.SnapReply
 import com.rustedwax.app.snaps.SnapReplyTarget
 import com.rustedwax.app.snaps.SnapThreadNode
@@ -144,7 +145,7 @@ internal data class SnapRootComposing(
 /**
  * The whole conversation under one Snap, with room to read it.
  *
- * This is the screen the 200-character limit does **not** apply to. RustedWax's
+ * This is the screen the 280-character limit does **not** apply to. RustedWax's
  * limit binds what RustedWax creates; a reply written in any other Hive client
  * may be as long as Hive allows, and here it is shown complete — no `maxLines`,
  * no ellipsis, no "read more". The History card is where a long reply is
@@ -216,90 +217,110 @@ internal fun SnapThreadSheet(
 				return@ModalBottomSheet
 			}
 
-			// The root Snap, and the one place to reply to it directly.
-			rootSnap?.let {
-				CommentBlock(
-					author = it.author,
-					createdAtEpochSec = it.createdAtEpochSec,
-					body = it.userText,
-					depth = 0,
-					nowEpochSec = nowEpochSec,
-					root = root,
-					target = root,
-					threads = threads,
-					likes = likes,
-					// The root of a History thread is always this user's own
-					// Snap — `PostedSnaps` refuses to draw a confirmed row whose
-					// author is anybody else — so it never gets a heart, and
-					// `SnapLikeController.showsHeart` is what enforces that
-					// rather than this argument. No vote state is carried for it
-					// because the thread builder drops the root from the tree.
-					viewerVote = ViewerVote.Unreadable("the root Snap is your own"),
-					// The root's own Like count *is* carried: it is the Snap
-					// this user posted, and how many people liked it is the
-					// part they most want to see. The heart beside it stays
-					// non-interactive — see [SocialLikeCount].
-					likeCount = threads.thread(root)?.rootLikeCount ?: 0,
-					onReplyTo = { replyTarget = it },
-				)
-				HorizontalDivider(Modifier.padding(vertical = 8.dp))
+			// The root Snap and every reply live in **one** scrolling list.
+			//
+			// The root used to sit above the list, pinned. A long root — and 280
+			// characters is long on a phone — then took all the height the
+			// keyboard left over: the replies collapsed to nothing, nothing could
+			// be scrolled, and the composer's own counter was pushed under the
+			// keyboard. As the first item of the same list it scrolls away like
+			// any other comment, and the list (weighted) is what gives way.
+			val load = threads.state(root)
+			if (load is SnapThreadLoad.Ready) {
+				// Hive is authoritative. A conversation that has just been
+				// re-read describes these comments more recently than any local
+				// answer from a previous tap, so the freshly-read vote state
+				// retires it — except for an attempt still in flight, and an
+				// ambiguous one the read did not answer. See
+				// [SnapLikeController.reconcile].
+				LaunchedEffect(load.thread) { likes.reconcile(load.thread) }
 			}
-
-			when (val load = threads.state(root)) {
-				null, SnapThreadLoad.Loading -> Text(
-					"Loading replies…",
-					style = MaterialTheme.typography.bodySmall,
-					color = MaterialTheme.colorScheme.onSurfaceVariant,
-					modifier = Modifier.weight(1f),
-				)
-
-				is SnapThreadLoad.Unavailable -> Column(Modifier.weight(1f)) {
-					Text(
-						load.message,
-						style = MaterialTheme.typography.bodySmall,
-						color = MaterialTheme.colorScheme.onSurfaceVariant,
-					)
-					Spacer(Modifier.height(6.dp))
-					WaxOutlinedButton(
-						onClick = { threads.load(root, force = true) },
-						icon = WaxIcons.Send,
-					) {
-						Text("Try again")
+			LazyColumn(
+				verticalArrangement = Arrangement.spacedBy(4.dp),
+				// Takes the slack between the header and the composer, so the
+				// composer stays on the bottom edge — above the keyboard when it
+				// is open — and only the conversation moves.
+				modifier = Modifier.weight(1f).fillMaxWidth(),
+			) {
+				// The root Snap, and the one place to reply to it directly.
+				// Keys cannot collide with a reply's: those are `author/permlink`.
+				rootSnap?.let {
+					item(key = "root") {
+						Column {
+							CommentBlock(
+								author = it.author,
+								createdAtEpochSec = it.createdAtEpochSec,
+								body = it.userText,
+								depth = 0,
+								nowEpochSec = nowEpochSec,
+								root = root,
+								target = root,
+								threads = threads,
+								likes = likes,
+								// The root of a History thread is always this user's
+								// own Snap — `PostedSnaps` refuses to draw a confirmed
+								// row whose author is anybody else — so it never gets
+								// a heart, and `SnapLikeController.showsHeart` is what
+								// enforces that rather than this argument.
+								viewerVote = ViewerVote.Unreadable("the root Snap is your own"),
+								// The root's own Like count *is* carried; the heart
+								// beside it stays non-interactive — see
+								// [SocialLikeCount].
+								likeCount = threads.thread(root)?.rootLikeCount ?: 0,
+								onReplyTo = { replyTarget = it },
+								onEdit = if (threads.canEdit(it.author)) {
+									{ threads.startEdit(root, root, SnapEditKind.ROOT, it.userText) }
+								} else {
+									null
+								},
+							)
+							HorizontalDivider(Modifier.padding(vertical = 8.dp))
+						}
 					}
 				}
 
-				is SnapThreadLoad.Ready -> {
-					// Hive is authoritative. A conversation that has just been
-					// re-read describes these comments more recently than any
-					// local answer from a previous tap, so the freshly-read vote
-					// state retires it — except for an attempt still in flight,
-					// and an ambiguous one the read did not answer. See
-					// [SnapLikeController.reconcile].
-					LaunchedEffect(load.thread) { likes.reconcile(load.thread) }
-					// The complete conversation, every valid reply of it. The list
-					// is whole and `LazyColumn` is what makes reading it
-					// incremental: it composes the rows on screen and no more, so
-					// a thread of five thousand costs what a thread of five does
-					// until the reader scrolls.
-					val nodes = load.thread.rows
-					if (nodes.isEmpty()) {
+				when (load) {
+					null, SnapThreadLoad.Loading -> item(key = "status") {
 						Text(
-							"No replies yet.",
+							"Loading replies…",
 							style = MaterialTheme.typography.bodySmall,
 							color = MaterialTheme.colorScheme.onSurfaceVariant,
-							modifier = Modifier.weight(1f),
 						)
-					} else {
-						LazyColumn(
-							verticalArrangement = Arrangement.spacedBy(4.dp),
-							// Bounded, so an enormous conversation scrolls inside
-							// the sheet instead of measuring itself against
-							// infinity.
-							// Takes the slack between the root Snap and the composer,
-						// so the composer stays on the bottom edge and only the
-						// conversation moves.
-						modifier = Modifier.weight(1f),
-						) {
+					}
+
+					is SnapThreadLoad.Unavailable -> item(key = "status") {
+						Column {
+							Text(
+								load.message,
+								style = MaterialTheme.typography.bodySmall,
+								color = MaterialTheme.colorScheme.onSurfaceVariant,
+							)
+							Spacer(Modifier.height(6.dp))
+							WaxOutlinedButton(
+								onClick = { threads.load(root, force = true) },
+								icon = WaxIcons.Send,
+							) {
+								Text("Try again")
+							}
+						}
+					}
+
+					// The complete conversation, every valid reply of it. The list
+					// is whole and `LazyColumn` is what makes reading it
+					// incremental: it composes the rows on screen and no more, so a
+					// thread of five thousand costs what a thread of five does
+					// until the reader scrolls.
+					is SnapThreadLoad.Ready -> {
+						val nodes = load.thread.rows
+						if (nodes.isEmpty()) {
+							item(key = "status") {
+								Text(
+									"No replies yet.",
+									style = MaterialTheme.typography.bodySmall,
+									color = MaterialTheme.colorScheme.onSurfaceVariant,
+								)
+							}
+						} else {
 							// Keyed by the comment's own chain identity, which the
 							// builder has already de-duplicated, so a refresh that
 							// adds a reply cannot hand one comment's composition to
@@ -349,15 +370,22 @@ internal fun SnapThreadSheet(
 					else -> Unit
 				}
 			}
-			ThreadComposerBar(
-				root = root,
-				target = replyTarget ?: root,
-				aimed = replyTarget,
-				threads = threads,
-				viewer = viewer,
-				onSent = { sentKey = it },
-				onClearTarget = { replyTarget = null },
-			)
+			// Editing borrows the bar: one box at the bottom of the sheet, aimed
+			// either at a new comment or at an existing one of the viewer's own.
+			val editing = threads.editing?.takeIf { it.root == root }
+			if (editing != null) {
+				EditComposerBar(editing = editing, threads = threads, viewer = viewer)
+			} else {
+				ThreadComposerBar(
+					root = root,
+					target = replyTarget ?: root,
+					aimed = replyTarget,
+					threads = threads,
+					viewer = viewer,
+					onSent = { sentKey = it },
+					onClearTarget = { replyTarget = null },
+				)
+			}
 			Spacer(Modifier.height(12.dp))
 		}
 	}
@@ -531,7 +559,7 @@ private fun ThreadComposerBar(
  * for one sentence of typing. At rest this is a single row about as tall as any
  * other input, and it grows a few lines at most as the text does.
  *
- * The 200-character rule is unchanged and simply stops being *narrated*: the
+ * The 280-character rule is unchanged and simply stops being *narrated*: the
  * count appears only once the limit is actually in sight, and Send is inert
  * until [SnapText.isValid] agrees — the same gate that was there before.
  */
@@ -546,6 +574,7 @@ private fun ComposerPill(
 	onSend: () -> Unit,
 	/** Absent for an empty draft: asking about nothing trains people to tap No. */
 	onDiscard: (() -> Unit)?,
+	sendLabel: String = "Send",
 ) {
 	val overflowing = SnapText.isOverflowing(draft)
 	Row(
@@ -594,7 +623,7 @@ private fun ComposerPill(
 				IconButton(onClick = onSend, enabled = canSend, modifier = Modifier.size(36.dp)) {
 					Icon(
 						WaxIcons.Send,
-						contentDescription = "Send",
+						contentDescription = sendLabel,
 						tint = if (canSend) {
 							MaterialTheme.colorScheme.primary
 						} else {
@@ -663,6 +692,81 @@ private fun QuickEmojiRow(onPick: (String) -> Unit) {
 					.padding(horizontal = 6.dp, vertical = 5.dp),
 			)
 		}
+	}
+}
+
+/**
+ * The bottom bar while one of the viewer's own comments is being edited.
+ *
+ * The same pill, filled with the comment's current words and held to the same
+ * limit. Save is dead until the text is valid *and* different — unchanged
+ * words are not an edit. The comment above keeps its old words until Hive has
+ * the new ones; a save that fails leaves this box open on what was typed, with
+ * the reason above it, so nothing has to be retyped.
+ */
+@Composable
+private fun EditComposerBar(
+	editing: SnapThreadController.Editing,
+	threads: SnapThreadController,
+	viewer: String?,
+) {
+	val focus = remember { FocusRequester() }
+	val focusManager = LocalFocusManager.current
+	val keyboard = LocalSoftwareKeyboardController.current
+	val text = threads.editText
+	val saving = threads.isSavingEdit
+	val what = if (editing.kind == SnapEditKind.ROOT) "Snap" else "reply"
+
+	Column(Modifier.fillMaxWidth()) {
+		LaunchedEffect(editing.target.contentId) { runCatching { focus.requestFocus() } }
+		when (val st = threads.editStatus) {
+			is SnapPostStatus.Failed -> ThreadNotice(st.message)
+			is SnapPostStatus.Uncertain -> ThreadNotice(st.message)
+			else -> Unit
+		}
+		Row(
+			Modifier
+				.fillMaxWidth()
+				.background(MaterialTheme.colorScheme.surfaceContainerHighest)
+				.padding(horizontal = 12.dp, vertical = 6.dp),
+			verticalAlignment = Alignment.CenterVertically,
+		) {
+			Text(
+				if (saving) "Saving your $what…" else "Editing your $what",
+				style = MaterialTheme.typography.labelMedium,
+				color = MaterialTheme.colorScheme.onSurfaceVariant,
+				maxLines = 1,
+				overflow = TextOverflow.Ellipsis,
+				modifier = Modifier.weight(1f),
+			)
+			if (!saving) {
+				Icon(
+					WaxIcons.Close,
+					contentDescription = "Stop editing",
+					tint = MaterialTheme.colorScheme.onSurfaceVariant,
+					modifier = Modifier
+						.size(18.dp)
+						.clickable(onClickLabel = "Cancel edit", onClick = threads::cancelEdit),
+				)
+			}
+		}
+		QuickEmojiRow { if (!saving) threads.editDraft(text + it) }
+		ComposerPill(
+			viewer = viewer ?: editing.target.author,
+			draft = text,
+			hint = "Edit your $what…",
+			canSend = SnapText.isValid(text) && text != editing.original && !saving,
+			focus = focus,
+			onDraftChange = threads::editDraft,
+			onSend = {
+				threads.saveEdit()
+				// See [ThreadComposerBar]: end the IME session with the tap.
+				focusManager.clearFocus()
+				keyboard?.hide()
+			},
+			onDiscard = null,
+			sendLabel = "Save edit",
+		)
 	}
 }
 
@@ -772,6 +876,9 @@ private fun ReplyBlock(
 		// the heart re-reads the chain before anything is signed.
 		viewerVote = reply.viewerVote,
 		onReplyTo = onReplyTo,
+		onEdit = SnapReplyTarget.of(reply)
+			?.takeIf { threads.canEdit(reply.author) }
+			?.let { target -> { threads.startEdit(root, target, SnapEditKind.REPLY, reply.body) } },
 	)
 }
 
@@ -799,6 +906,8 @@ private fun CommentBlock(
 	likeCount: Int,
 	/** Aims the sheet's one composer at this comment. */
 	onReplyTo: (SnapReplyTarget) -> Unit,
+	/** Present only on the viewer's own comments: puts this one in the bar. */
+	onEdit: (() -> Unit)? = null,
 ) {
 	val key = target?.let { threads.replyKey(it) }
 	val status = key?.let { threads.status(it) } ?: SnapPostStatus.Idle
@@ -889,6 +998,20 @@ private fun CommentBlock(
 									}
 									.padding(vertical = 4.dp, horizontal = 2.dp),
 							)
+							// Only the author's own, and never on a comment whose
+							// outcome is still being settled.
+							onEdit?.let { edit ->
+								Spacer(Modifier.width(10.dp))
+								Text(
+									"Edit",
+									style = MaterialTheme.typography.labelMedium,
+									color = MaterialTheme.colorScheme.onSurfaceVariant,
+									modifier = Modifier
+										.clip(RoundedCornerShape(6.dp))
+										.clickable(onClickLabel = "Edit", onClick = edit)
+										.padding(vertical = 4.dp, horizontal = 2.dp),
+								)
+							}
 						}
 					}
 				}

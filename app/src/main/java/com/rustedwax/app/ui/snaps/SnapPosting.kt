@@ -181,6 +181,23 @@ class SnapPostController(
 	fun posted(key: String): PostedSnap? = posted[key]
 
 	/**
+	 * A root Snap's words were edited on chain: draw the new ones on its card.
+	 *
+	 * Display only, and only after [com.rustedwax.app.snaps.SnapEditor] proved
+	 * the edit. Matched by `author/permlink` within [account]'s own keys, so an
+	 * edit can only ever reach the card of the Snap that was edited, and only
+	 * while that account is still the one signed in.
+	 */
+	fun applyEdit(account: String, contentId: String, userText: String) {
+		if (this.account()?.takeIf { it.isNotBlank() } != account) return
+		val prefix = SnapDraftKey.of(account, "")
+		posted.entries
+			.filter { it.key.startsWith(prefix) && it.value.contentId == contentId }
+			.map { it.key to it.value }
+			.forEach { (key, snap) -> posted[key] = snap.copy(userText = userText) }
+	}
+
+	/**
 	 * True while this card must not accept another Post tap.
 	 *
 	 * Answered by whether an attempt is *running*, not by how the card reads.
@@ -628,8 +645,10 @@ class SnapPostController(
 		val who = account()?.takeIf { it.isNotBlank() } ?: return
 		if (key != SnapDraftKey.of(who, eventId)) return
 		val source = postedSnaps() ?: return
+		val before = posted[key]
 		withContext(io) { runCatching { source.refreshed(who, eventId) }.getOrNull() }?.let {
-			if (account() == who) posted[key] = it
+			// A confirmed edit may have replaced this card while the read ran.
+			if (account() == who && posted[key] == before) posted[key] = it
 		}
 	}
 

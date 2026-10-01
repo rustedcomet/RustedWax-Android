@@ -201,12 +201,30 @@ class SnapReplyPublicationTest {
 		val hive = FakeHive(mutableListOf(inBlock()))
 
 		// A root Snap body is the user text plus a generated tail, so it is far
-		// past 200 clusters by the time it is signed — and must still publish.
+		// past 280 clusters by the time it is signed — and must still publish.
 		val outcome = publisher(hive, MemoryStore())
-			.publishRoot(account, "event-1", SnapMedia("8pSS6wdojqY"), "a".repeat(200))
+			.publishRoot(account, "event-1", SnapMedia("8pSS6wdojqY"), "a".repeat(280))
 
 		assertTrue(outcome is SnapPublisher.Outcome.Published)
 		assertTrue(hive.preparedOps.single().body.contains("#scrobblelife"))
+		assertTrue(hive.preparedOps.single().body.startsWith("a".repeat(280) + "\n\n"))
+	}
+
+	/** The user's own words are held to the limit; the generated tail is not. */
+	@Test
+	fun `a root Snap of 281 characters is refused before anything is staged`() {
+		val hive = FakeHive(mutableListOf(inBlock()))
+		val store = MemoryStore()
+		val pub = publisher(hive, store)
+
+		val intended = pub.intendRoot(account, "event-1", SnapMedia("8pSS6wdojqY"), "a".repeat(281))
+		val published = pub.publishRoot(account, "event-2", SnapMedia("8pSS6wdojqY"), "a".repeat(281))
+
+		assertTrue(intended is SnapPublisher.Staged.Failed)
+		assertTrue(published is SnapPublisher.Outcome.Failed)
+		assertTrue(store.saved.isEmpty())
+		assertTrue(hive.preparedOps.isEmpty())
+		assertEquals(0, hive.broadcasts)
 	}
 
 	// ── the ordering that makes reconciliation possible ────────────────
@@ -502,11 +520,11 @@ class SnapReplyPublicationTest {
 	 * is at stake is a permanent public comment.
 	 */
 	@Test
-	fun `a reply of 201 clusters is refused at the publication boundary`() {
+	fun `a reply of 281 clusters is refused at the publication boundary`() {
 		val hive = FakeHive(mutableListOf(inBlock()))
 
 		val outcome = publisher(hive, MemoryStore())
-			.publishReply(account, target, intent, "a".repeat(201))
+			.publishReply(account, target, intent, "a".repeat(281))
 
 		assertTrue(outcome is SnapPublisher.Outcome.Failed)
 		assertEquals(0, hive.broadcasts)
@@ -514,24 +532,24 @@ class SnapReplyPublicationTest {
 	}
 
 	@Test
-	fun `a reply of exactly 200 clusters is accepted at the publication boundary`() {
+	fun `a reply of exactly 280 clusters is accepted at the publication boundary`() {
 		val hive = FakeHive(mutableListOf(inBlock()))
 
 		val outcome = publisher(hive, MemoryStore())
-			.publishReply(account, target, intent, "a".repeat(200))
+			.publishReply(account, target, intent, "a".repeat(280))
 
 		assertTrue(outcome is SnapPublisher.Outcome.Published)
 		assertEquals(1, hive.broadcasts)
 	}
 
-	/** 200 family emoji is 200 characters, not 2200. */
+	/** 280 family emoji is 280 characters, not about 3000. */
 	@Test
 	fun `the boundary counts grapheme clusters, not UTF-16 units`() {
 		val hive = FakeHive(mutableListOf(inBlock()))
 		val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67\u200D\uD83D\uDC66"
 
 		val outcome = publisher(hive, MemoryStore())
-			.publishReply(account, target, intent, family.repeat(200))
+			.publishReply(account, target, intent, family.repeat(280))
 
 		assertTrue(outcome is SnapPublisher.Outcome.Published)
 		assertTrue(hive.preparedOps.single().body.length > 2_000)

@@ -1338,31 +1338,32 @@ class SnapThreadControllerTest {
 
 	// ── the character rule ─────────────────────────────────────────────
 
-	/** Exactly 200 clusters is inside the limit; 201 is not. */
+	/** Exactly 280 clusters is inside the limit; 281 is not. */
 	@Test
-	fun `the 200 cluster boundary is where a reply stops being sendable`() {
+	fun `the 280 cluster boundary is where a reply stops being sendable`() {
 		val hive = Hive(inBlock())
 		val threads = controller(hive) { "alice" }
 		val key = threads.replyKey(root)
 
-		threads.edit(key, "a".repeat(201))
+		threads.edit(key, "a".repeat(281))
 		threads.send(root, root)
-		assertEquals("201 must not send", 0, hive.broadcasts)
+		assertEquals("281 must not send", 0, hive.broadcasts)
 
-		threads.edit(key, "a".repeat(200))
+		threads.edit(key, "a".repeat(280))
 		threads.send(root, root)
-		assertEquals("200 must send", 1, hive.broadcasts)
+		assertEquals("280 must send", 1, hive.broadcasts)
+		assertEquals("a".repeat(280), hive.preparedOps.single().body)
 	}
 
 	/** One family emoji is one character, not eleven UTF-16 units. */
 	@Test
-	fun `a reply of 200 family emoji is inside the limit`() {
+	fun `a reply of 280 family emoji is inside the limit`() {
 		val hive = Hive(inBlock())
 		val threads = controller(hive) { "alice" }
 		val key = threads.replyKey(root)
 		val family = "👨‍👩‍👧‍👦"
 
-		threads.edit(key, family.repeat(200))
+		threads.edit(key, family.repeat(280))
 		threads.send(root, root)
 
 		assertEquals(1, hive.broadcasts)
