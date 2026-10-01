@@ -15,10 +15,10 @@ locally on the Android device.
 
 ## Download
 
-The current public release is **RustedWax v0.12.0**.
+The current public release is **RustedWax v0.12.2**.
 
-1. Open the [v0.12.0 GitHub Release](https://github.com/rustedcomet/RustedWax-Android/releases/tag/v0.12.0).
-2. Download `rustedwax-v0.12.0-release.apk`.
+1. Open the [v0.12.2 GitHub Release](https://github.com/rustedcomet/RustedWax-Android/releases/tag/v0.12.2).
+2. Download `rustedwax-v0.12.2-release.apk`.
 3. Optionally verify it against the published
    [release identity and checksum](Documentation/Product/RELEASE_VERIFICATION.md).
 4. Install it on Android 8.0 or newer and follow the
@@ -54,7 +54,7 @@ Snaps cannot yet be created from Now; they start with finalized History items.
 
 ## Screenshots
 
-These owner-approved images show earlier UI, not the v0.12.0 layout. In the
+These owner-approved images show earlier UI, not the v0.12.2 layout. In the
 current release, History uses full-width artwork and does not display
 transaction IDs on its cards; Now also uses full-width artwork.
 
