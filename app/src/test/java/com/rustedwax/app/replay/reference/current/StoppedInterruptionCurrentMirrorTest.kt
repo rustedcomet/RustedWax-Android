@@ -2,6 +2,7 @@ package com.rustedwax.app.replay.reference.current
 
 import com.rustedwax.app.detect.SessionSnapshot
 import com.rustedwax.app.detect.NativePreResolvedRoute
+import com.rustedwax.app.detect.RustedWaxUiVisibility
 import com.rustedwax.app.detect.StoppedInterruption
 import com.rustedwax.app.replay.reference.phase01.Context
 import com.rustedwax.app.replay.reference.phase01.MediaController
@@ -30,8 +31,9 @@ class StoppedInterruptionCurrentMirrorTest {
 		val finalized: MutableList<SessionSnapshot>,
 	)
 
-	private fun run(): Run {
+	private fun run(displayOn: Boolean = false, startPositionMs: Long = 71_065): Run {
 		resetSharedState()
+		RustedWaxUiVisibility.paused()
 		TrackProgressCarry.clear()
 		val time = VirtualTime()
 		SystemClock.current = time
@@ -47,7 +49,7 @@ class StoppedInterruptionCurrentMirrorTest {
 				),
 				PlaybackState(
 					PlaybackState.STATE_PLAYING,
-					position = 71_065,
+					position = startPositionMs,
 					lastPositionUpdateTime = time.elapsedRealtime(),
 				),
 			)
@@ -57,7 +59,7 @@ class StoppedInterruptionCurrentMirrorTest {
 		val probe = SessionProbe(
 			Context(manager),
 			acceptsPackage = { true },
-			displayInteractive = { false },
+			displayInteractive = { displayOn },
 		).also { it.onTrackFinalized = { snapshot -> finalized += snapshot } }
 		probe.start()
 		time.drain()
@@ -176,8 +178,22 @@ class StoppedInterruptionCurrentMirrorTest {
 		return probe.sessions.value.single().playedMs
 	}
 
+	/**
+	 * What a YouTube without background play publishes when it leaves the screen:
+	 * the same reset-and-restore pair as a lock, with the display still on.
+	 */
+	private fun Run.playerLeavesScreenAfter(playedMs: Long, startPositionMs: Long = 71_065): Long {
+		time.advance(playedMs)
+		val position = startPositionMs + playedMs
+		controller.publishPlaybackState(PlaybackState(PlaybackState.STATE_STOPPED, position = 0))
+		controller.publishPlaybackState(PlaybackState(PlaybackState.STATE_STOPPED, position = position))
+		time.drain()
+		return position
+	}
+
 	@After
 	fun tearDown() {
+		RustedWaxUiVisibility.paused()
 		TrackProgressCarry.clear()
 		VirtualSystem.useRealTime()
 		resetSharedState()
@@ -260,6 +276,144 @@ class StoppedInterruptionCurrentMirrorTest {
 		run.time.advance(20_001)
 
 		assertEquals(0, run.replaceAndReadPlayedMs())
+		run.probe.stop(finalizeTracks = false)
+	}
+
+	// ---- RustedWax itself in front (Issue #3) ---------------------------------
+
+	@Test
+	fun `opening RustedWax over the player holds the listen and credits nothing`() {
+		val run = run(displayOn = true)
+		RustedWaxUiVisibility.resumed()
+		run.playerLeavesScreenAfter(20_000)
+		val beforeStop = run.probe.sessions.value.single()
+
+		run.time.advance(SessionProbe.NATIVE_STOPPED_FINALIZE_GRACE_MS * 3)
+		run.probe.tick()
+
+		assertEquals("RustedWax in front must not end the listen", 0, run.finalized.size)
+		val held = run.probe.sessions.value.single()
+		assertEquals("STOPPED time is never credited", beforeStop.playedMs, held.playedMs)
+		assertTrue(beforeStop.playedMs >= 19_000)
+		run.probe.stop(finalizeTracks = false)
+	}
+
+	@Test
+	fun `returning from RustedWax continues the same listen`() {
+		val run = run(displayOn = true)
+		RustedWaxUiVisibility.resumed()
+		val position = run.playerLeavesScreenAfter(20_000)
+		val beforeStop = run.probe.sessions.value.single()
+		run.time.advance(15_000)
+
+		RustedWaxUiVisibility.paused()
+		// What the A36 published on return: BUFFERING, then PLAYING.
+		run.controller.publishPlaybackState(
+			PlaybackState(PlaybackState.STATE_BUFFERING, position = position),
+		)
+		run.controller.publishPlaybackState(
+			PlaybackState(
+				PlaybackState.STATE_PLAYING,
+				position = position,
+				lastPositionUpdateTime = run.time.elapsedRealtime(),
+			),
+		)
+		run.time.advance(10_000)
+		run.probe.tick()
+
+		assertEquals("no fragment was filed", 0, run.finalized.size)
+		val resumed = run.probe.sessions.value.single()
+		assertEquals("one listen, not a new one", beforeStop.trackStartedAtEpochSec, resumed.trackStartedAtEpochSec)
+		assertEquals(
+			"prior progress plus only the watched ten seconds",
+			beforeStop.playedMs + 10_000,
+			resumed.playedMs,
+		)
+		run.probe.stop(finalizeTracks = false)
+	}
+
+	@Test
+	fun `another app in front still ends the listen at the old grace`() {
+		val run = run(displayOn = true)
+		run.playerLeavesScreenAfter(20_000)
+
+		run.time.advance(SessionProbe.NATIVE_STOPPED_FINALIZE_GRACE_MS)
+
+		assertEquals(1, run.finalized.size)
+		run.probe.stop(finalizeTracks = false)
+	}
+
+	@Test
+	fun `leaving RustedWax for another app ends the hold at the next check`() {
+		val run = run(displayOn = true)
+		RustedWaxUiVisibility.resumed()
+		run.playerLeavesScreenAfter(20_000)
+		val beforeStop = run.probe.sessions.value.single()
+		run.time.advance(SessionProbe.NATIVE_STOPPED_FINALIZE_GRACE_MS)
+		assertEquals(0, run.finalized.size)
+
+		RustedWaxUiVisibility.paused()
+		run.time.advance(SessionProbe.NATIVE_STOPPED_FINALIZE_GRACE_MS)
+
+		assertEquals(1, run.finalized.size)
+		assertEquals(beforeStop.playedMs, run.finalized.single().playedMs)
+		run.probe.stop(finalizeTracks = false)
+	}
+
+	@Test
+	fun `RustedWax in front does not hold a stop without the surface signature`() {
+		val run = run(displayOn = true)
+		RustedWaxUiVisibility.resumed()
+		run.time.advance(20_000)
+		run.controller.publishPlaybackState(
+			PlaybackState(PlaybackState.STATE_STOPPED, position = 91_065),
+		)
+
+		run.time.advance(SessionProbe.NATIVE_STOPPED_FINALIZE_GRACE_MS)
+
+		assertEquals(1, run.finalized.size)
+		run.probe.stop(finalizeTracks = false)
+	}
+
+	@Test
+	fun `RustedWax in front twelve seconds in holds and resumes the same listen`() {
+		val run = run(displayOn = true, startPositionMs = 0)
+		RustedWaxUiVisibility.resumed()
+		val position = run.playerLeavesScreenAfter(12_000, startPositionMs = 0)
+		val beforeStop = run.probe.sessions.value.single()
+
+		run.time.advance(SessionProbe.NATIVE_STOPPED_FINALIZE_GRACE_MS * 2)
+		run.probe.tick()
+		assertEquals(0, run.finalized.size)
+		assertEquals(beforeStop.playedMs, run.probe.sessions.value.single().playedMs)
+
+		RustedWaxUiVisibility.paused()
+		run.controller.publishPlaybackState(PlaybackState(PlaybackState.STATE_BUFFERING, position = position))
+		run.controller.publishPlaybackState(
+			PlaybackState(
+				PlaybackState.STATE_PLAYING,
+				position = position,
+				lastPositionUpdateTime = run.time.elapsedRealtime(),
+			),
+		)
+		run.time.advance(10_000)
+		run.probe.tick()
+
+		assertEquals(0, run.finalized.size)
+		val resumed = run.probe.sessions.value.single()
+		assertEquals(beforeStop.trackStartedAtEpochSec, resumed.trackStartedAtEpochSec)
+		assertEquals(beforeStop.playedMs + 10_000, resumed.playedMs)
+		run.probe.stop(finalizeTracks = false)
+	}
+
+	@Test
+	fun `another app in front twelve seconds in still ends the listen`() {
+		val run = run(displayOn = true, startPositionMs = 0)
+		run.playerLeavesScreenAfter(12_000, startPositionMs = 0)
+
+		run.time.advance(SessionProbe.NATIVE_STOPPED_FINALIZE_GRACE_MS)
+
+		assertEquals(1, run.finalized.size)
 		run.probe.stop(finalizeTracks = false)
 	}
 }

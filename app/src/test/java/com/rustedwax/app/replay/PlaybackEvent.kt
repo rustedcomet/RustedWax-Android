@@ -34,9 +34,13 @@ sealed interface PlaybackEvent {
 		val speed: Double = 1.0,
 		/** Native MediaSession STATE_STOPPED, distinct from an ordinary pause. */
 		val stopped: Boolean = false,
+		/** STATE_BUFFERING, which production maps to [com.rustedwax.core.TransportState.OTHER]. */
+		val buffering: Boolean = false,
 	) : PlaybackEvent {
 		init {
-			require(!playing || !stopped) { "a transport cannot be PLAYING and STOPPED" }
+			require(listOf(playing, stopped, buffering).count { it } <= 1) {
+				"a transport is in at most one of PLAYING, STOPPED and BUFFERING"
+			}
 		}
 	}
 
@@ -174,6 +178,8 @@ sealed interface PlaybackEvent {
 	data class StoppedGraceExpired(
 		/** The screen was on, so this STOPPED is the user's own. */
 		val displayInteractive: Boolean = true,
+		/** RustedWax itself was in front, which is what stopped the player. */
+		val rustedWaxForeground: Boolean = false,
 	) : PlaybackEvent
 
 	/**

@@ -18,6 +18,14 @@ import kotlin.math.abs
  * additional reset-and-restore transport signature observed when the native
  * surface disappeared. Ambiguous stops fail closed and finalize normally.
  *
+ * The same signature appears when the user opens RustedWax itself: a YouTube
+ * without background play stops its player as soon as it leaves the screen, so
+ * looking at the Now card — or flipping a setting — used to end the listen it
+ * was showing ten seconds later. With RustedWax proven in front, the cause of
+ * that `STOPPED` is known and is not the user finishing with the video, so it
+ * holds exactly as a display-off one does. Any other app in front keeps the
+ * old behaviour: nothing says why the player stopped there.
+ *
  * Holding the listen open costs nothing while it waits. A `STOPPED` transport
  * accrues no play time, arms no idle deadline and writes nothing; what it keeps
  * is the ability for the same item to continue into this listen rather than
@@ -43,6 +51,8 @@ object StoppedInterruption {
 	 *
 	 * [stoppedForMs] is measured from the transport's own `STOPPED` transition,
 	 * not from the last check, so a long hold cannot outlive the cap by polling.
+	 * [rustedWaxForeground] is asked at each check, so leaving RustedWax for any
+	 * app other than the player ends the hold at the next one.
 	 */
 	fun holdsListenOpen(
 		displayInteractive: Boolean,
@@ -50,11 +60,18 @@ object StoppedInterruption {
 		surfaceDisappearanceConfirmed: Boolean,
 		stoppedAtMs: Long?,
 		durationMs: Long?,
-	): Boolean =
-		!displayInteractive &&
-			surfaceDisappearanceConfirmed &&
+		rustedWaxForeground: Boolean = false,
+		foregroundSurfaceDisappearanceConfirmed: Boolean = false,
+	): Boolean {
+		// Only RustedWax in front may use the early-position signature; a lock or
+		// any other app keeps needing the full one.
+		val surfaceDisappeared = surfaceDisappearanceConfirmed ||
+			(rustedWaxForeground && foregroundSurfaceDisappearanceConfirmed)
+		return (!displayInteractive || rustedWaxForeground) &&
+			surfaceDisappeared &&
 			!finishedItem(stoppedAtMs, durationMs) &&
 			stoppedForMs < SCREEN_OFF_HOLD_CAP_MS
+	}
 
 	/**
 	 * The transport signature observed on the reproduced lock: the surface first
@@ -76,6 +93,31 @@ object StoppedInterruption {
 	fun confirmsSurfaceDisappearance(resetFromPositionMs: Long?, stoppedPositionMs: Long?): Boolean {
 		val resetFrom = resetFromPositionMs ?: return false
 		val stopped = stoppedPositionMs ?: return false
+		return abs(stopped - resetFrom) <= TrackProgressCarry.RESUME_WINDOW_MS
+	}
+
+	/**
+	 * The same reset-and-restore pair for a player that left the screen early.
+	 *
+	 * [resetCandidate] cannot see it before 30 s — below that, a drop to zero is
+	 * no further than the restore window — so someone who opens RustedWax ten
+	 * seconds into a video would lose the listen to the ten-second grace. The
+	 * shape itself is exact: YouTube resets to position **zero**, then restores a
+	 * positive position within the window of where it was. It is only consulted
+	 * when RustedWax is proven in front, where the cause is already known; a lock
+	 * or another app still needs [resetCandidate]'s evidence.
+	 */
+	fun foregroundResetCandidate(previousPositionMs: Long?, stoppedPositionMs: Long?): Long? {
+		val previous = previousPositionMs?.takeIf { it > 0 } ?: return null
+		return previous.takeIf { stoppedPositionMs == 0L }
+	}
+
+	fun confirmsForegroundSurfaceDisappearance(
+		resetFromPositionMs: Long?,
+		stoppedPositionMs: Long?,
+	): Boolean {
+		val resetFrom = resetFromPositionMs ?: return false
+		val stopped = stoppedPositionMs?.takeIf { it > 0 } ?: return false
 		return abs(stopped - resetFrom) <= TrackProgressCarry.RESUME_WINDOW_MS
 	}
 

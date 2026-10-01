@@ -429,4 +429,140 @@ class InterruptedListenReplayTest : ReplayScenarioTest() {
 		assertEquals(1, harness.finalized.size)
 		assertEquals(71_000L, harness.finalized.single().playedMs)
 	}
+
+	// ---- D: RustedWax itself in front (Issue #3) ------------------------------
+
+	/**
+	 * A YouTube without background play stops its player the moment RustedWax is
+	 * opened over it — to read the Now card, or to flip a setting. The same
+	 * reset/restore pair as a lock, with the display on; the listen is held,
+	 * nothing is credited while it waits, and the same controller picks it up.
+	 */
+	@Test
+	fun `opening RustedWax over the player scrobbles one listen on watched time only`() {
+		val harness = harness()
+
+		harness.feed(
+			playingAt(0) + listOf(
+				PlaybackEvent.Advance(65_000),
+			) + surfaceDisappearsAt(65_065) + listOf(
+				PlaybackEvent.Advance(10_000),
+				PlaybackEvent.StoppedGraceExpired(displayInteractive = true, rustedWaxForeground = true),
+				PlaybackEvent.Advance(10_000),
+				PlaybackEvent.StoppedGraceExpired(displayInteractive = true, rustedWaxForeground = true),
+			),
+		)
+		assertTrue(harness.trace.stoppedInterruptionHeld)
+		assertEquals("nothing is filed while RustedWax is in front", 0, harness.finalized.size)
+		assertEquals("STOPPED time is never credited", 65_000L, harness.trace.currentPlayedMs)
+
+		harness.feed(
+			listOf(
+				// What the A36 published on return: BUFFERING, then PLAYING.
+				PlaybackEvent.PlaybackStateChanged(playing = false, buffering = true, positionMs = 65_065),
+				PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 65_065),
+				PlaybackEvent.Advance(120_000),
+				PlaybackEvent.Finalized("track ended"),
+			),
+		)
+
+		assertEquals("one viewing, one listen", 1, harness.finalized.size)
+		assertEquals(185_000L, harness.finalized.single().playedMs)
+		assertEquals(listOf(videoId), harness.broadcasts.map { it.videoId })
+		assertEquals(emptyList<RefusalKind>(), harness.refusalKinds)
+		harness.assertOneOutcomePerFinalization(1)
+	}
+
+	@Test
+	fun `the same stop with another app in front still ends the listen`() {
+		val harness = harness()
+
+		harness.feed(
+			playingAt(0) + listOf(
+				PlaybackEvent.Advance(65_000),
+			) + surfaceDisappearsAt(65_065) + listOf(
+				PlaybackEvent.Advance(10_000),
+				PlaybackEvent.StoppedGraceExpired(displayInteractive = true, rustedWaxForeground = false),
+			),
+		)
+
+		assertFalse(harness.trace.stoppedInterruptionHeld)
+		assertEquals(1, harness.finalized.size)
+		assertEquals(65_000L, harness.finalized.single().playedMs)
+		assertEquals(listOf(RefusalKind.BELOW_THRESHOLD), harness.refusalKinds)
+		harness.assertOneOutcomePerFinalization(1)
+	}
+
+	// ---- E: RustedWax in front before 30 seconds (Issue #3) --------------------
+
+	@Test
+	fun `opening RustedWax twelve seconds in holds and resumes the same listen`() {
+		val harness = harness()
+
+		harness.feed(
+			playingAt(0) + listOf(
+				PlaybackEvent.Advance(12_000),
+			) + surfaceDisappearsAt(12_065) + listOf(
+				PlaybackEvent.Advance(10_000),
+				PlaybackEvent.StoppedGraceExpired(displayInteractive = true, rustedWaxForeground = true),
+				PlaybackEvent.Advance(10_000),
+				PlaybackEvent.StoppedGraceExpired(displayInteractive = true, rustedWaxForeground = true),
+			),
+		)
+		assertTrue(harness.trace.stoppedInterruptionHeld)
+		assertEquals(0, harness.finalized.size)
+		assertEquals("STOPPED time is never credited", 12_000L, harness.trace.currentPlayedMs)
+
+		harness.feed(
+			listOf(
+				PlaybackEvent.PlaybackStateChanged(playing = false, buffering = true, positionMs = 12_065),
+				PlaybackEvent.PlaybackStateChanged(playing = true, positionMs = 12_065),
+				PlaybackEvent.Advance(200_000),
+				PlaybackEvent.Finalized("track ended"),
+			),
+		)
+
+		assertEquals("one viewing, one listen", 1, harness.finalized.size)
+		assertEquals(212_000L, harness.finalized.single().playedMs)
+		assertEquals(listOf(videoId), harness.broadcasts.map { it.videoId })
+		assertEquals(emptyList<RefusalKind>(), harness.refusalKinds)
+		harness.assertOneOutcomePerFinalization(1)
+	}
+
+	@Test
+	fun `the same early stop with another app in front still ends the listen`() {
+		val harness = harness()
+
+		harness.feed(
+			playingAt(0) + listOf(
+				PlaybackEvent.Advance(12_000),
+			) + surfaceDisappearsAt(12_065) + listOf(
+				PlaybackEvent.Advance(10_000),
+				PlaybackEvent.StoppedGraceExpired(displayInteractive = true, rustedWaxForeground = false),
+			),
+		)
+
+		assertFalse(harness.trace.stoppedInterruptionHeld)
+		assertEquals(1, harness.finalized.size)
+		assertEquals(12_000L, harness.finalized.single().playedMs)
+		harness.assertOneOutcomePerFinalization(1)
+	}
+
+	@Test
+	fun `an early display-off stop keeps needing the thirty-second evidence`() {
+		val harness = harness()
+
+		harness.feed(
+			playingAt(0) + listOf(
+				PlaybackEvent.Advance(12_000),
+			) + surfaceDisappearsAt(12_065) + listOf(
+				PlaybackEvent.Advance(10_000),
+				PlaybackEvent.StoppedGraceExpired(displayInteractive = false),
+			),
+		)
+
+		assertFalse(harness.trace.stoppedInterruptionHeld)
+		assertEquals(1, harness.finalized.size)
+		assertEquals(12_000L, harness.finalized.single().playedMs)
+	}
 }
