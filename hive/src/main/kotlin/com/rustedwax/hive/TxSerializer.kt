@@ -28,6 +28,7 @@ object TxSerializer {
 
 	const val OP_ID_VOTE = 0
 	const val OP_ID_COMMENT = 1
+	const val OP_ID_DELETE_COMMENT = 17
 	const val OP_ID_CUSTOM_JSON = 18
 
 	/** Hive mainnet. Note this is *not* Steem's all-zero chain id. */
@@ -96,6 +97,22 @@ object TxSerializer {
 		override val opId: Int get() = OP_ID_VOTE
 	}
 
+	/**
+	 * Hive `delete_comment`: removes the comment at `author/permlink`.
+	 *
+	 * Two strings and nothing else — the chain identifies the object by them
+	 * alone, which is why the caller must hand over the identity the chain
+	 * itself returned for the object, never one rebuilt from display state.
+	 * Posting authority of [author]. Pinned by a node-serialized vector in
+	 * `HiveSnapVectorsTest`.
+	 */
+	data class DeleteCommentOp(
+		val author: String,
+		val permlink: String,
+	) : Operation {
+		override val opId: Int get() = OP_ID_DELETE_COMMENT
+	}
+
 	data class Transaction(
 		val refBlockNum: Int,
 		val refBlockPrefix: Long,
@@ -144,6 +161,11 @@ object TxSerializer {
 				writeString(op.title)
 				writeString(op.body)
 				writeString(op.jsonMetadata)
+			}
+
+			is DeleteCommentOp -> {
+				writeString(op.author)
+				writeString(op.permlink)
 			}
 
 			is VoteOp -> {

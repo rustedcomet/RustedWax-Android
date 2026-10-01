@@ -292,6 +292,68 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 		)
 	}
 
+	/**
+	 * Up to [limit] answers about one comment, each from a **different node
+	 * proven current at the moment it answered**.
+	 *
+	 * The read a deletion is gated on, before signing and after broadcasting,
+	 * built on the same per-node rule as [findViewerVote]: ask node N for its
+	 * head block, and only if N is within [MAX_NODE_LAG_SEC] ask N for the
+	 * comment. A stale node can report a deleted comment as present or a new
+	 * reply as missing with total confidence, so nothing here falls through to
+	 * an unchecked node. An empty list means nobody current could answer.
+	 */
+	fun readCommentState(author: String, permlink: String, limit: Int = 1): List<HiveCommentRead> {
+		val params = HiveCommentStates.params(author, permlink)
+		return readCommentStateAcross(
+			author = author,
+			permlink = permlink,
+			limit = limit,
+			headOf = { node -> nodeHeadEpochSec(node) },
+			commentsFrom = { node ->
+				runCatching {
+					val response = post(node, "database_api.find_comments", params)
+					if (response.optJSONObject("error") != null) null
+					else response.optJSONObject("result")
+				}.getOrNull()
+			},
+		)
+	}
+
+	internal fun readCommentStateAcross(
+		author: String,
+		permlink: String,
+		limit: Int,
+		headOf: (String) -> Long?,
+		commentsFrom: (String) -> JSONObject?,
+		nowEpochSec: () -> Long = { System.currentTimeMillis() / 1000 },
+	): List<HiveCommentRead> {
+		val answers = mutableListOf<HiveCommentRead>()
+		for (node in nodes) {
+			if (answers.size >= limit) break
+			val head = headOf(node) ?: continue
+			if (head !in (nowEpochSec() - MAX_NODE_LAG_SEC)..(nowEpochSec() + MAX_NODE_LAG_SEC)) continue
+			val comments = commentsFrom(node)
+			// A head near the age limit can expire while the comment request runs.
+			if (head !in (nowEpochSec() - MAX_NODE_LAG_SEC)..(nowEpochSec() + MAX_NODE_LAG_SEC)) continue
+			val read = HiveCommentStates.parse(
+				comments,
+				author,
+				permlink,
+				head,
+				node.substringAfter("//"),
+			) ?: continue
+			answers += read
+		}
+		return answers
+	}
+
+	private fun nodeHeadEpochSec(node: String): Long? = runCatching {
+		val result = post(node, "condenser_api.get_dynamic_global_properties", JSONArray())
+			.optJSONObject("result") ?: return null
+		ChainTimes.epochSec(result.getString("time"))
+	}.getOrNull()
+
 	fun broadcast(
 		signedTx: JSONObject,
 		expectedTxId: String? = null,

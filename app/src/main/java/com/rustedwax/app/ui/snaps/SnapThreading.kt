@@ -7,6 +7,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.rustedwax.app.snaps.PendingSnapKind
 import com.rustedwax.app.snaps.PostedSnap
+import com.rustedwax.app.snaps.SnapDeleteCheck
+import com.rustedwax.app.snaps.SnapDeleter
 import com.rustedwax.app.snaps.SnapEditKind
 import com.rustedwax.app.snaps.SnapEditor
 import com.rustedwax.app.snaps.SnapPublisher
@@ -110,6 +112,18 @@ class SnapThreadController internal constructor(
 	 * belongs to a different controller, draws the same text as the sheet.
 	 */
 	private val onRootEdited: (String, String, String) -> Unit = { _, _, _ -> },
+	/**
+	 * Deletes this user's own Snap or reply with Hive `delete_comment`. One
+	 * per kind, as with [editor]. Null means deleting is unavailable, and no
+	 * Delete is ever offered.
+	 */
+	private val deleter: (SnapEditKind) -> SnapDeleter? = { null },
+	/**
+	 * Told when a root Snap was proven deleted, with the account and its
+	 * `author/permlink`, so the History card — another controller's — stops
+	 * drawing it. The History row and its scrobble are untouched.
+	 */
+	private val onRootDeleted: (String, String) -> Unit = { _, _ -> },
 	private val io: CoroutineDispatcher = Dispatchers.IO,
 ) {
 
@@ -324,7 +338,11 @@ class SnapThreadController internal constructor(
 			?: return SnapThreadBuilder.build(root.contentId, chain)
 		val local = runCatching { publisher()?.stagedReplyRows(who).orEmpty() }
 			.getOrDefault(emptyList())
-		return SnapThreadBuilder.build(root.contentId, withEdits(chain) + local)
+		val gone = deletedRows[threadKey(root)].orEmpty()
+		return SnapThreadBuilder.build(
+			root.contentId,
+			(withEdits(chain) + local).filterNot { it.contentId in gone },
+		)
 	}
 
 	/**
@@ -479,6 +497,8 @@ class SnapThreadController internal constructor(
 					return@launch
 				}
 				chainRows[key] = replies
+				// Keep proven deletions suppressed for this controller's lifetime:
+				// a later read can come from a hivemind node that still lags.
 				// A fresh, account-checked answer is the one moment this app can
 				// learn that somebody replied to its user. Reported before the
 				// tree is built, from the rows themselves, so what the bell sees
@@ -537,6 +557,7 @@ class SnapThreadController internal constructor(
 
 	/** Leaves every draft exactly as typed — closing a thread never discards. */
 	fun close() {
+		if (deletingState?.phase != DeletePhase.RUNNING) deletingState = null
 		uiOwner = null
 		openThreadState = null
 		openRootSnapState = null
@@ -562,6 +583,9 @@ class SnapThreadController internal constructor(
 	/** Put one of the viewer's own comments into the bottom bar for editing. */
 	fun startEdit(root: SnapReplyTarget, target: SnapReplyTarget, kind: SnapEditKind, current: String) {
 		if (uiOwner != accountId() || isSavingEdit) return
+		// Never alongside a deletion: an edit landing after a delete would
+		// recreate the comment under the same permlink.
+		if (deletingState != null) return
 		if (!canEdit(target.author)) return
 		editingState = Editing(root, target, kind, current)
 		editText = current
@@ -584,6 +608,177 @@ class SnapThreadController internal constructor(
 		editingState = null
 		editText = ""
 		editStatus = null
+	}
+
+	// ── deleting ───────────────────────────────────────────────────────
+
+	/** A deletion being considered or carried out, from its Delete tap on. */
+	data class Deleting(
+		val root: SnapReplyTarget,
+		/** The comment to delete: always the viewer's own. */
+		val target: SnapReplyTarget,
+		val kind: SnapEditKind,
+		/** The words on screen, so the confirmation names the exact object. */
+		val body: String,
+		val phase: DeletePhase,
+	)
+
+	enum class DeletePhase {
+		/** Reading the chain. Nothing can be confirmed yet. */
+		CHECKING,
+
+		/** The chain said yes just now; waiting for the user. */
+		CONFIRM,
+
+		/** Confirmed: re-checking, signing, sending and proving. */
+		RUNNING,
+	}
+
+	private var deletingState by mutableStateOf<Deleting?>(null)
+
+	/** The deletion in progress — for *this* account, or null. */
+	val deleting: Deleting?
+		get() = deletingState.takeIf { uiOwner == accountId() }
+
+	/** Account-scoped `author/permlink` to why its last deletion did not happen. */
+	private val deleteNotices = mutableStateMapOf<String, SnapPostStatus>()
+
+	/**
+	 * Thread key to replies proven deleted that hivemind may still return.
+	 * Not snapshot state: [loads] is what the screen reads.
+	 */
+	private val deletedRows = mutableMapOf<String, MutableSet<String>>()
+
+	/** What the last deletion attempt on [target] had to say, or null. */
+	fun deleteNotice(target: SnapReplyTarget): SnapPostStatus? =
+		deleteNotices["${accountId()}|${target.contentId}"]
+
+	/**
+	 * Whether Delete may be offered on a comment by [author]. Drawing only —
+	 * [SnapDeleter] refuses everyone but the author again, against the chain.
+	 */
+	fun canDelete(author: String): Boolean {
+		val who = account()?.takeIf { it.isNotBlank() } ?: return false
+		return deleter(SnapEditKind.REPLY) != null && author.equals(who, ignoreCase = true)
+	}
+
+	/**
+	 * Delete tapped: read the chain, and only then offer the confirmation.
+	 *
+	 * A delete already sent and unproven is not offered again — tapping
+	 * settles that one by reading, so a second transaction is never signed.
+	 */
+	fun requestDelete(root: SnapReplyTarget, target: SnapReplyTarget, kind: SnapEditKind, body: String) {
+		if (uiOwner != accountId() || isSavingEdit) return
+		if (deletingState?.phase == DeletePhase.RUNNING) return
+		if (!canDelete(target.author)) return
+		val who = accountId()
+		val del = deleter(kind) ?: return
+		clearEdit()
+		replyingToState = null
+		deleteNotices.remove("$who|${target.contentId}")
+		if (del.hasUnsettled(who, target)) {
+			runDelete(Deleting(root, target, kind, body, DeletePhase.RUNNING), del, who)
+			return
+		}
+		val request = Deleting(root, target, kind, body, DeletePhase.CHECKING)
+		deletingState = request
+		scope.launch {
+			val check = withContext(io) {
+				runCatching { del.check(who, target) }
+					.getOrElse { SnapDeleteCheck.Unknown(SnapDeleter.UNREADABLE) }
+			}
+			// Cancelled, replaced, or another account now: this answer is nobody's.
+			if (deletingState != request) return@launch
+			if (accountId() != who) {
+				deletingState = null
+				return@launch
+			}
+			when (check) {
+				is SnapDeleteCheck.Eligible -> deletingState = request.copy(phase = DeletePhase.CONFIRM)
+				is SnapDeleteCheck.Blocked -> if (check.reason == SnapDeleter.ALREADY_GONE) {
+					// Already gone: let the deleter prove that twice over and
+					// retire the local copy. It sends nothing for an absent object.
+					runDelete(request.copy(phase = DeletePhase.RUNNING), del, who)
+				} else {
+					deletingState = null
+					deleteNotices["$who|${target.contentId}"] = SnapPostStatus.Failed(check.reason)
+				}
+				is SnapDeleteCheck.Unknown -> {
+					deletingState = null
+					deleteNotices["$who|${target.contentId}"] = SnapPostStatus.Failed(check.message)
+				}
+			}
+		}
+	}
+
+	/** Cancel before confirming. Nothing has been signed, and nothing is sent. */
+	fun cancelDelete() {
+		if (deletingState?.phase == DeletePhase.RUNNING) return
+		deletingState = null
+	}
+
+	/** Confirmed. The deleter reads eligibility again before it signs. */
+	fun confirmDelete() {
+		val request = deleting ?: return
+		if (request.phase != DeletePhase.CONFIRM) return
+		val del = deleter(request.kind) ?: return
+		runDelete(request.copy(phase = DeletePhase.RUNNING), del, accountId())
+	}
+
+	private fun runDelete(request: Deleting, del: SnapDeleter, who: String) {
+		if (who == ANONYMOUS) return
+		deletingState = request
+		val id = "$who|${request.target.contentId}"
+		scope.launch {
+			try {
+				val outcome = withContext(io) {
+					runCatching { del.delete(who, request.target) }.getOrElse {
+						SnapDeleter.Outcome.Uncertain(
+							"RustedWax couldn't confirm the deletion yet, so this is still shown. " +
+								"Checking again won't send another.",
+						)
+					}
+				}
+				// Alice's deletion settling after Bob signed in draws nothing of Bob's.
+				if (accountId() != who) return@launch
+				when (outcome) {
+					is SnapDeleter.Outcome.Deleted -> applyDelete(who, request)
+					is SnapDeleter.Outcome.Blocked ->
+						deleteNotices[id] = SnapPostStatus.Failed(outcome.reason)
+					is SnapDeleter.Outcome.Failed ->
+						deleteNotices[id] = SnapPostStatus.Failed(outcome.message)
+					is SnapDeleter.Outcome.Uncertain ->
+						deleteNotices[id] = SnapPostStatus.Uncertain(outcome.message)
+				}
+			} finally {
+				if (deletingState == request) deletingState = null
+			}
+		}
+	}
+
+	/** Take a proven-deleted comment off every screen this controller draws. */
+	private fun applyDelete(who: String, request: Deleting) {
+		// A proven deletion changes what the chain allows elsewhere — a parent
+		// that "has replies" may not any more — so earlier refusals are stale.
+		deleteNotices.keys.filter { it.startsWith("$who|") }.forEach { deleteNotices.remove(it) }
+		when (request.kind) {
+			SnapEditKind.ROOT -> {
+				val key = SnapDraftKey.of(who, request.target.contentId)
+				onRootDeleted(who, request.target.contentId)
+				loads.remove(key)
+				chainRows.remove(key)
+				previews.remove(key)
+				if (openThreadState == request.target) close()
+			}
+			SnapEditKind.REPLY -> {
+				deletedRows.getOrPut(threadKey(request.root)) { mutableSetOf() }
+					.add(request.target.contentId)
+				editedBodies.remove("$who|${request.target.contentId}")
+				redraw(request.root)
+				load(request.root, force = true)
+			}
+		}
 	}
 
 	/**

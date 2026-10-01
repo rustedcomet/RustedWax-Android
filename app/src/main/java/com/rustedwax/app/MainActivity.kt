@@ -53,6 +53,7 @@ import com.rustedwax.app.snaps.HivePostedSnapReader
 import com.rustedwax.app.snaps.HiveSnapPort
 import com.rustedwax.app.snaps.PostedSnaps
 import com.rustedwax.app.snaps.SharedPreferencesPendingSnapStore
+import com.rustedwax.app.snaps.SnapDeleter
 import com.rustedwax.app.snaps.SnapEditKind
 import com.rustedwax.app.snaps.SnapEditor
 import com.rustedwax.app.snaps.SnapPublisher
@@ -420,6 +421,14 @@ class MainActivity : ComponentActivity() {
 				store = SharedPreferencesPendingSnapStore(applicationContext),
 			)
 			val replyEditor = SnapEditor(hive = editPort, store = pendingReplies)
+			// Deleting. The same port and the same per-kind stores: a proven
+			// deletion retires that kind's confirmed record so it is not drawn
+			// back from disk.
+			val rootDeleter = SnapDeleter(
+				hive = editPort,
+				store = SharedPreferencesPendingSnapStore(applicationContext),
+			)
+			val replyDeleter = SnapDeleter(hive = editPort, store = pendingReplies)
 			SnapThreadController(
 				scope = lifecycleScope,
 				// Reading a thread cannot publish one: this port has no key and no
@@ -447,6 +456,14 @@ class MainActivity : ComponentActivity() {
 				// An edited root Snap is also drawn on its History card, which
 				// belongs to the posting controller.
 				onRootEdited = posts::applyEdit,
+				deleter = { kind ->
+					when (kind) {
+						SnapEditKind.ROOT -> rootDeleter
+						SnapEditKind.REPLY -> replyDeleter
+					}
+				},
+				// A deleted root Snap leaves its History card; the row stays.
+				onRootDeleted = posts::applyDelete,
 			)
 		}
 		// Likes. A third parallel assembly, and the narrowest of the three: it
