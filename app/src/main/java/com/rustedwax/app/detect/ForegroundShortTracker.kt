@@ -150,6 +150,17 @@ class ForegroundShortTracker(
 			val bankedFullListen: Boolean = false,
 
 			val terminalFinalizationEmitted: Boolean = false,
+			/**
+			 * Android listed YouTube's picture-in-picture window while this Short
+			 * was away from the screen. Cleared by any readable observation.
+			 */
+			val pipWindowSeen: Boolean = false,
+			/**
+			 * After [pipWindowSeen], YouTube was reported owning neither the screen
+			 * nor any picture-in-picture window: the viewer closed it (#15). Cleared
+			 * by the window coming back and by YouTube owning the screen again.
+			 */
+			val pipWindowClosed: Boolean = false,
 		) : Active()
 
 		data class Ad(
@@ -231,6 +242,52 @@ class ForegroundShortTracker(
 	)
 
 	private var interrupted: Interrupted? = null
+
+	/**
+	 * The Short whose picture-in-picture window the viewer closed (#15).
+	 *
+	 * Closing the window ends that listen for good, even though YouTube keeps the
+	 * Short loaded and plays it again when it is next opened. Until a positively
+	 * different Short is read, an observation of this one acquires nothing and
+	 * earns nothing. No timer: it lasts exactly until other media is proven, the
+	 * source is reset, or the process ends.
+	 */
+	private data class DismissedShort(
+		val title: String?,
+		val ownerHandle: String,
+		val totalSeconds: Long,
+		val sourceEpoch: Long,
+	)
+
+	private var dismissed: DismissedShort? = null
+
+	/**
+	 * Whether this observation is the dismissed Short, clearing the suppression
+	 * when it is positively something else.
+	 *
+	 * A missing title or length is not a difference: an unreadable footer could
+	 * be the same Short, so it keeps the suppression rather than ending it.
+	 */
+	private fun suppressesDismissed(
+		title: String?,
+		ownerHandle: String,
+		totalSeconds: Long,
+		sourceEpoch: Long,
+	): Boolean {
+		val prior = dismissed ?: return false
+		val different = prior.ownerHandle != ownerHandle ||
+			prior.sourceEpoch != sourceEpoch ||
+			(prior.title != null && title != null && prior.title != title) ||
+			(prior.totalSeconds != 0L && totalSeconds != 0L && prior.totalSeconds != totalSeconds)
+		if (different) dismissed = null
+		return !different
+	}
+
+	private fun dismissedObservation(nowMillis: Long): Update = proofMissing(
+		nowMillis,
+		"the Short whose picture-in-picture window was closed is on screen again; " +
+			"its listen already ended, so it is not tracked until a different Short appears",
+	)
 
 	private fun resumeFor(
 		title: String?,
@@ -377,6 +434,7 @@ class ForegroundShortTracker(
 				playbackRate = input.playbackRate,
 				displayOff = input.displayOff,
 				pipWindowPresent = input.pipWindowPresent,
+				sourceWindow = input.sourceWindow,
 			)
 		}
 
@@ -444,6 +502,15 @@ class ForegroundShortTracker(
 	}
 
 	fun observe(observation: OrganicObservation): Update {
+		if (suppressesDismissed(
+				observation.title,
+				observation.ownerHandle,
+				observation.totalSeconds,
+				observation.sourceEpoch,
+			)
+		) {
+			return dismissedObservation(observation.observedAtMillis)
+		}
 		// A measured observation has enough continuity evidence of its own. Any
 		// seekbar-less title-blink window ends here rather than leaking into a later
 		// unmeasured surface.
@@ -677,6 +744,15 @@ class ForegroundShortTracker(
 	}
 
 	fun observe(observation: UnmeasuredObservation): Update {
+		if (suppressesDismissed(
+				observation.title,
+				observation.ownerHandle,
+				totalSeconds = 0,
+				sourceEpoch = observation.sourceEpoch,
+			)
+		) {
+			return dismissedObservation(observation.observedAtMillis)
+		}
 		val prior = active
 		val same = prior as? Active.Organic
 		val keyMatches = same != null &&
@@ -772,6 +848,8 @@ class ForegroundShortTracker(
 			frozenForMissingProof = false,
 			pipInferenceActive = false,
 			progressSurfaceLost = true,
+			pipWindowSeen = false,
+			pipWindowClosed = false,
 			inferredMillis = inferredMillis,
 			inferredSincePositionMillis = current.inferredSincePositionMillis + credited,
 		)
@@ -868,6 +946,9 @@ class ForegroundShortTracker(
 		 * has stopped: the viewer paused, they did not leave.
 		 */
 		pipWindowPresent: Boolean = false,
+
+		sourceWindow: PlaybackInput.SourceWindowEvidence =
+			PlaybackInput.SourceWindowEvidence.UNKNOWN,
 	): Update {
 		val current = active ?: return Update(diagnostic = reason)
 		if (missingSinceMillis == null) missingSinceMillis = nowMillis
@@ -919,6 +1000,11 @@ class ForegroundShortTracker(
 		// re-taken between every pair of real observations and no interval ever
 		// closed.
 		val inferredMillis = current.inferredMillis + credited
+		// Only the window list can say the viewer closed the window: present on
+		// one observation, then YouTube owning neither the screen nor a window.
+		// A refusal that read nothing about windows leaves both facts alone.
+		val windowShown = pipWindowPresent ||
+			sourceWindow == PlaybackInput.SourceWindowEvidence.PICTURE_IN_PICTURE
 		active = when (current) {
 			is Active.Organic -> current.copy(
 				frozenForMissingProof = true,
@@ -927,6 +1013,20 @@ class ForegroundShortTracker(
 				inferredMillis = inferredMillis,
 				inferredSincePositionMillis =
 					current.inferredSincePositionMillis + credited,
+				// YouTube owning the screen again is the window handed back to
+				// fullscreen: nothing from that PiP stretch may arm a later close.
+				pipWindowSeen = when {
+					windowShown -> true
+					sourceWindow == PlaybackInput.SourceWindowEvidence.FOREGROUND -> false
+					else -> current.pipWindowSeen
+				},
+				pipWindowClosed = when {
+					windowShown -> false
+					sourceWindow == PlaybackInput.SourceWindowEvidence.OFF_SCREEN ->
+						current.pipWindowSeen
+					sourceWindow == PlaybackInput.SourceWindowEvidence.FOREGROUND -> false
+					else -> current.pipWindowClosed
+				},
 			)
 			is Active.Ad -> current.copy(
 				frozenForMissingProof = true,
@@ -1025,10 +1125,25 @@ class ForegroundShortTracker(
 			// switched tabs, and the commonest thing they do next is switch back.
 			// What comes back has to remember that it was already handed over, or
 			// returning inside the resume window scores the same viewing twice.
-			remember(
-				if (ended.isEmpty()) ending else ending.markTerminalFinalizationEmitted(),
-				nowMillis,
-			)
+			//
+			// Except a Short whose picture-in-picture window the viewer closed:
+			// that listen is over, and YouTube putting the same Short back on
+			// screen later must neither resume it nor start it again (#15).
+			val closedByViewer = (ending as? Active.Organic)?.takeIf { it.pipWindowClosed }
+			if (closedByViewer != null) {
+				interrupted = null
+				dismissed = DismissedShort(
+					title = closedByViewer.title,
+					ownerHandle = closedByViewer.ownerHandle,
+					totalSeconds = closedByViewer.totalSeconds,
+					sourceEpoch = closedByViewer.sourceEpoch,
+				)
+			} else {
+				remember(
+					if (ended.isEmpty()) ending else ending.markTerminalFinalizationEmitted(),
+					nowMillis,
+				)
+			}
 			active = null
 			missingSinceMillis = null
 			unmeasuredTitleBlinkStartedAtMillis = null
@@ -1036,7 +1151,13 @@ class ForegroundShortTracker(
 			inference = null
 			Update(
 				finalized = ended,
-				diagnostic = "$reason; foreground proof grace expired at the last valid seekbar value",
+				diagnostic = "$reason; foreground proof grace expired at the last valid seekbar value" +
+					if (closedByViewer != null) {
+						"; its picture-in-picture window was closed, so the same Short " +
+							"is not tracked again until a different one appears"
+					} else {
+						""
+					},
 			)
 		} else {
 			Update(
@@ -1050,6 +1171,7 @@ class ForegroundShortTracker(
 	/** Stop, opt-out, disconnect and source-epoch changes discard rather than score. */
 	fun discard(reason: String): Update {
 		active = null
+		dismissed = null
 		missingSinceMillis = null
 		unmeasuredTitleBlinkStartedAtMillis = null
 		displayOffSinceMillis = null
@@ -1060,10 +1182,13 @@ class ForegroundShortTracker(
 	fun snapshot(): SessionSnapshot? = active?.let { snapshot(it, finalized = false) }
 
 	private fun advanceOrganic(
-		current: Active.Organic,
+		observed: Active.Organic,
 		observation: OrganicObservation,
 	): Active.Organic {
-		if (observation.observedAtMillis < current.observedAtMillis) return current
+		if (observation.observedAtMillis < observed.observedAtMillis) return observed
+		// A readable player is YouTube owning the screen again, so whatever was
+		// known about a picture-in-picture window belongs to a stretch now over.
+		val current = observed.copy(pipWindowSeen = false, pipWindowClosed = false)
 		// The seekbar appearing on a Short that started without one supplies the
 		// length for the first time. Adopt it before anything uses it, so the
 		// completion cap and the percentage are computed against a real duration.

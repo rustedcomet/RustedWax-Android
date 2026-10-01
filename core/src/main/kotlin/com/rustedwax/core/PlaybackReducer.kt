@@ -2715,7 +2715,31 @@ sealed interface PlaybackInput {
 		 * lifecycle should do about it.
 		 */
 		val pipWindowPresent: Boolean = false,
+		/** Where the source's own window stood when this observation was taken. */
+		val sourceWindow: SourceWindowEvidence = SourceWindowEvidence.UNKNOWN,
 	) : ForegroundSurface
+
+	/**
+	 * What the platform said about the source's window during one unavailable
+	 * observation. Neutral like [ForegroundSurfaceUnavailable.pipWindowPresent]:
+	 * it reports where the window was, not what a lifecycle should do about it.
+	 */
+	enum class SourceWindowEvidence {
+		/** Nothing was read, or what was read cannot settle it. */
+		UNKNOWN,
+
+		/** The source owned the active root. */
+		FOREGROUND,
+
+		/** The source did not own the active root, but owned a picture-in-picture window. */
+		PICTURE_IN_PICTURE,
+
+		/**
+		 * The source owned neither the active root nor any picture-in-picture
+		 * window, with the screen on and the window list actually read.
+		 */
+		OFF_SCREEN,
+	}
 
 	/** The separately granted observer connected; no playback state changed. */
 	data class ForegroundSurfaceConnected(val nowMillis: Long) : ForegroundSurface
