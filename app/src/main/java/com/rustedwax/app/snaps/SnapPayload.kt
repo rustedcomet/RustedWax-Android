@@ -1,5 +1,6 @@
 package com.rustedwax.app.snaps
 
+import com.rustedwax.app.ui.snaps.SnapText
 import com.rustedwax.hive.HiveScrobblePayload
 
 /**
@@ -122,6 +123,21 @@ object SnapPayloadBuilder {
 			return "refusing to publish a Snap without its canonical YouTube link"
 		}
 		return null
+	}
+
+	/**
+	 * Why the user's own words cannot be a Snap, or null.
+	 *
+	 * The composer's rule, enforced again where the body is built — the same
+	 * second line of defence replies have — so a stale composition cannot carry
+	 * 281 characters past a dead Post button. Measured on the user's text only:
+	 * the generated tail is RustedWax's, not theirs, and is not counted.
+	 */
+	fun textProblem(userText: String): String? = when {
+		!SnapText.hasVisible(userText) -> "a Snap needs something in it"
+		SnapText.count(userText) > SnapText.LIMIT ->
+			"this Snap is ${SnapText.count(userText)} characters, over ${SnapText.LIMIT}"
+		else -> null
 	}
 
 	/** The exact generated tail every Snap body ends with. */

@@ -159,7 +159,7 @@ object SnapReplyKey {
  * body and does not share a line of code with it: [SnapPayloadBuilder] is
  * untouched by Stage 4.
  *
- * Because nothing is appended, there is no generated text inside the 200-cluster
+ * Because nothing is appended, there is no generated text inside the 280-cluster
  * limit to account for — what the composer counted is exactly what is published.
  * The only generated part of a reply is [buildMetadata], which is a separate
  * field on the operation and was never in the body to begin with.

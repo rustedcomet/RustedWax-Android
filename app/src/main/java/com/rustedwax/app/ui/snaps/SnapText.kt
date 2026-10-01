@@ -1,7 +1,7 @@
 package com.rustedwax.app.ui.snaps
 
 /**
- * The 200-character rule, counted the way the person typing it counts.
+ * The 280-character rule, counted the way the person typing it counts.
  *
  * A Snap's limit is a promise about what the user can see in the box, so the
  * unit has to be the thing they see. `String.length` is UTF-16 code units,
@@ -21,7 +21,7 @@ package com.rustedwax.app.ui.snaps
 internal object SnapText {
 
 	/** What RustedWax itself creates. Other Hive frontends are not bound by it. */
-	const val LIMIT = 200
+	const val LIMIT = 280
 
 	/**
 	 * User-visible characters, counting one emoji as one.
@@ -74,7 +74,7 @@ internal object SnapText {
 					// cluster only when an emoji is being joined to an emoji.
 					// Treating every `x ZWJ y` as one grapheme let arbitrary
 					// letters be chained into a single "character", so 400
-					// visible letters could report 200/200 and post a Snap twice
+					// visible letters could report 280/280 and post a Snap twice
 					// the length of the limit. A joiner between two letters is
 					// not a ligature — both letters are still on screen.
 					if (pictographicBase && isPictographic(joined)) {
@@ -112,7 +112,7 @@ internal object SnapText {
 	fun overflow(text: String): Int = (count(text) - LIMIT).coerceAtLeast(0)
 
 	/**
-	 * The counter under the box: `0/200` while there is room, and the plain
+	 * The counter under the box: `0/280` while there is room, and the plain
 	 * negative amount once there is not — `-1`, `-12`, `-53`.
 	 */
 	fun counterLabel(text: String): String {

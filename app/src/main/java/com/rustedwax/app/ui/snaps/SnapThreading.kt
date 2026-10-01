@@ -7,11 +7,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.rustedwax.app.snaps.PendingSnapKind
 import com.rustedwax.app.snaps.PostedSnap
+import com.rustedwax.app.snaps.SnapEditKind
+import com.rustedwax.app.snaps.SnapEditor
 import com.rustedwax.app.snaps.SnapPublisher
 import com.rustedwax.app.snaps.SnapReply
 import com.rustedwax.app.snaps.SnapReplyIntent
 import com.rustedwax.app.snaps.SnapReplyKey
 import com.rustedwax.app.snaps.SnapReplyTarget
+import com.rustedwax.app.snaps.SnapReplyText
 import com.rustedwax.app.snaps.SnapThread
 import com.rustedwax.app.snaps.SnapThreadBuilder
 import com.rustedwax.app.snaps.SnapThreadPreview
@@ -95,6 +98,18 @@ class SnapThreadController internal constructor(
 	 * controller exactly as it did.
 	 */
 	private val onChainRead: (String, SnapReplyTarget, List<SnapReply>) -> Unit = { _, _, _ -> },
+	/**
+	 * Edits this user's own Snap or reply in place. One per kind, because the
+	 * two kinds keep their confirmed records in different stores. Null means
+	 * editing is unavailable, and no Edit is ever offered.
+	 */
+	private val editor: (SnapEditKind) -> SnapEditor? = { null },
+	/**
+	 * Told when a root Snap's words changed on chain, with the account, the
+	 * Snap's `author/permlink` and the new words — so the History card, which
+	 * belongs to a different controller, draws the same text as the sheet.
+	 */
+	private val onRootEdited: (String, String, String) -> Unit = { _, _, _ -> },
 	private val io: CoroutineDispatcher = Dispatchers.IO,
 ) {
 
@@ -184,6 +199,40 @@ class SnapThreadController internal constructor(
 	private var openEventState by mutableStateOf<String?>(null)
 	private var replyingToState by mutableStateOf<String?>(null)
 
+	/** What the bottom bar is editing instead of composing, if anything. */
+	data class Editing(
+		/** The conversation it belongs to, so the bar only appears in that sheet. */
+		val root: SnapReplyTarget,
+		/** The comment being edited: always the viewer's own. */
+		val target: SnapReplyTarget,
+		val kind: SnapEditKind,
+		/** The words on screen when Edit was tapped. Saving these is not a write. */
+		val original: String,
+	)
+
+	private var editingState by mutableStateOf<Editing?>(null)
+
+	/** The words in the edit box. In memory only: an edit is not a draft. */
+	var editText by mutableStateOf("")
+		private set
+
+	/** Why the last save did not change anything, or null. */
+	var editStatus by mutableStateOf<SnapPostStatus?>(null)
+		private set
+
+	/**
+	 * True while a save is running. Snapshot state, because it gates the Save
+	 * control — a second tap must find it already dead.
+	 */
+	var isSavingEdit by mutableStateOf(false)
+		private set
+
+	/**
+	 * Account-scoped `author/permlink` to the reply body a save just proved.
+	 * See [withEdits]. Not snapshot state: [loads] is what the screen reads.
+	 */
+	private val editedBodies = mutableMapOf<String, String>()
+
 	/**
 	 * Slots whose words have been handed to an attempt and should no longer sit
 	 * in the box.
@@ -230,6 +279,10 @@ class SnapThreadController internal constructor(
 	val replyingTo: String?
 		get() = replyingToState.takeIf { uiOwner == accountId() }
 
+	/** The edit in progress — for *this* account, or null. */
+	val editing: Editing?
+		get() = editingState.takeIf { uiOwner == accountId() }
+
 	fun threadKey(root: SnapReplyTarget): String = SnapDraftKey.of(account(), root.contentId)
 
 	/** The composer/draft key for one parent comment, under this account. */
@@ -271,7 +324,31 @@ class SnapThreadController internal constructor(
 			?: return SnapThreadBuilder.build(root.contentId, chain)
 		val local = runCatching { publisher()?.stagedReplyRows(who).orEmpty() }
 			.getOrDefault(emptyList())
-		return SnapThreadBuilder.build(root.contentId, chain + local)
+		return SnapThreadBuilder.build(root.contentId, withEdits(chain) + local)
+	}
+
+	/**
+	 * The chain rows with this account's just-saved edits laid over them.
+	 *
+	 * An edit is proven before it gets here, but `bridge.get_discussion` is
+	 * served by hivemind, which can trail the chain by a few blocks — so the
+	 * re-read that follows a save may still carry the old words. Drawing those
+	 * would look like the edit had been undone. Each override retires itself
+	 * the first time the chain shows the same text.
+	 */
+	private fun withEdits(chain: List<SnapReply>): List<SnapReply> {
+		if (editedBodies.isEmpty()) return chain
+		val prefix = "${accountId()}|"
+		return chain.map { reply ->
+			val id = prefix + reply.contentId
+			val edited = editedBodies[id] ?: return@map reply
+			if (edited == reply.body) {
+				editedBodies.remove(id)
+				reply
+			} else {
+				reply.copy(body = edited)
+			}
+		}
 	}
 
 	/**
@@ -434,6 +511,7 @@ class SnapThreadController internal constructor(
 	 * reply somebody else added since the last look.
 	 */
 	fun open(root: SnapReplyTarget, rootSnap: PostedSnap?) {
+		if (uiOwner != accountId()) clearEdit()
 		uiOwner = accountId()
 		openThreadState = root
 		openRootSnapState = rootSnap
@@ -449,6 +527,7 @@ class SnapThreadController internal constructor(
 	 * a root exists. The sheet this opens carries the composer and nothing else.
 	 */
 	fun openComposer(eventId: String) {
+		if (uiOwner != accountId()) clearEdit()
 		uiOwner = accountId()
 		openEventState = eventId
 		openThreadState = null
@@ -463,6 +542,128 @@ class SnapThreadController internal constructor(
 		openRootSnapState = null
 		openEventState = null
 		replyingToState = null
+		clearEdit()
+	}
+
+	// ── editing ────────────────────────────────────────────────────────
+
+	/**
+	 * Whether Edit may be offered on a comment by [author].
+	 *
+	 * Only the signed-in author, compared as the signing boundary compares
+	 * accounts. [SnapEditor] refuses everyone else again before anything is
+	 * signed; this only decides whether a control is drawn.
+	 */
+	fun canEdit(author: String): Boolean {
+		val who = account()?.takeIf { it.isNotBlank() } ?: return false
+		return editor(SnapEditKind.REPLY) != null && author.equals(who, ignoreCase = true)
+	}
+
+	/** Put one of the viewer's own comments into the bottom bar for editing. */
+	fun startEdit(root: SnapReplyTarget, target: SnapReplyTarget, kind: SnapEditKind, current: String) {
+		if (uiOwner != accountId() || isSavingEdit) return
+		if (!canEdit(target.author)) return
+		editingState = Editing(root, target, kind, current)
+		editText = current
+		editStatus = null
+		replyingToState = null
+	}
+
+	fun editDraft(text: String) {
+		if (isSavingEdit) return
+		editText = text
+	}
+
+	/** Leave edit mode. The comment keeps the words it has on chain. */
+	fun cancelEdit() {
+		if (isSavingEdit) return
+		clearEdit()
+	}
+
+	private fun clearEdit() {
+		editingState = null
+		editText = ""
+		editStatus = null
+	}
+
+	/**
+	 * Save the edit — the same `author/permlink`, signed again with new words.
+	 *
+	 * The comment on screen keeps its old words until [SnapEditor] proves the
+	 * new ones are on chain. On any other answer the box stays open, still
+	 * holding what the user typed, with the reason beside it.
+	 */
+	fun saveEdit() {
+		val edit = editing ?: return
+		if (isSavingEdit) return
+		val text = editText
+		if (SnapEditor.textProblem(text) != null) return
+		// Unchanged words are not an edit, and not a write.
+		if (text == edit.original) {
+			clearEdit()
+			return
+		}
+		val who = accountId()
+		isSavingEdit = true
+		editStatus = SnapPostStatus.Posting
+		scope.launch {
+			try {
+				val outcome = withContext(io) {
+					val ed = editor(edit.kind)
+					when {
+						who == ANONYMOUS ->
+							SnapEditor.Outcome.Failed("Sign in to your Hive account to edit.")
+						ed == null -> SnapEditor.Outcome.Failed("Editing isn't available right now.")
+						else -> runCatching { ed.edit(who, edit.target, edit.kind, text) }
+							.getOrElse {
+								SnapEditor.Outcome.Uncertain(
+									"RustedWax couldn't confirm your edit yet, so the previous " +
+										"text is still shown. Saving again is safe.",
+								)
+							}
+					}
+				}
+				// Alice's edit settling after Bob signed in writes nothing of Bob's.
+				// Her bar keeps her words; the in-flight label is all that goes.
+				if (accountId() != who) {
+					editStatus = null
+					return@launch
+				}
+				when (outcome) {
+					is SnapEditor.Outcome.Edited -> {
+						applyEdit(who, edit, outcome.userText)
+						if (editingState == edit) clearEdit()
+					}
+					is SnapEditor.Outcome.Failed ->
+						editStatus = SnapPostStatus.Failed(outcome.message)
+					is SnapEditor.Outcome.Uncertain ->
+						editStatus = SnapPostStatus.Uncertain(outcome.message)
+				}
+			} finally {
+				isSavingEdit = false
+			}
+		}
+	}
+
+	/** Draw the proven words everywhere this comment already appears. */
+	private fun applyEdit(who: String, edit: Editing, userText: String) {
+		when (edit.kind) {
+			SnapEditKind.ROOT -> {
+				openRootSnapState?.takeIf { it.contentId == edit.target.contentId }?.let {
+					openRootSnapState = it.copy(userText = userText)
+				}
+				onRootEdited(who, edit.target.contentId, userText)
+			}
+			SnapEditKind.REPLY -> {
+				// The same cleaning every chain body gets, so the override
+				// compares equal to the chain's copy once hivemind catches up.
+				editedBodies["$who|${edit.target.contentId}"] = SnapReplyText.sanitize(userText)
+				redraw(edit.root)
+			}
+		}
+		// Ask Hive again, as after a reply. The override above holds the new
+		// words on screen if the read is still behind.
+		load(edit.root, force = true)
 	}
 
 	// ── reply drafts ───────────────────────────────────────────────────

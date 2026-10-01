@@ -53,6 +53,8 @@ import com.rustedwax.app.snaps.HivePostedSnapReader
 import com.rustedwax.app.snaps.HiveSnapPort
 import com.rustedwax.app.snaps.PostedSnaps
 import com.rustedwax.app.snaps.SharedPreferencesPendingSnapStore
+import com.rustedwax.app.snaps.SnapEditKind
+import com.rustedwax.app.snaps.SnapEditor
 import com.rustedwax.app.snaps.SnapPublisher
 import com.rustedwax.app.snaps.SnapReplyTarget
 import com.rustedwax.app.snaps.HiveSnapLikePort
@@ -405,6 +407,19 @@ class MainActivity : ComponentActivity() {
 				),
 				store = pendingReplies,
 			)
+			// Editing. The same signing port as everything above — the key and
+			// the account are still read beside each other at signing time — and
+			// one editor per kind, because a confirmed Snap and a confirmed reply
+			// keep their stored bodies in different files.
+			val editPort = HiveSnapPort(
+				loadKey = { vault.loadKey() },
+				storedAccount = { vault.account?.username },
+			)
+			val rootEditor = SnapEditor(
+				hive = editPort,
+				store = SharedPreferencesPendingSnapStore(applicationContext),
+			)
+			val replyEditor = SnapEditor(hive = editPort, store = pendingReplies)
 			SnapThreadController(
 				scope = lifecycleScope,
 				// Reading a thread cannot publish one: this port has no key and no
@@ -423,6 +438,15 @@ class MainActivity : ComponentActivity() {
 				// handed over are the ones this load already fetched and already
 				// checked against the account it was started under.
 				onChainRead = notices::record,
+				editor = { kind ->
+					when (kind) {
+						SnapEditKind.ROOT -> rootEditor
+						SnapEditKind.REPLY -> replyEditor
+					}
+				},
+				// An edited root Snap is also drawn on its History card, which
+				// belongs to the posting controller.
+				onRootEdited = posts::applyEdit,
 			)
 		}
 		// Likes. A third parallel assembly, and the narrowest of the three: it

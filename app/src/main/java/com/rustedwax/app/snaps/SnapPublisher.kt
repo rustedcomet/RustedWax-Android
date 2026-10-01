@@ -45,6 +45,14 @@ interface SnapHivePort {
 
 	/** True/false when the chain could answer, null when it could not be asked. */
 	fun contentExists(author: String, permlink: String): Boolean?
+
+	/**
+	 * The comment at `author/permlink` as the chain holds it now, or null when
+	 * it is absent or could not be read. What [SnapEditor] carries forward.
+	 *
+	 * Defaulted so the publication fakes, which never edit, need not answer it.
+	 */
+	fun readComment(author: String, permlink: String): SnapChainComment? = null
 }
 
 internal class HiveSnapPort(
@@ -175,6 +183,22 @@ internal class HiveSnapPort(
 
 	override fun contentExists(author: String, permlink: String): Boolean? =
 		runCatching { rpc.getContent(author, permlink) != null }.getOrNull()
+
+	override fun readComment(author: String, permlink: String): SnapChainComment? =
+		runCatching {
+			val c = rpc.getContent(author, permlink) ?: return null
+			// Strings only, never coerced: these fields are signed back verbatim.
+			fun field(name: String): String? = c.opt(name) as? String
+			SnapChainComment(
+				author = field("author") ?: return null,
+				permlink = field("permlink") ?: return null,
+				parentAuthor = field("parent_author") ?: return null,
+				parentPermlink = field("parent_permlink") ?: return null,
+				title = field("title") ?: "",
+				body = field("body") ?: return null,
+				jsonMetadata = field("json_metadata") ?: "",
+			)
+		}.getOrNull()
 }
 
 /**
@@ -383,6 +407,7 @@ class SnapPublisher(
 	)
 
 	private fun rootDestination(media: SnapMedia, userText: String): DestinationResult {
+		SnapPayloadBuilder.textProblem(userText)?.let { return DestinationResult.Refused(it) }
 		val payload = SnapPayloadBuilder.build(userText, media)
 		SnapPayloadBuilder.problem(payload, media)?.let { return DestinationResult.Refused(it) }
 
@@ -863,6 +888,7 @@ class SnapPublisher(
 			else -> Unit
 		}
 
+		SnapPayloadBuilder.textProblem(userText)?.let { return Staged.Failed(it) }
 		val payload = SnapPayloadBuilder.build(userText, media)
 		SnapPayloadBuilder.problem(payload, media)?.let { return Staged.Failed(it) }
 

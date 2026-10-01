@@ -78,7 +78,7 @@ internal fun SnapComposer(
 		// The close control sits above the field's top-right corner rather than
 		// on top of it. The spec draws it inside the box, level with the
 		// placeholder; there it would cover the end of the first line of a
-		// 200-character draft, and text disappearing under a button is a worse
+		// 280-character draft, and text disappearing under a button is a worse
 		// failure than the icon sitting a few dp higher than the sketch.
 		Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
 			Box(Modifier.weight(1f))

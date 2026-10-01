@@ -6,7 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The 200-character rule, from the user's side of the glass.
+ * The 280-character rule, from the user's side of the glass.
  *
  * Every emoji here is written as explicit code units rather than pasted, so the
  * test says which sequence it means and cannot be changed by an editor quietly
@@ -69,16 +69,16 @@ class SnapTextTest {
 
 	@Test
 	fun `joiners cannot smuggle extra letters past the limit`() {
-		// 400 visible letters, every pair welded by a joiner. Counted the old
-		// way this read as 200 and Post would have been enabled on a Snap twice
+		// 560 visible letters, every pair welded by a joiner. Counted the old
+		// way this read as 280 and Post would have been enabled on a Snap twice
 		// the length RustedWax promises to create.
-		val smuggled = "a‍b".repeat(200)
+		val smuggled = "a‍b".repeat(280)
 
-		assertEquals(400, SnapText.count(smuggled))
+		assertEquals(560, SnapText.count(smuggled))
 		assertTrue(SnapText.isOverflowing(smuggled))
 		assertFalse(SnapText.isValid(smuggled))
-		assertEquals(200, SnapText.overflow(smuggled))
-		assertEquals("-200", SnapText.counterLabel(smuggled))
+		assertEquals(280, SnapText.overflow(smuggled))
+		assertEquals("-280", SnapText.counterLabel(smuggled))
 	}
 
 	@Test
@@ -104,9 +104,9 @@ class SnapTextTest {
 
 	@Test
 	fun `joined arrows cannot bypass the limit either`() {
-		val smuggled = "←‍→".repeat(150) // 300 visible arrows
+		val smuggled = "←‍→".repeat(190) // 380 visible arrows
 
-		assertEquals(300, SnapText.count(smuggled))
+		assertEquals(380, SnapText.count(smuggled))
 		assertTrue(SnapText.isOverflowing(smuggled))
 		assertFalse(SnapText.isValid(smuggled))
 		assertEquals("-100", SnapText.counterLabel(smuggled))
@@ -167,17 +167,30 @@ class SnapTextTest {
 	}
 
 	@Test
-	fun `exactly two hundred is inside the limit`() {
-		val text = "a".repeat(200)
-		assertEquals(200, SnapText.count(text))
-		assertTrue(SnapText.isValid(text))
-		assertFalse(SnapText.isOverflowing(text))
-		assertEquals("200/200", SnapText.counterLabel(text))
+	fun `the limit is 280`() {
+		assertEquals(280, SnapText.LIMIT)
 	}
 
 	@Test
-	fun `two hundred and one is over, and Post has to go dead`() {
+	fun `exactly two hundred and eighty is inside the limit`() {
+		val text = "a".repeat(280)
+		assertEquals(280, SnapText.count(text))
+		assertTrue(SnapText.isValid(text))
+		assertFalse(SnapText.isOverflowing(text))
+		assertEquals(0, SnapText.overflow(text))
+		assertEquals("280/280", SnapText.counterLabel(text))
+	}
+
+	@Test
+	fun `what used to be over the old limit is now inside it`() {
 		val text = "a".repeat(201)
+		assertTrue(SnapText.isValid(text))
+		assertEquals("201/280", SnapText.counterLabel(text))
+	}
+
+	@Test
+	fun `two hundred and eighty one is over, and Post has to go dead`() {
+		val text = "a".repeat(281)
 		assertTrue(SnapText.isOverflowing(text))
 		assertFalse(SnapText.isValid(text))
 		assertEquals(1, SnapText.overflow(text))
@@ -186,17 +199,18 @@ class SnapTextTest {
 
 	@Test
 	fun `the overflow counter reports how far past the limit it is`() {
-		assertEquals("-12", SnapText.counterLabel("a".repeat(212)))
-		assertEquals("-53", SnapText.counterLabel("a".repeat(253)))
+		assertEquals("-12", SnapText.counterLabel("a".repeat(292)))
+		assertEquals("-53", SnapText.counterLabel("a".repeat(333)))
 	}
 
 	@Test
-	fun `two hundred emoji fit, because each one is a character`() {
-		val text = thumbsUp.repeat(200)
-		assertEquals(200, SnapText.count(text))
+	fun `two hundred and eighty emoji fit, because each one is a character`() {
+		val text = thumbsUp.repeat(280)
+		assertEquals(280, SnapText.count(text))
 		assertTrue(SnapText.isValid(text))
-		// Same draft measured naively would be 400 and be refused.
-		assertEquals(400, text.length)
+		// Same draft measured naively would be 560 and be refused.
+		assertEquals(560, text.length)
+		assertFalse(SnapText.isValid(text + thumbsUp))
 	}
 
 	@Test
@@ -228,9 +242,9 @@ class SnapTextTest {
 
 	@Test
 	fun `the counter starts where the mockup says it does`() {
-		assertEquals("0/200", SnapText.counterLabel(""))
-		assertEquals("37/200", SnapText.counterLabel("a".repeat(37)))
-		assertEquals("199/200", SnapText.counterLabel("a".repeat(199)))
+		assertEquals("0/280", SnapText.counterLabel(""))
+		assertEquals("37/280", SnapText.counterLabel("a".repeat(37)))
+		assertEquals("279/280", SnapText.counterLabel("a".repeat(279)))
 	}
 
 	@Test

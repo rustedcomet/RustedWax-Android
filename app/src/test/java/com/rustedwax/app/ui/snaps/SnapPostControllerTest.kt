@@ -215,6 +215,30 @@ class SnapPostControllerTest {
 		HiveRpc.BroadcastResult.Success("tx", "n", HiveRpc.BroadcastResult.Evidence.BLOCK)
 
 	@Test
+	fun `a History read started before a confirmed edit cannot replace its words`() {
+		val hive = Hive(inBlock())
+		val store = Store()
+		val key = SnapDraftKey.of("alice", eventId)
+		lateinit var posts: SnapPostController
+		val reader = object : PostedSnapReader {
+			override fun read(author: String, permlink: String): PostedSnapContent {
+				// The edit settles while a read of the previous body is in flight.
+				posts.applyEdit("alice", "$author/$permlink", "edited words")
+				return PostedSnapContent(
+					"old words\n\nhttps://youtu.be/8pSS6wdojqY\n\n#scrobblelife #scrobble #rustedwax",
+					1_000L,
+				)
+			}
+		}
+		posts = drawingController(hive, store, reader) { "alice" }
+
+		posts.post(key, eventId, media, "old words") {}
+
+		assertEquals("edited words", posts.posted(key)!!.userText)
+		assertEquals(1, hive.broadcasts)
+	}
+
+	@Test
 	fun `posts once and reports the published state`() {
 		val hive = Hive(inBlock())
 		val posts = controller(hive, Store()) { "alice" }
