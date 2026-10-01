@@ -1,5 +1,6 @@
 package com.rustedwax.app.detect
 
+import com.rustedwax.core.PlaybackInput
 import com.rustedwax.core.SourceSessionId
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -51,6 +52,9 @@ object NativeShortsObserver {
 			val displayOff: Boolean = false,
 			/** A paused Short whose picture-in-picture window is still on screen. */
 			val pipWindowPresent: Boolean = false,
+			/** Where YouTube's own window stood; see [PlaybackInput.SourceWindowEvidence]. */
+			val sourceWindow: PlaybackInput.SourceWindowEvidence =
+				PlaybackInput.SourceWindowEvidence.UNKNOWN,
 		) : Event
 		data class Disconnected(val reason: String) : Event
 	}
@@ -144,6 +148,8 @@ object NativeShortsObserver {
 		playbackRate: Double? = null,
 		displayOff: Boolean = false,
 		pipWindowPresent: Boolean = false,
+		sourceWindow: PlaybackInput.SourceWindowEvidence =
+			PlaybackInput.SourceWindowEvidence.UNKNOWN,
 	) {
 		_status.value = _status.value.copy(
 			connected = true,
@@ -165,6 +171,7 @@ object NativeShortsObserver {
 				playbackRate,
 				displayOff,
 				pipWindowPresent,
+				sourceWindow,
 			),
 		)
 	}

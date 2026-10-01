@@ -56,6 +56,7 @@ class NativeShortsAdapter {
 					playbackRate = event.playbackRate,
 					displayOff = event.displayOff,
 					pipWindowPresent = event.pipWindowPresent,
+					sourceWindow = event.sourceWindow,
 				),
 			)
 			// A Short opened and sent straight to PiP may never give the
@@ -125,6 +126,7 @@ class NativeShortsAdapter {
 				if (speedChip != null) capture.inferenceEnabled else capture.pipEvidence.playing,
 			playbackRate = speedChip,
 			pipWindowPresent = capture.pipEvidence.pausedButPresent,
+			sourceWindow = capturedTreeWindow(capture.pipEvidence),
 		)
 	}
 
@@ -168,6 +170,7 @@ class NativeShortsAdapter {
 				inferredPlaying = false,
 				playbackRate = null,
 				stabilityPending = true,
+				sourceWindow = capturedTreeWindow(capture.pipEvidence),
 			)
 		}
 	}
@@ -188,7 +191,29 @@ class NativeShortsAdapter {
 	 * what happened before this signal existed at all.
 	 */
 	fun readPictureInPictureWindows(windows: List<ShortsWindowFact>): Boolean =
-		windows.any { it.inPictureInPictureMode && it.ownerPackage() == packageName }
+		readPictureInPictureWindowState(windows) == ShortsPipWindowRead.PRESENT
+
+	/**
+	 * The same read, keeping "could not tell" apart from "proven absent" (#15).
+	 *
+	 * Absence is only ever proven by a non-empty list whose every
+	 * picture-in-picture window has an owner that is not YouTube. An empty or
+	 * missing list, or a picture-in-picture window whose owner cannot be read,
+	 * is unknown: it may well be YouTube's window still standing there.
+	 */
+	fun readPictureInPictureWindowState(windows: List<ShortsWindowFact>?): ShortsPipWindowRead {
+		if (windows.isNullOrEmpty()) return ShortsPipWindowRead.UNKNOWN
+		var unidentified = false
+		for (window in windows) {
+			if (!window.inPictureInPictureMode) continue
+			when (window.ownerPackage()) {
+				packageName -> return ShortsPipWindowRead.PRESENT
+				null -> unidentified = true
+				else -> Unit
+			}
+		}
+		return if (unidentified) ShortsPipWindowRead.UNKNOWN else ShortsPipWindowRead.ABSENT
+	}
 
 	/**
 	 * Interpret a missing/unavailable Android surface from framework primitives.
@@ -240,7 +265,31 @@ class NativeShortsAdapter {
 		playbackRate = null,
 		displayOff = displayOff,
 		pipWindowPresent = pipEvidence.pausedButPresent,
+		sourceWindow = when {
+			kind != ShortsSurfaceUnavailableKind.SURFACE_GONE -> PlaybackInput.SourceWindowEvidence.UNKNOWN
+			// The window list is only read when picture-in-picture time is on and
+			// Usage Access is granted; without it "no window" proves nothing.
+			!pipEvidence.inferenceEnabled -> PlaybackInput.SourceWindowEvidence.UNKNOWN
+			pipEvidence.pinnedWindowPresent -> PlaybackInput.SourceWindowEvidence.PICTURE_IN_PICTURE
+			// A dark screen hides windows without anyone closing them.
+			displayOff -> PlaybackInput.SourceWindowEvidence.UNKNOWN
+			// Only a window list that was read and proves no YouTube window.
+			pipEvidence.pinnedWindowAbsent -> PlaybackInput.SourceWindowEvidence.OFF_SCREEN
+			else -> PlaybackInput.SourceWindowEvidence.UNKNOWN
+		},
 	)
+
+	/**
+	 * A tree was captured, so YouTube owned the active root — unless Android also
+	 * lists its picture-in-picture window, which an immediate PiP handoff can do
+	 * while the old root is still the one being read.
+	 */
+	private fun capturedTreeWindow(pip: ShortsPipEvidence) =
+		if (pip.pinnedWindowPresent) {
+			PlaybackInput.SourceWindowEvidence.PICTURE_IN_PICTURE
+		} else {
+			PlaybackInput.SourceWindowEvidence.FOREGROUND
+		}
 
 	private fun parsed(
 		event: NativeShortsObserver.Event.Parsed,
@@ -307,6 +356,8 @@ class NativeShortsAdapter {
 			PlaybackInput.ForegroundSurfaceUnavailable(
 				reason = parsed.reason,
 				nowMillis = event.observedAtMillis,
+				// Parsed from a captured tree, so YouTube owned the active root.
+				sourceWindow = PlaybackInput.SourceWindowEvidence.FOREGROUND,
 			)
 	}
 }
@@ -364,6 +415,13 @@ data class ShortsWindowFact(
 	val ownerPackage: () -> String?,
 )
 
+/** What one read of Android's window list proved about YouTube's picture-in-picture window. */
+enum class ShortsPipWindowRead {
+	PRESENT,
+	ABSENT,
+	UNKNOWN,
+}
+
 /** Primitive public evidence used for surface-less playback. */
 data class ShortsPipEvidence(
 	val inferenceEnabled: Boolean,
@@ -371,6 +429,12 @@ data class ShortsPipEvidence(
 	val visiblePinnedWindow: Boolean,
 	/** Android reports a picture-in-picture window whose root package is YouTube. */
 	val pinnedWindowPresent: Boolean = false,
+	/**
+	 * Android's window list was read and positively lists no YouTube
+	 * picture-in-picture window. False whenever the read failed, came back empty
+	 * or met a window it could not identify — see [ShortsPipWindowRead].
+	 */
+	val pinnedWindowAbsent: Boolean = false,
 ) {
 	val playing: Boolean
 		get() = inferenceEnabled && mediaAudioStarted && visiblePinnedWindow
@@ -428,5 +492,8 @@ sealed interface ShortsSurfaceReading {
 		val stabilityPending: Boolean = false,
 		/** A paused-but-present picture-in-picture window; see [ShortsPipEvidence]. */
 		val pipWindowPresent: Boolean = false,
+		/** Where YouTube's own window stood; see [PlaybackInput.SourceWindowEvidence]. */
+		val sourceWindow: PlaybackInput.SourceWindowEvidence =
+			PlaybackInput.SourceWindowEvidence.UNKNOWN,
 	) : ShortsSurfaceReading
 }

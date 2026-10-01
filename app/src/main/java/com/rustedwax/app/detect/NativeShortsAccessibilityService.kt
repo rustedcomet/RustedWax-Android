@@ -15,6 +15,7 @@ import com.rustedwax.app.storage.Settings as AppSettings
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.rustedwax.app.BuildConfig
+import com.rustedwax.core.PlaybackInput
 import com.rustedwax.core.PlayerAdSurface
 import com.rustedwax.core.SourceSessionId
 import java.util.concurrent.atomic.AtomicBoolean
@@ -177,6 +178,8 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 		playbackRate: Double? = null,
 		displayOff: Boolean? = null,
 		pipWindowPresent: Boolean = false,
+		sourceWindow: PlaybackInput.SourceWindowEvidence =
+			PlaybackInput.SourceWindowEvidence.UNKNOWN,
 	) {
 		NativeShortsObserver.missing(
 			reason,
@@ -186,6 +189,7 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 			playbackRate,
 			displayOff = displayOff ?: !displayInteractive(),
 			pipWindowPresent = pipWindowPresent,
+			sourceWindow = sourceWindow,
 		)
 	}
 
@@ -236,6 +240,7 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 					playbackRate = reading.playbackRate,
 					displayOff = reading.displayOff,
 					pipWindowPresent = reading.pipWindowPresent,
+					sourceWindow = reading.sourceWindow,
 				)
 			}
 		}
@@ -374,12 +379,14 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 			}
 			return noPipEvidence()
 		}
-		val evidence = pipProbe.evidence(nowMillis, youTubePictureInPictureWindow())
+		val window = youTubePictureInPictureWindow()
+		val evidence = pipProbe.evidence(nowMillis, window == ShortsPipWindowRead.PRESENT)
 		return ShortsPipEvidence(
 			inferenceEnabled = true,
 			mediaAudioStarted = evidence.mediaAudioStarted,
 			visiblePinnedWindow = evidence.visiblePinnedWindow,
 			pinnedWindowPresent = evidence.pinnedWindowPresent,
+			pinnedWindowAbsent = window == ShortsPipWindowRead.ABSENT,
 		)
 	}
 
@@ -401,13 +408,15 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 	 * package before being discarded. Only the resulting boolean can reach
 	 * debug-only telemetry; no package name or other window metadata is retained.
 	 *
-	 * Fails closed: an empty list, a denied list, or a picture-in-picture window
-	 * whose owner cannot be established all return false, which leaves the
-	 * ordinary missing-proof grace to finalize exactly as it did before.
+	 * Fails closed in both directions: an empty list, a denied list, or a
+	 * picture-in-picture window whose owner cannot be established are UNKNOWN —
+	 * not present, so the ordinary missing-proof grace finalizes exactly as it
+	 * did before, and not proven absent, so it is never read as the viewer
+	 * closing the window (#15).
 	 */
-	private fun youTubePictureInPictureWindow(): Boolean = runCatching {
-		val open: List<AccessibilityWindowInfo> = windows ?: return false
-		shorts.readPictureInPictureWindows(
+	private fun youTubePictureInPictureWindow(): ShortsPipWindowRead = runCatching {
+		val open: List<AccessibilityWindowInfo> = windows ?: return ShortsPipWindowRead.UNKNOWN
+		shorts.readPictureInPictureWindowState(
 			open.map { window ->
 				ShortsWindowFact(
 					inPictureInPictureMode = window.isInPictureInPictureMode,
@@ -415,7 +424,7 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 				)
 			},
 		)
-	}.getOrDefault(false)
+	}.getOrDefault(ShortsPipWindowRead.UNKNOWN)
 
 	/**
 	 * The one fact read off a picture-in-picture window: who owns it.
@@ -560,6 +569,7 @@ class NativeShortsAccessibilityService : AccessibilityService() {
 				inferredPlaying = reading.inferredPlaying,
 				playbackRate = reading.playbackRate,
 				pipWindowPresent = reading.pipWindowPresent,
+				sourceWindow = reading.sourceWindow,
 			)
 
 			is ShortsSurfaceReading.Proven -> {
