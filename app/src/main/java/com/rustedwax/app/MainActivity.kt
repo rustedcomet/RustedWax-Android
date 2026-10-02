@@ -53,6 +53,7 @@ import com.rustedwax.app.snaps.HivePostedSnapReader
 import com.rustedwax.app.snaps.HiveSnapPort
 import com.rustedwax.app.snaps.PostedSnaps
 import com.rustedwax.app.snaps.SharedPreferencesPendingSnapStore
+import com.rustedwax.app.snaps.SharedPreferencesPostedSnapCache
 import com.rustedwax.app.snaps.SnapDeleter
 import com.rustedwax.app.snaps.SnapEditKind
 import com.rustedwax.app.snaps.SnapEditor
@@ -341,6 +342,8 @@ class MainActivity : ComponentActivity() {
 			// One store, shared by the two halves that need it: the publisher,
 			// which writes it, and the posted-Snap view, which only ever reads it.
 			val pendingSnaps = SharedPreferencesPendingSnapStore(applicationContext)
+			// The last chain body each posted Snap was read with (Issue 40C).
+			val postedCache = SharedPreferencesPostedSnapCache(applicationContext)
 			val publisher = SnapPublisher(
 				// The key is read inside the port at signing time, so it is never
 				// held by the publisher and an account switch changes it.
@@ -363,7 +366,11 @@ class MainActivity : ComponentActivity() {
 				// *read* — there is no key and no broadcaster behind it, so no
 				// posted card can ever cause a second publication.
 				postedSnaps = {
-					PostedSnaps(store = pendingSnaps, reader = HivePostedSnapReader())
+					PostedSnaps(
+						store = pendingSnaps,
+						reader = HivePostedSnapReader(),
+						cache = postedCache,
+					)
 				},
 			)
 		}
@@ -464,6 +471,8 @@ class MainActivity : ComponentActivity() {
 				},
 				// A deleted root Snap leaves its History card; the row stays.
 				onRootDeleted = posts::applyDelete,
+				// Opening a conversation re-reads its root Snap too (Issue 40C).
+				onRootOpened = posts::refreshContent,
 			)
 		}
 		// Likes. A third parallel assembly, and the narrowest of the three: it

@@ -43,6 +43,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -51,7 +52,11 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -85,6 +90,7 @@ import com.rustedwax.app.ui.snaps.SnapRootComposing
 import com.rustedwax.app.ui.snaps.SnapThreadMedia
 import com.rustedwax.app.ui.snaps.SnapThreadPreviewStrip
 import com.rustedwax.app.ui.snaps.SnapLikeController
+import com.rustedwax.app.ui.snaps.SnapMediaText
 import com.rustedwax.app.ui.snaps.SnapThreadSheet
 import com.rustedwax.app.snaps.SnapReplyTarget
 import com.rustedwax.app.ui.snaps.SnapText
@@ -246,6 +252,26 @@ fun MainScreen(
 	// that scrolls to it, so coming back to History later does not jump to a
 	// card the user dealt with minutes ago.
 	var focusEventId by remember { mutableStateOf<String?>(null) }
+
+	// Issue 40C: coming back to the app re-reads History's Snaps from Hive when
+	// the last successful read is five minutes old or more. Event-driven only —
+	// no timer, no service. The first ON_START is this screen being created
+	// (start-up already reads every posted Snap), so only a return counts.
+	val lifecycleOwner = LocalLifecycleOwner.current
+	val refreshNow by rememberUpdatedState { refreshSnaps(recent, snaps, posts, threads) }
+	DisposableEffect(lifecycleOwner) {
+		var created = false
+		val observer = LifecycleEventObserver { _, event ->
+			if (event != Lifecycle.Event.ON_START) return@LifecycleEventObserver
+			if (!created) {
+				created = true
+				return@LifecycleEventObserver
+			}
+			posts.refreshIfStale { refreshNow() }
+		}
+		lifecycleOwner.lifecycle.addObserver(observer)
+		onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+	}
 
 	// The bell's contents, rebuilt from live state rather than stored.
 	//
@@ -1363,6 +1389,7 @@ private fun VideoLink(
 	}
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun HistoryList(
 	recent: List<FinalizationRuntime.ScrobbleRecord>,
@@ -1433,7 +1460,9 @@ private fun HistoryList(
 			?.let { SnapThreadMedia(videoId = it.videoId, title = it.title, artist = it.artist) }
 		SnapThreadSheet(
 			root = root,
-			rootSnap = threads.openRootSnap,
+			// The posting controller's copy when it has one, so a refresh of the
+			// root (on open, on return, after an edit) reaches the sheet too.
+			rootSnap = posts.postedFor(root.contentId) ?: threads.openRootSnap,
 			threads = threads,
 			likes = likes,
 			nowEpochSec = System.currentTimeMillis() / 1000,
@@ -1441,6 +1470,7 @@ private fun HistoryList(
 			viewer = viewer,
 			rootComposer = null,
 			onDismiss = { threads.close() },
+			thumbnails = thumbnails,
 		)
 	}
 
@@ -1475,7 +1505,11 @@ private fun HistoryList(
 								media = SnapMedia(videoId = record.videoId),
 								userText = composeDraft,
 								onStaged = { snaps.collapse() },
-								onPublished = { snaps.discard(composeKey) },
+								onPublished = { contentId ->
+									snaps.discard(composeKey)
+									SnapReplyTarget.of(contentId.substringBefore('/'), contentId.substringAfter('/'))
+										?.let(threads::reloadAfterWrite)
+								},
 							)
 							// The sheet has done its job the moment the Snap is
 							// durably ours; the card behind it carries the rest.
@@ -1584,57 +1618,70 @@ private fun HistoryList(
 			}
 			seenNewest = newestId
 		}
-		LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-			// Keyed by the row's own identity, because rows are *prepended*: a
-			// new scrobble lands at index 0 and shifts every existing row down
-			// one. Identified by position, Compose hands the composition that
-			// was showing row N — and whatever it remembers — to the different
-			// record that now sits at N. An open "Discard Snap?" would move to
-			// another card that way, and answering it would delete a draft the
-			// user never opened.
-			//
-			// `eventId` rather than video-plus-second: that pair can repeat
-			// across two queued attempts on one video inside a single second,
-			// and a duplicate key here is the same bug wearing a better name.
-			items(recent, key = { it.eventId }) { r ->
-				SettingCard {
-					VideoBanner(r.videoId, thumbnails, onOpenVideo) { titleModifier ->
-						Text(
-							r.artist?.let { "$it — ${r.title}" } ?: r.title,
-							style = MaterialTheme.typography.titleSmall,
-							modifier = titleModifier,
+		// Issue 40C: a failed refresh leaves every card as it was — the last
+		// known good state, never a deletion — and says so once.
+		if (posts.refreshFailed) {
+			SnapNotice("Couldn't refresh Snaps from Hive. Pull down to try again.")
+		}
+		// Pulling down at the top re-reads the Snaps on these rows from Hive.
+		// The list stays exactly as it is while the reads run.
+		PullToRefreshBox(
+			isRefreshing = posts.isRefreshing,
+			onRefresh = { refreshSnaps(recent, snaps, posts, threads) },
+			modifier = Modifier.fillMaxSize(),
+		) {
+			LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+				// Keyed by the row's own identity, because rows are *prepended*: a
+				// new scrobble lands at index 0 and shifts every existing row down
+				// one. Identified by position, Compose hands the composition that
+				// was showing row N — and whatever it remembers — to the different
+				// record that now sits at N. An open "Discard Snap?" would move to
+				// another card that way, and answering it would delete a draft the
+				// user never opened.
+				//
+				// `eventId` rather than video-plus-second: that pair can repeat
+				// across two queued attempts on one video inside a single second,
+				// and a duplicate key here is the same bug wearing a better name.
+				items(recent, key = { it.eventId }) { r ->
+					SettingCard {
+						VideoBanner(r.videoId, thumbnails, onOpenVideo) { titleModifier ->
+							Text(
+								r.artist?.let { "$it — ${r.title}" } ?: r.title,
+								style = MaterialTheme.typography.titleSmall,
+								modifier = titleModifier,
+							)
+							Text(
+								"${r.percentPlayed}% · ${r.status}",
+								style = MaterialTheme.typography.bodySmall,
+								color = when {
+									r.status.startsWith("rejected") || r.queueFailed ->
+										MaterialTheme.colorScheme.error
+									r.queued || r.acceptedUnconfirmed ->
+										if (dark) Wax.AmberLight else Wax.Amber
+									else -> if (dark) Wax.SuccessGreenLight else Wax.SuccessGreen
+								},
+							)
+							// The transaction id is no longer drawn here. It is not
+							// gone — `record.txId` is untouched, the engine still
+							// logs "scrobbled (block): … — tx …", and every
+							// diagnostic path still carries it. It simply stopped
+							// being the third line of a card whose reader is not
+							// auditing a chain.
+						}
+						// The escape hatch for promoted content no rule can identify.
+						// Only offered where there's an id to key it on, and worded so
+						// it's clear this can't undo the entry above it — nothing can.
+						val id = r.videoId
+						Spacer(Modifier.height(6.dp))
+						SnapActionRow(
+							record = r,
+							muted = id in mutedIds,
+							snaps = snaps,
+							posts = posts,
+							threads = threads,
+							onMute = { onMute(r) },
 						)
-						Text(
-							"${r.percentPlayed}% · ${r.status}",
-							style = MaterialTheme.typography.bodySmall,
-							color = when {
-								r.status.startsWith("rejected") || r.queueFailed ->
-									MaterialTheme.colorScheme.error
-								r.queued || r.acceptedUnconfirmed ->
-									if (dark) Wax.AmberLight else Wax.Amber
-								else -> if (dark) Wax.SuccessGreenLight else Wax.SuccessGreen
-							},
-						)
-						// The transaction id is no longer drawn here. It is not
-						// gone — `record.txId` is untouched, the engine still
-						// logs "scrobbled (block): … — tx …", and every
-						// diagnostic path still carries it. It simply stopped
-						// being the third line of a card whose reader is not
-						// auditing a chain.
 					}
-					// The escape hatch for promoted content no rule can identify.
-					// Only offered where there's an id to key it on, and worded so
-					// it's clear this can't undo the entry above it — nothing can.
-					val id = r.videoId
-					Spacer(Modifier.height(6.dp))
-					SnapActionRow(
-						record = r,
-						muted = id in mutedIds,
-						snaps = snaps,
-						posts = posts,
-						threads = threads,
-						onMute = { onMute(r) },
-					)
 				}
 			}
 		}
@@ -1651,6 +1698,26 @@ private fun HistoryList(
  *
  * Nothing in here can post. Stage 1 draws the Post state and stops.
  */
+/**
+ * Issue 40C: re-read the posted Snaps on these History rows, and their
+ * conversations, from Hive. Bounded by the rows; keeps everything on screen
+ * while the reads run. Shared by pull-to-refresh and the foreground return.
+ */
+private fun refreshSnaps(
+	recent: List<FinalizationRuntime.ScrobbleRecord>,
+	snaps: SnapComposerState,
+	posts: SnapPostController,
+	threads: SnapThreadController,
+) {
+	posts.refresh(recent.map { it.eventId })
+	recent.asSequence()
+		.map { snaps.key(it.eventId) }
+		.filter { posts.status(it) is SnapPostStatus.Posted }
+		.mapNotNull { posts.posted(it) }
+		.mapNotNull { SnapReplyTarget.of(it.author, it.permlink) }
+		.forEach { threads.load(it, force = true) }
+}
+
 /** A short line under the composer explaining the last attempt. */
 @Composable
 private fun SnapNotice(message: String) {
@@ -1744,6 +1811,11 @@ private fun SnapActionRow(
 			// list already recomposes about once a second, which is far finer
 			// than the coarsest thing the age can say.
 			nowEpochSec = System.currentTimeMillis() / 1000,
+			onOpenThumbnail = {
+				it.takeIf { status !is SnapPostStatus.Interrupted }
+					?.let { p -> SnapReplyTarget.of(p.author, p.permlink) }
+					?.let { target -> threads.open(target, it) }
+			},
 		)
 	}
 
@@ -1770,7 +1842,13 @@ private fun SnapActionRow(
 		// each. `load` is idempotent, so the once-a-second recomposition above
 		// does not turn into a request per second.
 		LaunchedEffect(threads.threadKey(root)) { threads.load(root) }
-		threads.preview(root)?.let { preview ->
+		// A root that carries an image already shows its thumbnail; the reply
+		// strip under it would make the card a second conversation view.
+		// Comments (N) still says replies exist.
+		val rootHasImage = remember(published?.userText) {
+			!SnapMediaText.history(published?.userText.orEmpty()).showsReplyPreview
+		}
+		threads.preview(root)?.takeUnless { rootHasImage }?.let { preview ->
 			SnapThreadPreviewStrip(
 				preview = preview,
 			)
@@ -1818,11 +1896,13 @@ private fun SnapActionRow(
 			// and only because the user asked — nothing here resumes on its own.
 			status is SnapPostStatus.Interrupted -> WaxOutlinedButton(
 				onClick = {
-					posts.retry(key, record.eventId) {
+					posts.retry(key, record.eventId) { contentId ->
 						// Finishing a Snap is finishing it: the draft goes when
 						// the chain confirms, exactly as it does on a first
 						// attempt, and never a moment earlier.
 						snaps.discard(key)
+						SnapReplyTarget.of(contentId.substringBefore('/'), contentId.substringAfter('/'))
+							?.let(threads::reloadAfterWrite)
 					}
 				},
 				icon = WaxIcons.Send,
@@ -1869,10 +1949,12 @@ private fun SnapActionRow(
 						// `collapse` flushes the draft to disk first, so this
 						// hides the composer without destroying a word of it.
 						onStaged = { snaps.collapse() },
-						onPublished = {
+						onPublished = { contentId ->
 							// The draft is only destroyed once Hive has confirmed
 							// the Snap — never optimistically.
 							snaps.discard(key)
+							SnapReplyTarget.of(contentId.substringBefore('/'), contentId.substringAfter('/'))
+								?.let(threads::reloadAfterWrite)
 						},
 					)
 				},

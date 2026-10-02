@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
@@ -50,8 +51,13 @@ internal fun PostedSnapCard(
 	posted: PostedSnap,
 	nowEpochSec: Long,
 	modifier: Modifier = Modifier,
+	/** What a loaded thumbnail opens: the conversation, when there is one. */
+	onOpenThumbnail: () -> Unit = {},
 ) {
 	val author = posted.author
+	// A root that links an image shows it as one still thumbnail, not as its
+	// URL. Presentation only: [PostedSnap.userText] is what Edit starts from.
+	val shown = remember(posted.userText) { SnapMediaText.history(posted.userText) }
 
 	Row(
 		modifier = modifier
@@ -77,7 +83,7 @@ internal fun PostedSnapCard(
 					maxLines = 1,
 				)
 			}
-			posted.userText.takeIf { it.isNotEmpty() }?.let {
+			shown.text.takeIf { it.isNotEmpty() }?.let {
 				Text(
 					// The whole Snap, exactly as published.
 					//
@@ -95,6 +101,9 @@ internal fun PostedSnapCard(
 					style = MaterialTheme.typography.bodyMedium,
 					modifier = Modifier.padding(top = 2.dp),
 				)
+			}
+			shown.thumbnailStill?.let {
+				SnapHistoryThumbnail(it, gif = shown.thumbnail?.animated == true, onOpen = onOpenThumbnail)
 			}
 		}
 	}

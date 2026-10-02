@@ -124,6 +124,12 @@ class SnapThreadController internal constructor(
 	 * drawing it. The History row and its scrobble are untouched.
 	 */
 	private val onRootDeleted: (String, String) -> Unit = { _, _ -> },
+	/**
+	 * Told when the sheet opens on a root Snap, with the account and its
+	 * `author/permlink`, so the root's own body is re-read from Hive alongside
+	 * the replies (Issue 40C). The root belongs to the posting controller.
+	 */
+	private val onRootOpened: (String, String) -> Unit = { _, _ -> },
 	private val io: CoroutineDispatcher = Dispatchers.IO,
 ) {
 
@@ -195,6 +201,21 @@ class SnapThreadController internal constructor(
 	 * observable would cost recompositions for something no screen draws.
 	 */
 	private val inFlight = mutableSetOf<String>()
+
+	/**
+	 * Threads that were asked for a read after a write (see [reloadAfterWrite])
+	 * while one was already in flight. That earlier read may have left before
+	 * the write landed, so its answer cannot stand in for one taken after it.
+	 * One more read runs when it finishes (Issue 40C).
+	 */
+	private val again = mutableSetOf<String>()
+
+	/**
+	 * Account-scoped thread keys of root Snaps proven deleted (Issue 40C). A
+	 * read that left before the deletion, and answers after it, must not put
+	 * the conversation back on screen or in the stored preview.
+	 */
+	private val deletedRoots = mutableSetOf<String>()
 
 	// ── active UI state, and the account it belongs to ─────────────────
 
@@ -386,7 +407,7 @@ class SnapThreadController internal constructor(
 		val chain = chainRows[key] ?: return
 		val built = merged(root, chain)
 		loads[key] = SnapThreadLoad.Ready(built)
-		previews[key] = SnapThreadPreview.of(built)
+		previews[key] = SnapThreadPreview.of(built, SnapMediaText::previewLine)
 	}
 
 	/** The bounded form the History card draws. Null until a thread is loaded. */
@@ -451,6 +472,7 @@ class SnapThreadController internal constructor(
 	 */
 	fun load(root: SnapReplyTarget, force: Boolean = false) {
 		val key = threadKey(root)
+		if (key in deletedRoots) return
 		// Draw the last good summary before anything is asked of the network.
 		// Called from an effect and from the open handler, never from a draw, so
 		// seeding snapshot state here is safe.
@@ -486,6 +508,8 @@ class SnapThreadController internal constructor(
 				// Bob's key, and not under Alice's either, because writing it would
 				// make Bob's screen recompose on a conversation he cannot see.
 				if (accountId() != who) return@launch
+				// The root was proven deleted while this read was out.
+				if (key in deletedRoots) return@launch
 				if (replies == null) {
 					// Never downgrade a conversation that is already readable.
 					if (loads[key] !is SnapThreadLoad.Ready) {
@@ -505,7 +529,7 @@ class SnapThreadController internal constructor(
 				// is what Hive said rather than what the builder kept.
 				onChainRead(who, root, replies)
 				val built = merged(root, replies)
-				val preview = SnapThreadPreview.of(built)
+				val preview = SnapThreadPreview.of(built, SnapMediaText::previewLine)
 				loads[key] = SnapThreadLoad.Ready(built)
 				previews[key] = preview
 				// A proven answer replaces the remembered one. A failed read
@@ -516,8 +540,19 @@ class SnapThreadController internal constructor(
 				// Released on every path, including the account-switch return, so
 				// a later open is never refused by a guard nobody cleared.
 				inFlight.remove(key)
+				if (again.remove(key) && accountId() == who) load(root, force = true)
 			}
 		}
+	}
+
+	/**
+	 * Re-read a conversation because this app just wrote to it (Issue 40C):
+	 * a reply, an edit or a proven deletion. Unlike a repeated open, this may
+	 * not simply join a read already in flight — that read may predate the
+	 * write — so it queues exactly one more read to run after it.
+	 */
+	internal fun reloadAfterWrite(root: SnapReplyTarget) {
+		if (threadKey(root) in inFlight) again += threadKey(root) else load(root, force = true)
 	}
 
 	// ── the sheet ──────────────────────────────────────────────────────
@@ -538,6 +573,7 @@ class SnapThreadController internal constructor(
 		openEventState = null
 		replyingToState = null
 		load(root, force = true)
+		account()?.takeIf { it.isNotBlank() }?.let { onRootOpened(it, root.contentId) }
 	}
 
 	/**
@@ -765,6 +801,8 @@ class SnapThreadController internal constructor(
 		when (request.kind) {
 			SnapEditKind.ROOT -> {
 				val key = SnapDraftKey.of(who, request.target.contentId)
+				deletedRoots += key
+				again -= key
 				onRootDeleted(who, request.target.contentId)
 				loads.remove(key)
 				chainRows.remove(key)
@@ -776,7 +814,7 @@ class SnapThreadController internal constructor(
 					.add(request.target.contentId)
 				editedBodies.remove("$who|${request.target.contentId}")
 				redraw(request.root)
-				load(request.root, force = true)
+				reloadAfterWrite(request.root)
 			}
 		}
 	}
@@ -858,7 +896,7 @@ class SnapThreadController internal constructor(
 		}
 		// Ask Hive again, as after a reply. The override above holds the new
 		// words on screen if the read is still behind.
-		load(edit.root, force = true)
+		reloadAfterWrite(edit.root)
 	}
 
 	// ── reply drafts ───────────────────────────────────────────────────
@@ -1402,7 +1440,7 @@ class SnapThreadController internal constructor(
 	) {
 		applySettlement(key, who, target, intentId)
 		if (accountId() != who) return
-		load(root, force = true)
+		reloadAfterWrite(root)
 	}
 
 	/**

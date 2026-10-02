@@ -66,7 +66,93 @@ object PostedSnapBody {
 	 * code did not generate and cannot account for", which is exactly when the
 	 * caller must not display it.
 	 */
-	fun userText(body: String): String? {
+	fun userText(body: String): String? = split(body)?.first
+
+	/**
+	 * The exact `https://youtu.be/{id}` RustedWax attached, read from a body it
+	 * wrote itself — the identity [authored] removes. Null when [body] is not a
+	 * v1 Snap body.
+	 */
+	fun generatedUrl(body: String): String? = split(body)?.let { URL_PREFIX + it.second }
+
+	/**
+	 * The author's content in a chain body that is **not** in the frozen v1
+	 * shape — edited or rearranged by another frontend (Issue 40C).
+	 *
+	 * If RustedWax cannot unambiguously identify something as its own, it stays.
+	 * Once the generated structure is gone the three generic hashtags are not
+	 * identifiable at all — the author may have typed `#scrobble` too, and no
+	 * first/last/count rule can tell the copies apart — so none of them is ever
+	 * removed here. The one thing that can still be identified is [generatedUrl]:
+	 * the exact link RustedWax attached to *this* Snap, read from the body it
+	 * stored for the same author/permlink. It goes only when it appears exactly
+	 * once as a whole token; twice is ambiguous and both stay. Every other
+	 * character — prose, images, links, hashtags — is the author's. A line
+	 * emptied by the removal goes; the blank lines around it close up.
+	 */
+	fun authored(body: String, generatedUrl: String): String {
+		val cuts = wholeTokens(body, generatedUrl).takeIf { it.size == 1 } ?: return body
+		// Each line with its own cuts, by index — nothing is written into the
+		// text to mark them, so any character the author used is safe.
+		val lines = mutableListOf<String?>()
+		var start = 0
+		while (start <= body.length) {
+			val nl = body.indexOf('\n', start).let { if (it < 0) body.length else it }
+			val inLine = cuts.filter { it.first >= start && it.last < nl }
+			lines += if (inLine.isEmpty()) body.substring(start, nl) else closeUp(body, start, nl, inLine)
+			start = nl + 1
+		}
+		// A run of blank lines that held a removed line becomes one blank line;
+		// at either end of the body it goes entirely.
+		val out = mutableListOf<String>()
+		var blank = mutableListOf<String?>()
+		fun flush(atEnd: Boolean) {
+			val removed = blank.any { it == null }
+			when {
+				!removed -> out += blank.filterNotNull()
+				atEnd || out.isEmpty() -> Unit
+				else -> out += ""
+			}
+			blank = mutableListOf()
+		}
+		for (line in lines) {
+			if (line == null || line.isBlank()) blank += line else {
+				flush(atEnd = false)
+				out += line
+			}
+		}
+		flush(atEnd = true)
+		return out.joinToString("\n")
+	}
+
+	/**
+	 * One line of [body] (`start until end`) without its [cuts]. Null when only
+	 * removed tokens and spaces were on it. The gap a token leaves closes to one
+	 * space between words and to nothing at either end of the line.
+	 */
+	private fun closeUp(body: String, start: Int, end: Int, cuts: List<IntRange>): String? {
+		val pieces = mutableListOf<String>()
+		var at = start
+		for (cut in cuts) {
+			pieces += body.substring(at, cut.first)
+			at = cut.last + 1
+		}
+		pieces += body.substring(at, end)
+		if (pieces.all { it.isBlank() }) return null
+		val sb = StringBuilder()
+		pieces.forEachIndexed { i, piece ->
+			var p = piece
+			if (i > 0) p = p.trimStart(' ', '\t')
+			if (i < pieces.lastIndex) p = p.trimEnd(' ', '\t')
+			if (p.isEmpty()) return@forEachIndexed
+			if (sb.isNotEmpty() && i > 0) sb.append(' ')
+			sb.append(p)
+		}
+		return sb.toString()
+	}
+
+	/** (user text, video id) of a v1 body, or null when it is not one. */
+	private fun split(body: String): Pair<String, String>? {
 		val tail = SEPARATOR + SnapPayloadBuilder.TAG_LINE
 		// Must be the end of the body, not merely present in it.
 		if (!body.endsWith(tail)) return null
@@ -83,7 +169,21 @@ object PostedSnapBody {
 		val videoId = head.substring(urlStart + urlMark.length)
 		if (videoId.isEmpty() || !VIDEO_ID.matches(videoId)) return null
 
-		return head.substring(0, urlStart)
+		return head.substring(0, urlStart) to videoId
+	}
+
+	/** Every whole-token occurrence of [token]: bounded by whitespace or the ends. */
+	private fun wholeTokens(text: String, token: String): List<IntRange> {
+		val found = mutableListOf<IntRange>()
+		var i = text.indexOf(token)
+		while (i >= 0) {
+			val end = i + token.length
+			val before = i == 0 || text[i - 1].isWhitespace()
+			val after = end == text.length || text[end].isWhitespace()
+			if (before && after) found += i until end
+			i = text.indexOf(token, i + 1)
+		}
+		return found
 	}
 
 	// There is deliberately no display-length limit here, and no caller that
