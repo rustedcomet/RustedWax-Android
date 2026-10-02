@@ -25,6 +25,7 @@ import com.rustedwax.hive.SnapContainerResolver
 import com.rustedwax.hive.TxSerializer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asCoroutineDispatcher
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -370,6 +371,69 @@ class SnapDeleteControllerTest {
 
 		assertEquals(listOf("alice" to root.contentId), h.rootDeletes)
 		assertNull(h.threads.openThread)
+	}
+
+	/**
+	 * Issue 40C: a thread read that left before the root was deleted, and
+	 * answers after, must not put the deleted root's conversation back.
+	 */
+	@Test
+	fun `a thread read in flight across a root deletion cannot repopulate it`() {
+		val h = Harness()
+		h.chain.put(SnapReply("alice", root.permlink, "peak.snaps", "snap-container-1789648560", "snap", 900L))
+		val pool = java.util.concurrent.Executors.newCachedThreadPool()
+		val io = pool.asCoroutineDispatcher()
+		val inRead = java.util.concurrent.CountDownLatch(1)
+		val release = java.util.concurrent.CountDownLatch(1)
+		val reads = java.util.concurrent.atomic.AtomicInteger()
+		val deletes = java.util.Collections.synchronizedList(mutableListOf<Pair<String, String>>())
+		val reader = object : SnapThreadReader {
+			override fun read(rootAuthor: String, rootPermlink: String, viewer: String?): List<SnapReply> {
+				if (reads.incrementAndGet() == 2) {
+					inRead.countDown()
+					release.await(5, java.util.concurrent.TimeUnit.SECONDS)
+				}
+				// Pre-deletion answer: the root with a reply under it.
+				return listOf(theirs)
+			}
+		}
+		val threads = SnapThreadController(
+			scope = CoroutineScope(Dispatchers.Unconfined),
+			reader = { reader },
+			publisher = { SnapPublisher(h.chain, h.store, nowEpochSec = { 1_000L }) },
+			account = { "alice" },
+			drafts = Drafts(),
+			previewStore = Previews(),
+			deleter = { h.deleter },
+			onRootDeleted = { a, id -> deletes += a to id },
+			io = io,
+		)
+		fun until(what: () -> Boolean) {
+			val end = System.currentTimeMillis() + 5_000
+			while (!what()) { check(System.currentTimeMillis() < end); Thread.sleep(5) }
+		}
+		try {
+			threads.open(root, null)
+			until { threads.thread(root) != null }
+			threads.load(root, force = true)
+			check(inRead.await(5, java.util.concurrent.TimeUnit.SECONDS))
+
+			// The deletion is proven while that read is still out.
+			threads.requestDelete(root, root, SnapEditKind.ROOT, "snap")
+			until { threads.deleting?.phase == SnapThreadController.DeletePhase.CONFIRM }
+			threads.confirmDelete()
+			until { deletes.isNotEmpty() && threads.deleting == null }
+
+			release.countDown()
+			Thread.sleep(200)
+			assertEquals(listOf("alice" to root.contentId), deletes.toList())
+			assertNull("deleted root's conversation came back", threads.state(root))
+			assertNull(threads.preview(root))
+			assertNull(threads.rootOf(SnapReplyTarget.of(theirs)!!))
+		} finally {
+			release.countDown()
+			pool.shutdown()
+		}
 	}
 
 	// ── isolation and exclusivity ──────────────────────────────────────

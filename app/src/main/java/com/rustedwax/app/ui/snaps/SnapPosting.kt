@@ -1,7 +1,10 @@
 package com.rustedwax.app.ui.snaps
 
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.rustedwax.app.snaps.PendingSnapKind
 import com.rustedwax.app.snaps.PostedSnap
 import com.rustedwax.app.snaps.PostedSnaps
@@ -10,6 +13,9 @@ import com.rustedwax.app.snaps.SnapPublisher
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -139,6 +145,8 @@ class SnapPostController(
 	 * from its status, it just has no words to show.
 	 */
 	private val postedSnaps: () -> PostedSnaps? = { null },
+	/** Wall clock for the foreground staleness rule. Epoch millis. */
+	private val clock: () -> Long = System::currentTimeMillis,
 ) {
 
 	private val statuses = mutableStateMapOf<String, SnapPostStatus>()
@@ -175,10 +183,119 @@ class SnapPostController(
 	 */
 	private val posted = mutableStateMapOf<String, PostedSnap>()
 
+	/**
+	 * Ordering for chain refreshes of one card (Issue 40C). Every refresh takes
+	 * the next number when it starts; [appliedSeq] is the newest number whose
+	 * answer is on screen. An answer older than that is discarded, so network
+	 * completion order can never roll a card back. A proven local edit takes a
+	 * number too, which retires every refresh that started before it.
+	 */
+	private var nextSeq = 0L
+	private val appliedSeq = mutableMapOf<String, Long>()
+
+	/** The account a refresh pass is running for, or null. See [isRefreshing]. */
+	private var refreshingFor by mutableStateOf<String?>(null)
+
+	/** The account whose last refresh pass did not fully succeed, or null. */
+	private var refreshFailedFor by mutableStateOf<String?>(null)
+
+	/** True while a refresh pass runs for the account signed in now. */
+	val isRefreshing: Boolean
+		get() = refreshingFor != null && refreshingFor == account()?.takeIf { it.isNotBlank() }
+
+	/**
+	 * True when the signed-in account's last refresh pass could not read every
+	 * Snap. What is on screen is then the last known good state, not a
+	 * deletion; pulling again is the retry, and it reads the chain again.
+	 */
+	val refreshFailed: Boolean
+		get() = refreshFailedFor != null && refreshFailedFor == account()?.takeIf { it.isNotBlank() }
+
 	fun status(key: String): SnapPostStatus = statuses[key] ?: SnapPostStatus.Idle
 
 	/** What this card's posted Snap says, once there is one to show. */
 	fun posted(key: String): PostedSnap? = posted[key]
+
+	/**
+	 * The signed-in account's posted Snap with this `author/permlink`, or null.
+	 * What the Comments sheet draws as its root, so a refresh reaches it too.
+	 */
+	fun postedFor(contentId: String): PostedSnap? {
+		val prefix = SnapDraftKey.of(account()?.takeIf { it.isNotBlank() } ?: return null, "")
+		return posted.entries.firstOrNull { it.key.startsWith(prefix) && it.value.contentId == contentId }
+			?.value
+	}
+
+	// ── refreshing from the chain (Issue 40C) ──────────────────────────
+
+	/**
+	 * Re-read the posted Snaps of these History rows from Hive.
+	 *
+	 * The pull-to-refresh and foreground trigger. Bounded by the rows handed
+	 * in — History's own, never an account-wide sweep. Every card keeps what it
+	 * shows while the reads run; each one is replaced only by a successful,
+	 * identity-checked answer that is newer than what is on screen. When every
+	 * read succeeded the account's successful-refresh time moves forward.
+	 * One pass at a time per account; a pass that finds no posted Snap does
+	 * nothing at all.
+	 */
+	fun refresh(eventIds: Collection<String>) {
+		val who = account()?.takeIf { it.isNotBlank() } ?: return
+		if (refreshingFor == who) return
+		val rows = eventIds.distinct()
+			.map { SnapDraftKey.of(who, it) to it }
+			.filter { (key, _) -> statuses[key] is SnapPostStatus.Posted && posted[key] != null }
+		if (rows.isEmpty()) return
+		refreshingFor = who
+		scope.launch {
+			try {
+				val ok = coroutineScope {
+					rows.map { (key, eventId) -> async { refreshPosted(key, eventId) } }.awaitAll()
+				}
+				if (account() != who) return@launch
+				if (ok.all { it }) {
+					withContext(io) { postedSnaps()?.markRefreshed(who, clock()) }
+					if (refreshFailedFor == who) refreshFailedFor = null
+				} else {
+					refreshFailedFor = who
+				}
+			} finally {
+				if (refreshingFor == who) refreshingFor = null
+			}
+		}
+	}
+
+	/**
+	 * Run [refreshNow] only when the signed-in account's last fully successful
+	 * refresh is [STALE_AFTER_MILLIS] old or older (or there has been none).
+	 * Called when the app returns to the foreground; it is not a timer.
+	 * [refreshNow] is the screen's whole refresh — [refresh] plus the threads.
+	 */
+	fun refreshIfStale(refreshNow: () -> Unit) {
+		val who = account()?.takeIf { it.isNotBlank() } ?: return
+		scope.launch {
+			val last = withContext(io) { postedSnaps()?.lastRefreshed(who) }
+			if (account() != who) return@launch
+			if (isStale(last, clock())) refreshNow()
+		}
+	}
+
+	/**
+	 * Re-read one posted Snap by its `author/permlink` — the Comments sheet
+	 * opening on it, or a write RustedWax just made to it.
+	 */
+	fun refreshContent(account: String, contentId: String) {
+		val who = this.account()?.takeIf { it.isNotBlank() } ?: return
+		if (who != account) return
+		val prefix = SnapDraftKey.of(who, "")
+		posted.entries
+			.filter { it.key.startsWith(prefix) && it.value.contentId == contentId }
+			.map { it.key }
+			.forEach { key ->
+				val eventId = key.removePrefix(prefix)
+				scope.launch { refreshPosted(key, eventId) }
+			}
+	}
 
 	/**
 	 * A root Snap's words were edited on chain: draw the new ones on its card.
@@ -194,7 +311,13 @@ class SnapPostController(
 		posted.entries
 			.filter { it.key.startsWith(prefix) && it.value.contentId == contentId }
 			.map { it.key to it.value }
-			.forEach { (key, snap) -> posted[key] = snap.copy(userText = userText) }
+			.forEach { (key, snap) ->
+				posted[key] = snap.copy(userText = userText)
+				// Anything read before this edit landed is older than it.
+				appliedSeq[key] = ++nextSeq
+			}
+		// And ask Hive what it holds now, rather than trusting the words sent.
+		refreshContent(account, contentId)
 	}
 
 	/**
@@ -212,6 +335,7 @@ class SnapPostController(
 			.filter { it.key.startsWith(prefix) && it.value.contentId == contentId }
 			.map { it.key }
 			.forEach { key ->
+				appliedSeq[key] = ++nextSeq
 				posted.remove(key)
 				statuses.remove(key)
 			}
@@ -584,18 +708,25 @@ class SnapPostController(
 			// rows phase one drew are already on screen, and a read can only
 			// improve one.
 			val drawn = confirmed.mapTo(mutableSetOf()) { it.first }
-			resolved.asSequence()
-				.filter { it.second is SnapPublisher.Outcome.Published }
-				.forEach { (eventId, _) ->
-					val key = SnapDraftKey.of(who, eventId)
-					scope.launch {
-						// A row phase one could not draw — reconciliation has only
-						// just proved it — still gets its local read first, so it
-						// survives a chain read that fails.
-						if (eventId !in drawn) captureLocal(key, eventId)
-						refreshPosted(key, eventId)
+			val ok = coroutineScope {
+				resolved
+					.filter { it.second is SnapPublisher.Outcome.Published }
+					.map { (eventId, _) ->
+						val key = SnapDraftKey.of(who, eventId)
+						async {
+							// A row phase one could not draw — reconciliation has only
+							// just proved it — still gets its local read first, so it
+							// survives a chain read that fails.
+							if (eventId !in drawn) captureLocal(key, eventId)
+							refreshPosted(key, eventId)
+						}
 					}
-				}
+					.awaitAll()
+			}
+			// A start-up that read every Snap is a successful refresh.
+			if (ok.isNotEmpty() && ok.all { it } && account() == who) {
+				withContext(io) { postedSnaps()?.markRefreshed(who, clock()) }
+			}
 		}
 	}
 
@@ -661,15 +792,26 @@ class SnapPostController(
 	 * failure the locally drawn card simply stays, which is why this may run
 	 * late, concurrently, or not at all without costing the user anything.
 	 */
-	private suspend fun refreshPosted(key: String, eventId: String) {
-		val who = account()?.takeIf { it.isNotBlank() } ?: return
-		if (key != SnapDraftKey.of(who, eventId)) return
-		val source = postedSnaps() ?: return
-		val before = posted[key]
-		withContext(io) { runCatching { source.refreshed(who, eventId) }.getOrNull() }?.let {
-			// A confirmed edit may have replaced this card while the read ran.
-			if (account() == who && posted[key] == before) posted[key] = it
-		}
+	private suspend fun refreshPosted(key: String, eventId: String): Boolean {
+		val who = account()?.takeIf { it.isNotBlank() } ?: return false
+		if (key != SnapDraftKey.of(who, eventId)) return false
+		val source = postedSnaps() ?: return false
+		val seq = ++nextSeq
+		val read = withContext(io) { runCatching { source.readRefresh(who, eventId) }.getOrNull() }
+		// Only a successful read moves the card. A failed one returns the local
+		// record, which may be older than what is drawn — so it changes nothing.
+		if (read == null || !read.snap.fromChain) return false
+		// Another account's answer lands nowhere; an older answer than the one
+		// on screen (or than a proven edit) is discarded.
+		if (account() != who) return false
+		if (statuses[key] !is SnapPostStatus.Posted || posted[key]?.contentId != read.snap.contentId) return false
+		if (seq < (appliedSeq[key] ?: 0L)) return true
+		// Persist only the same answer accepted for display, with no suspension
+		// between ordering, record validation, persistence and drawing.
+		if (!runCatching { source.rememberRefresh(who, eventId, read) }.getOrDefault(false)) return false
+		appliedSeq[key] = seq
+		posted[key] = read.snap
+		return true
 	}
 
 	private fun SnapPublisher.Outcome.toStatus(): SnapPostStatus = when (this) {
@@ -699,5 +841,14 @@ class SnapPostController(
 			}
 			.map { SnapAttention(SnapAttention.Kind.ROOT, it.key, it.value) }
 			.sortedBy { it.key }
+	}
+
+	companion object {
+		/** Issue 40C: a foreground return refreshes at five minutes or more. */
+		const val STALE_AFTER_MILLIS = 5 * 60 * 1000L
+
+		/** Whether a refresh last completed at [lastMillis] is due at [nowMillis]. */
+		fun isStale(lastMillis: Long?, nowMillis: Long): Boolean =
+			lastMillis == null || nowMillis - lastMillis >= STALE_AFTER_MILLIS
 	}
 }

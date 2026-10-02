@@ -220,12 +220,19 @@ class SnapPostControllerTest {
 		val store = Store()
 		val key = SnapDraftKey.of("alice", eventId)
 		lateinit var posts: SnapPostController
+		var reads = 0
 		val reader = object : PostedSnapReader {
 			override fun read(author: String, permlink: String): PostedSnapContent {
-				// The edit settles while a read of the previous body is in flight.
-				posts.applyEdit("alice", "$author/$permlink", "edited words")
+				val words = if (++reads == 1) {
+					// The edit settles while a read of the previous body is in
+					// flight — and from then on the chain holds the new words.
+					posts.applyEdit("alice", "$author/$permlink", "edited words")
+					"old words"
+				} else {
+					"edited words"
+				}
 				return PostedSnapContent(
-					"old words\n\nhttps://youtu.be/8pSS6wdojqY\n\n#scrobblelife #scrobble #rustedwax",
+					"$words\n\nhttps://youtu.be/8pSS6wdojqY\n\n#scrobblelife #scrobble #rustedwax",
 					1_000L,
 				)
 			}
@@ -235,6 +242,8 @@ class SnapPostControllerTest {
 		posts.post(key, eventId, media, "old words") {}
 
 		assertEquals("edited words", posts.posted(key)!!.userText)
+		// Issue 40C: the proven edit is re-fetched from Hive.
+		assertEquals(2, reads)
 		assertEquals(1, hive.broadcasts)
 	}
 

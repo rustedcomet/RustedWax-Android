@@ -348,7 +348,15 @@ object SnapThreadPreview {
 	 * History row scale with somebody else's argument. This keeps a list of at
 	 * most [MAX_PREVIEWS] and walks the rows once.
 	 */
-	fun of(thread: SnapThread): Preview {
+	fun of(
+		thread: SnapThread,
+		/**
+		 * How a reply reads on the card, applied to the whole body before it is
+		 * clamped — so a rule that recognises whole links (Issue 40C hides image
+		 * URLs) never meets a link the clamp cut in half. Identity by default.
+		 */
+		line: (String) -> String = { it },
+	): Preview {
 		// Newest first while it is being built, reversed at the end so the card
 		// reads oldest-of-the-two downwards, the way a conversation does.
 		val newest = ArrayList<SnapReply>(MAX_PREVIEWS)
@@ -361,7 +369,7 @@ object SnapThreadPreview {
 			if (newest.size > MAX_PREVIEWS) newest.removeAt(newest.lastIndex)
 		}
 		return Preview(
-			items = newest.asReversed().map { clamp(it) },
+			items = newest.asReversed().map { clamp(it, line(it.body)) },
 			total = thread.total,
 		)
 	}
@@ -380,12 +388,12 @@ object SnapThreadPreview {
 		return if (at != bt) at > bt else a.contentId > b.contentId
 	}
 
-	private fun clamp(reply: SnapReply): Item =
+	private fun clamp(reply: SnapReply, text: String): Item =
 		Item(
 			author = reply.author,
 			permlink = reply.permlink,
-			text = clampText(reply.body),
-			truncated = reply.body.codePointCount(0, reply.body.length) > MAX_PREVIEW_CHARS,
+			text = clampText(text),
+			truncated = text.codePointCount(0, text.length) > MAX_PREVIEW_CHARS,
 		)
 
 	/**

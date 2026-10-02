@@ -372,11 +372,41 @@ class PostedSnapCardPresentationTest {
 		assertTrue("a legal Snap is far longer than the old limit", emoji.length > 2_000)
 	}
 
+	/**
+	 * The stored Snap reaches the screen through exactly one step, and that
+	 * step changes nothing in a Snap without an image: every shape the old
+	 * truncation destroyed comes back character for character.
+	 */
+	@Test
+	fun `the only step between the stored Snap and its Text is the media display`() {
+		val source = card
+		assertEquals(
+			"posted.userText feeds the card from exactly one place",
+			listOf("val shown = remember(posted.userText) { SnapMediaText.history(posted.userText) }"),
+			source.lines().map { it.trim() }.filter { it.contains("posted.userText") },
+		)
+		val lines = (1..20).joinToString("\n") { "line $it" }
+		val emoji = "👨‍👩‍👧‍👦".repeat(200)
+		listOf(lines, emoji, "   padded   ", "\n\nedged\n\n", "a link https://peakd.com/x").forEach {
+			assertEquals(it, SnapMediaText.history(it).text)
+		}
+	}
+
 	private companion object {
 		const val CARD = "app/src/main/java/com/rustedwax/app/ui/snaps/PostedSnapCard.kt"
 
-		/** How the body reaches the card. The anchor everything here hangs on. */
-		const val BODY_SOURCE = "posted.userText"
+		/**
+		 * How the body reaches the card's Text. The anchor everything here hangs on.
+		 *
+		 * Issue 40C: a History card no longer prints the URL of an image it
+		 * already shows as a thumbnail, so the words drawn are `shown.text` —
+		 * [SnapMediaText.history] of `posted.userText`, which removes previewed
+		 * image/GIF links and nothing else. That one transformation is pinned by
+		 * `the only step between the stored Snap and its Text is the media display`
+		 * below and by `SnapMediaTextTest`; everything here still guards the rest
+		 * of the path.
+		 */
+		const val BODY_SOURCE = "shown.text"
 
 		/**
 		 * Chain links that hand the string on unchanged, or not at all.

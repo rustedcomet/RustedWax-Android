@@ -89,8 +89,9 @@ internal fun SnapThreadPreviewStrip(
 				Text(
 					// Plain characters and only plain characters: `Text` has no
 					// markup, no HTML and no link handling, so nothing a stranger
-					// wrote can be anything but text on this card.
-					if (item.truncated) item.text + "…" else item.text,
+					// wrote can be anything but text on this card. An image/GIF
+					// link is not printed as its URL — see [SnapMediaText.previewLine].
+					SnapMediaText.previewLine(item.text).let { if (item.truncated) "$it…" else it },
 					style = MaterialTheme.typography.bodySmall,
 					maxLines = 2,
 					overflow = TextOverflow.Ellipsis,
@@ -167,6 +168,11 @@ internal fun SnapThreadSheet(
 	/** Present only while [root] is null: the first Snap is written here. */
 	rootComposer: SnapRootComposing?,
 	onDismiss: () -> Unit,
+	/**
+	 * Whether YouTube previews may fetch their frame from i.ytimg.com — the
+	 * same consent History's banners ride. Off still draws the play card.
+	 */
+	thumbnails: Boolean = false,
 ) {
 	val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 	// Which comment the composer at the bottom is aimed at. Null is the ordinary
@@ -263,6 +269,7 @@ internal fun SnapThreadSheet(
 								// a heart, and `SnapLikeController.showsHeart` is what
 								// enforces that rather than this argument.
 								viewerVote = ViewerVote.Unreadable("the root Snap is your own"),
+								thumbnails = thumbnails,
 								// The root's own Like count *is* carried; the heart
 								// beside it stays non-interactive — see
 								// [SocialLikeCount].
@@ -331,7 +338,7 @@ internal fun SnapThreadSheet(
 							// adds a reply cannot hand one comment's composition to
 							// another comment.
 							items(nodes, key = { it.reply.contentId }) { node ->
-								ReplyBlock(node, root, threads, likes, nowEpochSec) {
+								ReplyBlock(node, root, threads, likes, nowEpochSec, thumbnails) {
 									replyTarget = it
 								}
 							}
@@ -858,6 +865,7 @@ private fun ReplyBlock(
 	threads: SnapThreadController,
 	likes: SnapLikeController,
 	nowEpochSec: Long,
+	thumbnails: Boolean,
 	onReplyTo: (SnapReplyTarget) -> Unit,
 ) {
 	val reply: SnapReply = node.reply
@@ -881,6 +889,7 @@ private fun ReplyBlock(
 		// parsed from — no extra request, and never an authorization. Tapping
 		// the heart re-reads the chain before anything is signed.
 		viewerVote = reply.viewerVote,
+		thumbnails = thumbnails,
 		onReplyTo = onReplyTo,
 		onEdit = SnapReplyTarget.of(reply)
 			?.takeIf { threads.canEdit(reply.author) }
@@ -913,6 +922,8 @@ private fun CommentBlock(
 	viewerVote: ViewerVote,
 	/** Positive votes the chain last showed here. Presentation only. */
 	likeCount: Int,
+	/** See [SnapThreadSheet]'s `thumbnails`. */
+	thumbnails: Boolean,
 	/** Aims the sheet's one composer at this comment. */
 	onReplyTo: (SnapReplyTarget) -> Unit,
 	/** Present only on the viewer's own comments: puts this one in the bar. */
@@ -945,10 +956,17 @@ private fun CommentBlock(
 					)
 				}
 			}
-			body.takeIf { it.isNotEmpty() }?.let {
-				// Complete, however long. See [SnapThreadSheet].
-				Text(it, style = MaterialTheme.typography.bodyMedium)
+			// The one place both a root Snap and a reply draw their media, keyed
+			// on the comment's own body — so an edit redraws it and a deleted
+			// comment takes its previews with it. A link drawn as a preview is
+			// not printed above it as well; [body] itself is never changed.
+			val shown = remember(body) { SnapMediaText.display(body) }
+			shown.text.takeIf { it.isNotEmpty() }?.let {
+				// Complete, however long. See [SnapThreadSheet]. Links in it
+				// are tappable and open outside the app.
+				SnapLinkedText(it, style = MaterialTheme.typography.bodyMedium)
 			}
+			SnapMediaPreviews(shown.media, thumbnails)
 
 			// Both, in this order: a comment whose identity did not survive
 			// validation gets no Reply control at all.
