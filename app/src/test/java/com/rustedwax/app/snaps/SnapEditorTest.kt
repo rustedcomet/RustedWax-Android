@@ -408,6 +408,52 @@ class SnapEditorTest {
 		assertEquals("first words", chain.comment!!.body)
 	}
 
+	@Test
+	fun `retry of an ambiguous transaction neither signs nor broadcasts until absence is proven`() {
+		val chain = Chain(replyOnChain(), result = HiveRpc.BroadcastResult.NetworkFailure("lost"))
+		val editor = SnapEditor(chain)
+		assertTrue(editor.edit(account, reply, SnapEditKind.REPLY, "new") is SnapEditor.Outcome.Uncertain)
+		repeat(2) {
+			assertTrue(editor.edit(account, reply, SnapEditKind.REPLY, "new") is SnapEditor.Outcome.Uncertain)
+		}
+		assertEquals(1, chain.prepared.size)
+		assertEquals(1, chain.broadcasts)
+		chain.evidence = HiveRpc.TransactionEvidence.ABSENT
+		assertTrue(editor.edit(account, reply, SnapEditKind.REPLY, "new") is SnapEditor.Outcome.Failed)
+		assertEquals(1, chain.broadcasts)
+		chain.result = Chain.inBlock()
+		assertTrue(editor.edit(account, reply, SnapEditKind.REPLY, "new") is SnapEditor.Outcome.Edited)
+		assertEquals(2, chain.broadcasts)
+	}
+
+	@Test
+	fun `late inclusion confirms the retained words and repairs only the confirmed cache`() {
+		val chain = Chain(rootOnChain(), result = HiveRpc.BroadcastResult.NetworkFailure("lost"))
+		val store = Store()
+		val original = record("event-1", root, "first words$tail", PendingSnapState.CONFIRMED, PendingSnapKind.ROOT)
+		store.write(original)
+		val editor = SnapEditor(chain, store)
+		assertTrue(editor.edit(account, root, SnapEditKind.ROOT, "saved") is SnapEditor.Outcome.Uncertain)
+		assertEquals(original, store.saved.getValue("$account|event-1"))
+		chain.evidence = HiveRpc.TransactionEvidence.BLOCK
+		assertEquals(
+			SnapEditor.Outcome.Edited(root.contentId, "saved", "tx-1"),
+			editor.edit(account, root, SnapEditKind.ROOT, "later words"),
+		)
+		assertEquals(original.copy(body = "saved$tail"), store.saved.getValue("$account|event-1"))
+		assertEquals(1, chain.broadcasts)
+	}
+
+	@Test
+	fun `readback of matching words on a different object does not confirm an edit`() {
+		val chain = Chain(replyOnChain(), result = HiveRpc.BroadcastResult.NetworkFailure("lost"))
+		val port = object : SnapHivePort by chain {
+			override fun readComment(author: String, permlink: String): SnapChainComment? =
+				if (chain.broadcasts == 0) chain.comment else chain.comment!!.copy(permlink = "another", body = "new")
+		}
+		assertTrue(SnapEditor(port).edit(account, reply, SnapEditKind.REPLY, "new") is SnapEditor.Outcome.Uncertain)
+	}
+
 	// ── the local record ───────────────────────────────────────────────
 
 	@Test

@@ -198,6 +198,13 @@ object WaxIcons {
 		"M17.4 6.6 6.6 17.4",
 	)
 
+	/** Add images to a Snap or reply: a framed picture, Instagram's gallery glyph. */
+	val Gallery = stroked(
+		"M6 3.8h12a2.2 2.2 0 0 1 2.2 2.2v12a2.2 2.2 0 0 1-2.2 2.2H6a2.2 2.2 0 0 1-2.2-2.2V6A2.2 2.2 0 0 1 6 3.8z",
+		"M3.8 16.2l4.6-4.6 4 4 2.6-2.6 5.2 5.2",
+		fills = listOf("M15.6 7.1a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"),
+	)
+
 	/** The quick-emoji strip's handle. */
 	val EmojiFace = stroked(
 		"M12 3.8a8.2 8.2 0 1 0 0 16.4 8.2 8.2 0 0 0 0-16.4z",

@@ -6,6 +6,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.rustedwax.app.snaps.PendingSnapKind
+import com.rustedwax.app.snaps.SnapAttachmentBlock
 import com.rustedwax.app.snaps.PostedSnap
 import com.rustedwax.app.snaps.SnapDeleteCheck
 import com.rustedwax.app.snaps.SnapDeleter
@@ -130,6 +131,23 @@ class SnapThreadController internal constructor(
 	 * the replies (Issue 40C). The root belongs to the posting controller.
 	 */
 	private val onRootOpened: (String, String) -> Unit = { _, _ -> },
+	/**
+	 * Told the draft key of a reply whose attempt was proven published, so the
+	 * images that went out with it (Issue 40D) leave the composer with it.
+	 */
+	private val onReplyPublished: (String) -> Unit = {},
+	/**
+	 * New images added during an Edit (Issue 40D), held and uploaded by the
+	 * same store the composer uses. Null: Edit can only keep or remove images.
+	 */
+	private val editImagesPort: () -> SnapEditImages? = { null },
+	/**
+	 * A root Snap's words to *show* while its edit is still settling, or null
+	 * to stop — display only, never a confirmed state, never a refresh. The
+	 * History card belongs to the posting controller, so this is how it shows
+	 * the optimistic edit and how it is taken back when the edit fails.
+	 */
+	private val onRootPending: (String, String, String?) -> Unit = { _, _, _ -> },
 	private val io: CoroutineDispatcher = Dispatchers.IO,
 ) {
 
@@ -243,6 +261,12 @@ class SnapThreadController internal constructor(
 		val kind: SnapEditKind,
 		/** The words on screen when Edit was tapped. Saving these is not a write. */
 		val original: String,
+		/**
+		 * The hosted images attached when Edit was tapped (Issue 40D): only the
+		 * trailing block [SnapAttachmentBlock] positively identifies. Anything
+		 * else stays in the words, untouched and not removable as an image.
+		 */
+		val images: List<String> = emptyList(),
 	)
 
 	private var editingState by mutableStateOf<Editing?>(null)
@@ -251,15 +275,80 @@ class SnapThreadController internal constructor(
 	var editText by mutableStateOf("")
 		private set
 
-	/** Why the last save did not change anything, or null. */
-	var editStatus by mutableStateOf<SnapPostStatus?>(null)
+	/**
+	 * The attached images this edit keeps, in their original order. Starts as
+	 * every image [Editing.images] identified; × takes one out. Nothing leaves
+	 * the chain until Save proves the edit, and Cancel simply forgets this.
+	 */
+	var editImages by mutableStateOf<List<String>>(emptyList())
 		private set
 
+	/** What Save would publish as the comment's words: the text, then the kept images. */
+	fun editedText(): String = SnapAttachmentBlock.append(editText, editImages)
+
+	/** Take the image at [index] out of this edit. */
+	fun removeEditImage(index: Int) {
+		if (editingState == null) return
+		if (index !in editImages.indices) return
+		editImages = editImages.filterIndexed { i, _ -> i != index }
+	}
+
 	/**
-	 * True while a save is running. Snapshot state, because it gates the Save
-	 * control — a second tap must find it already dead.
+	 * Where an edit's *new* images wait: account + comment, so an edit can
+	 * never pick up another account's or another comment's images.
 	 */
-	var isSavingEdit by mutableStateOf(false)
+	fun editImagesKey(target: SnapReplyTarget): String = "${accountId()}|edit|${target.contentId}"
+
+	/**
+	 * An edit that has left the editor and is settling in the background
+	 * (Issue 40D): uploading its new images, then one in-place broadcast.
+	 * Everything needed to try again is here, so a failure never makes the
+	 * author redo the edit.
+	 */
+	data class PendingEdit(
+		val who: String,
+		val edit: Editing,
+		/** The words as saved. */
+		val words: String,
+		/** Already-hosted images kept, in order. Never uploaded again. */
+		val kept: List<String>,
+		/** Where the new images wait in [SnapEditImages]. */
+		val imagesKey: String,
+		/** How many new images the edit adds, after [kept]. */
+		val added: Int,
+		val phase: Phase,
+		val message: String? = null,
+	) {
+		/** What the comment shows while this settles: the words and the kept images. */
+		val shown: String get() = SnapAttachmentBlock.append(words, kept)
+	}
+
+	enum class Phase { SAVING, FAILED, UNCERTAIN }
+
+	/** Account-scoped `author/permlink` to its settling edit. */
+	private val pendingEdits = mutableStateMapOf<String, PendingEdit>()
+
+	/** Account-scoped `author/permlink` to the reply words shown while its edit settles. */
+	private val optimisticBodies = mutableMapOf<String, String>()
+
+	/** This account's settling or failed edit of [target], if any. */
+	fun pendingEdit(target: SnapReplyTarget): PendingEdit? = pendingEdits["${accountId()}|${target.contentId}"]
+
+	/** True while [target]'s edit is still on its way: no second Edit or Delete meanwhile. */
+	fun isEditSettling(target: SnapReplyTarget): Boolean = pendingEdit(target)?.let {
+		it.phase == Phase.SAVING || it.phase == Phase.UNCERTAIN
+	} == true
+
+	/**
+	 * The last edit that failed, as a one-shot event with a serial number, so
+	 * the screen can tell the author even when the conversation is closed.
+	 */
+	var editFailure by mutableStateOf<Pair<Int, String>?>(null)
+		private set
+	private var editFailures = 0
+
+	/** Why Save could not even start (no account), or null. Settling is reported on the comment. */
+	var editStatus by mutableStateOf<SnapPostStatus?>(null)
 		private set
 
 	/**
@@ -308,7 +397,13 @@ class SnapThreadController internal constructor(
 	 * why it must disappear with the sheet rather than outlive it.
 	 */
 	val openRootSnap: PostedSnap?
-		get() = openRootSnapState.takeIf { uiOwner == accountId() }
+		get() = openRootSnapState.takeIf { uiOwner == accountId() }?.let { snap ->
+			// An edit still settling is drawn as intended, never stored as such.
+			pendingEdits["${accountId()}|${snap.contentId}"]
+				?.takeIf { it.phase == Phase.SAVING }
+				?.let { snap.copy(userText = it.shown) }
+				?: snap
+		}
 
 	/** The account-scoped reply slot whose composer is open, at most one. */
 	val replyingTo: String?
@@ -376,10 +471,13 @@ class SnapThreadController internal constructor(
 	 * the first time the chain shows the same text.
 	 */
 	private fun withEdits(chain: List<SnapReply>): List<SnapReply> {
-		if (editedBodies.isEmpty()) return chain
+		if (editedBodies.isEmpty() && optimisticBodies.isEmpty()) return chain
 		val prefix = "${accountId()}|"
 		return chain.map { reply ->
 			val id = prefix + reply.contentId
+			// An edit still settling outranks everything: it is what the author
+			// just did. It is display only and goes the moment the edit settles.
+			optimisticBodies[id]?.let { return@map reply.copy(body = it) }
 			val edited = editedBodies[id] ?: return@map reply
 			if (edited == reply.body) {
 				editedBodies.remove(id)
@@ -618,31 +716,49 @@ class SnapThreadController internal constructor(
 
 	/** Put one of the viewer's own comments into the bottom bar for editing. */
 	fun startEdit(root: SnapReplyTarget, target: SnapReplyTarget, kind: SnapEditKind, current: String) {
-		if (uiOwner != accountId() || isSavingEdit) return
+		if (uiOwner != accountId()) return
 		// Never alongside a deletion: an edit landing after a delete would
 		// recreate the comment under the same permlink.
 		if (deletingState != null) return
 		if (!canEdit(target.author)) return
-		editingState = Editing(root, target, kind, current)
-		editText = current
+		if (isEditSettling(target)) return
+		// A failed edit comes back exactly as it was saved — words, kept images
+		// and the new images still waiting — so retrying never means redoing it.
+		pendingEdits.remove("${accountId()}|${target.contentId}")?.let { failed ->
+			editingState = failed.edit
+			editText = failed.words
+			editImages = failed.kept
+			editStatus = null
+			replyingToState = null
+			return
+		}
+		val (words, images) = SnapAttachmentBlock.split(current)
+		editingState = Editing(root, target, kind, current, images)
+		editText = words
+		editImages = images
+		// Nothing left over from an edit of this comment that was cancelled.
+		editImagesPort()?.clear(editImagesKey(target))
 		editStatus = null
 		replyingToState = null
 	}
 
 	fun editDraft(text: String) {
-		if (isSavingEdit) return
 		editText = text
 	}
 
-	/** Leave edit mode. The comment keeps the words it has on chain. */
+	/**
+	 * Leave edit mode. The comment keeps the words it has on chain, and any
+	 * image added in this edit is dropped without ever having been uploaded.
+	 */
 	fun cancelEdit() {
-		if (isSavingEdit) return
+		editingState?.let { editImagesPort()?.clear(editImagesKey(it.target)) }
 		clearEdit()
 	}
 
 	private fun clearEdit() {
 		editingState = null
 		editText = ""
+		editImages = emptyList()
 		editStatus = null
 	}
 
@@ -705,7 +821,10 @@ class SnapThreadController internal constructor(
 	 * settles that one by reading, so a second transaction is never signed.
 	 */
 	fun requestDelete(root: SnapReplyTarget, target: SnapReplyTarget, kind: SnapEditKind, body: String) {
-		if (uiOwner != accountId() || isSavingEdit) return
+		if (uiOwner != accountId()) return
+		// Never while this comment's edit is still on its way: the edit landing
+		// after the delete would recreate the comment under the same permlink.
+		if (isEditSettling(target)) return
 		if (deletingState?.phase == DeletePhase.RUNNING) return
 		if (!canDelete(target.author)) return
 		val who = accountId()
@@ -820,60 +939,180 @@ class SnapThreadController internal constructor(
 	}
 
 	/**
+	 * How many new images the open edit adds, waiting in the image store.
+	 */
+	fun editAddedImages(): Int = editingState?.let { editImagesPort()?.count(editImagesKey(it.target)) } ?: 0
+
+	/** Whether Save would publish anything: valid words or images, and a real change. */
+	fun canSaveEdit(): Boolean {
+		val edit = editing ?: return false
+		val added = editAddedImages()
+		val total = editImages.size + added
+		val words = editText
+		if (SnapText.count(words) > SnapText.LIMIT) return false
+		if (!SnapText.hasVisible(SnapReplyText.sanitize(words)) && total == 0) return false
+		if (total > SnapAttachmentBlock.MAX) return false
+		return added > 0 || editedText() != edit.original
+	}
+
+	/**
 	 * Save the edit — the same `author/permlink`, signed again with new words.
 	 *
-	 * The comment on screen keeps its old words until [SnapEditor] proves the
-	 * new ones are on chain. On any other answer the box stays open, still
-	 * holding what the user typed, with the reason beside it.
+	 * The editor closes at once and the comment shows the edit straight away;
+	 * the waiting happens behind it (Issue 40D). New images upload first, and
+	 * only when every one has its address is the single in-place edit
+	 * broadcast. Until [SnapEditor] proves it, the new words are a display
+	 * override and nothing more: on failure the comment goes back to what Hive
+	 * holds, the author is told, and the whole edit is kept for retry.
 	 */
 	fun saveEdit() {
 		val edit = editing ?: return
-		if (isSavingEdit) return
-		val text = editText
-		if (SnapEditor.textProblem(text) != null) return
-		// Unchanged words are not an edit, and not a write.
-		if (text == edit.original) {
-			clearEdit()
+		if (!canSaveEdit()) {
+			// Unchanged words are not an edit, and not a write.
+			if (editAddedImages() == 0 && editedText() == edit.original) cancelEdit()
 			return
 		}
 		val who = accountId()
-		isSavingEdit = true
-		editStatus = SnapPostStatus.Posting
+		if (who == ANONYMOUS) {
+			editStatus = SnapPostStatus.Failed("Sign in to your Hive account to edit.")
+			return
+		}
+		val key = "$who|${edit.target.contentId}"
+		if (pendingEdits[key]?.phase == Phase.SAVING) return
+		val pending = PendingEdit(
+			who = who,
+			edit = edit,
+			words = editText,
+			kept = editImages,
+			imagesKey = editImagesKey(edit.target),
+			added = editAddedImages(),
+			phase = Phase.SAVING,
+		)
+		pendingEdits[key] = pending
+		showPending(pending)
+		// The editor closes now — the images stay where they are until the
+		// edit has used them.
+		clearEdit()
+		settle(key)
+	}
+
+	/** Try a failed or unconfirmed edit again, exactly as it was saved. */
+	fun retryEdit(target: SnapReplyTarget) {
+		val key = "${accountId()}|${target.contentId}"
+		val pending = pendingEdits[key]?.takeIf { it.phase != Phase.SAVING } ?: return
+		val again = pending.copy(phase = Phase.SAVING, message = null)
+		pendingEdits[key] = again
+		showPending(again)
+		settle(key)
+	}
+
+	/** Give up a failed edit: the comment stays as Hive holds it, new images are dropped. */
+	fun discardEdit(target: SnapReplyTarget) {
+		val key = "${accountId()}|${target.contentId}"
+		val pending = pendingEdits[key]?.takeIf { it.phase == Phase.FAILED } ?: return
+		pendingEdits.remove(key)
+		editImagesPort()?.clear(pending.imagesKey)
+	}
+
+	/** Upload what is new, then broadcast once. Never twice for one attempt. */
+	private fun settle(key: String) {
+		val pending = pendingEdits[key] ?: return
+		val port = editImagesPort()
+		if (pending.added == 0) {
+			broadcastEdit(key, emptyList())
+			return
+		}
+		if (port == null) {
+			failEdit(key, "Image upload isn't available right now.", Phase.FAILED)
+			return
+		}
+		port.upload(
+			pending.imagesKey,
+			onReady = { urls -> broadcastEdit(key, urls) },
+			onFailed = { why -> failEdit(key, "Your edit wasn't saved: $why", Phase.FAILED) },
+		)
+	}
+
+	private fun broadcastEdit(key: String, added: List<String>) {
+		val pending = pendingEdits[key]?.takeIf { it.phase == Phase.SAVING } ?: return
+		// Exactly the images the edit was saved with; anything else is not this edit.
+		if (added.size != pending.added) {
+			failEdit(key, "Your edit's images changed before they were sent, so nothing was saved.", Phase.FAILED)
+			return
+		}
+		val text = SnapAttachmentBlock.append(pending.words, pending.kept + added)
+		val who = pending.who
+		// A late upload callback after an account switch signs nothing: the
+		// edit stays with the account that made it, to retry as that account.
+		if (accountId() != who) {
+			failEdit(key, "You switched Hive accounts, so your edit wasn't saved.", Phase.FAILED)
+			return
+		}
+		val edit = pending.edit
 		scope.launch {
-			try {
-				val outcome = withContext(io) {
-					val ed = editor(edit.kind)
-					when {
-						who == ANONYMOUS ->
-							SnapEditor.Outcome.Failed("Sign in to your Hive account to edit.")
-						ed == null -> SnapEditor.Outcome.Failed("Editing isn't available right now.")
-						else -> runCatching { ed.edit(who, edit.target, edit.kind, text) }
-							.getOrElse {
-								SnapEditor.Outcome.Uncertain(
-									"RustedWax couldn't confirm your edit yet, so the previous " +
-										"text is still shown. Saving again is safe.",
-								)
-							}
-					}
+			val outcome = withContext(io) {
+				val ed = editor(edit.kind)
+				when {
+					ed == null -> SnapEditor.Outcome.Failed("Editing isn't available right now.")
+					else -> runCatching { ed.edit(who, edit.target, edit.kind, text) }
+						.getOrElse {
+							SnapEditor.Outcome.Uncertain(
+								"RustedWax couldn't confirm your edit, so the previous text is shown. " +
+									"Trying again is safe.",
+							)
+						}
 				}
-				// Alice's edit settling after Bob signed in writes nothing of Bob's.
-				// Her bar keeps her words; the in-flight label is all that goes.
-				if (accountId() != who) {
-					editStatus = null
-					return@launch
+			}
+			when (outcome) {
+				is SnapEditor.Outcome.Edited -> {
+					pendingEdits.remove(key)
+					clearPending(pending)
+					editImagesPort()?.clear(pending.imagesKey)
+					// Alice's edit landing after Bob signed in draws nothing of Bob's.
+					if (accountId() == who) applyEdit(who, edit, outcome.userText)
 				}
-				when (outcome) {
-					is SnapEditor.Outcome.Edited -> {
-						applyEdit(who, edit, outcome.userText)
-						if (editingState == edit) clearEdit()
-					}
-					is SnapEditor.Outcome.Failed ->
-						editStatus = SnapPostStatus.Failed(outcome.message)
-					is SnapEditor.Outcome.Uncertain ->
-						editStatus = SnapPostStatus.Uncertain(outcome.message)
-				}
-			} finally {
-				isSavingEdit = false
+				is SnapEditor.Outcome.Failed -> failEdit(key, outcome.message, Phase.FAILED)
+				is SnapEditor.Outcome.Uncertain -> failEdit(key, outcome.message, Phase.UNCERTAIN)
+			}
+		}
+	}
+
+	/**
+	 * The edit did not settle: show what Hive holds again, ask Hive afresh,
+	 * keep the edit for retry, and say so.
+	 */
+	private fun failEdit(key: String, message: String, phase: Phase) {
+		val pending = pendingEdits[key] ?: return
+		pendingEdits[key] = pending.copy(phase = phase, message = message)
+		clearPending(pending)
+		if (accountId() != pending.who) return
+		editFailure = ++editFailures to message
+		// Re-read the object, so what is shown is the confirmed chain state —
+		// which is also how an "unconfirmed" edit that did land shows up.
+		if (pending.edit.kind == SnapEditKind.ROOT) onRootOpened(pending.who, pending.edit.target.contentId)
+		reloadAfterWrite(pending.edit.root)
+	}
+
+	/** Draw the edit as intended while it settles. Display only. */
+	private fun showPending(pending: PendingEdit) {
+		val id = "${pending.who}|${pending.edit.target.contentId}"
+		when (pending.edit.kind) {
+			SnapEditKind.ROOT -> onRootPending(pending.who, pending.edit.target.contentId, pending.shown)
+			SnapEditKind.REPLY -> {
+				optimisticBodies[id] = SnapReplyText.sanitize(pending.shown)
+				redraw(pending.edit.root)
+			}
+		}
+	}
+
+	/** Stop drawing the intended edit; the confirmed state shows again. */
+	private fun clearPending(pending: PendingEdit) {
+		val id = "${pending.who}|${pending.edit.target.contentId}"
+		when (pending.edit.kind) {
+			SnapEditKind.ROOT -> onRootPending(pending.who, pending.edit.target.contentId, null)
+			SnapEditKind.REPLY -> {
+				optimisticBodies.remove(id)
+				if (accountId() == pending.who) redraw(pending.edit.root)
 			}
 		}
 	}
@@ -1115,19 +1354,31 @@ class SnapThreadController internal constructor(
 	 *    never optimistically. Failure keeps it; ambiguity keeps it and offers no
 	 *    resend at all.
 	 */
-	fun send(root: SnapReplyTarget, target: SnapReplyTarget) {
+	fun send(
+		root: SnapReplyTarget,
+		target: SnapReplyTarget,
+		/**
+		 * Hosted image addresses already uploaded for this draft (Issue 40D),
+		 * appended to the words as [SnapAttachmentBlock]. Never uploaded here:
+		 * by the time a reply is staged every image has its address.
+		 */
+		images: List<String> = emptyList(),
+	) {
 		val key = replyKey(target)
 		// Ownership, synchronously. A second tap arriving before the coroutine
 		// is scheduled — or while the reply is already drawn and the broadcast
 		// is still running behind it — finds the claim here and is turned away.
 		if (!running.add(key)) return
-		val text = draft(key)
+		val typed = draft(key)
 		// Checked here so the control is honest, and checked again at the
 		// publication boundary, which is what actually enforces it.
-		if (!SnapText.isValid(text)) {
+		if (!SnapAttachmentBlock.canSend(typed, images.size)) {
 			running.remove(key)
 			return
 		}
+		// What is staged and published: the words plus the image block. The
+		// draft itself keeps only the words — see `submitted` below.
+		val text = SnapAttachmentBlock.append(typed, images)
 		// The box empties on the tap, not on Hive's acknowledgement. The words
 		// are not gone — `text` holds them for this attempt and the draft still
 		// holds them on disk — they have simply stopped being something the
@@ -1135,7 +1386,7 @@ class SnapThreadController internal constructor(
 		// them un-published.
 		// Keyed to the exact words handed over, because an IME that has not
 		// finished its session yet will echo them back — see [edit].
-		submitted[key] = text
+		submitted[key] = typed
 		val who = accountId()
 
 		scope.launch {
@@ -1463,7 +1714,9 @@ class SnapThreadController internal constructor(
 			val id = intentId ?: return@withContext SnapReplySettlement.Untouched
 			val body = publisher()?.publishedBody(who, SnapReplyKey.of(target, id), PendingSnapKind.REPLY)
 				?: return@withContext SnapReplySettlement.Untouched
-			drafts.settle(key, SnapReplyDraft(body, id))
+			// The draft holds the typed words only; an image block (Issue 40D)
+			// was appended at staging and is not part of what was typed.
+			drafts.settle(key, SnapReplyDraft(SnapAttachmentBlock.split(body).first, id))
 		}
 		if (accountId() != who) return
 
@@ -1473,11 +1726,15 @@ class SnapThreadController internal constructor(
 				corruptDrafts.remove(key)
 				if (replyingToState == key) replyingToState = null
 				submitted.remove(key)
+				onReplyPublished(key)
 			}
 			// Somebody typed while this was in flight. Their words are still
 			// there, no longer tied to the published attempt, and the composer
-			// stays open on them.
-			is SnapReplySettlement.Released -> draftCache[key] = result.draft.text
+			// stays open on them. The images did go out with the attempt.
+			is SnapReplySettlement.Released -> {
+				draftCache[key] = result.draft.text
+				onReplyPublished(key)
+			}
 			// Nothing was changed, or the write did not stick. Neither is a
 			// settled draft, and neither is reported as one — drop the cache so
 			// the screen shows whatever the store really holds.

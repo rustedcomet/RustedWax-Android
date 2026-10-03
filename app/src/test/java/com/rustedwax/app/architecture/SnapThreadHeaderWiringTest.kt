@@ -104,7 +104,8 @@ class SnapThreadHeaderWiringTest {
 			"send must be called with the target this bar was composed with, and " +
 				"only then report which slot was sent",
 			sheet.contains(
-				Regex("""threads\.send\(root, target\)\s*onSent\(key\)"""),
+				// Issue 40D adds the uploaded image addresses as a third argument.
+				Regex("""threads\.send\(root, target(, urls)?\)\s*onSent\(key\)"""),
 			),
 		)
 	}

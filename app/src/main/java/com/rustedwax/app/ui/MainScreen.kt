@@ -86,6 +86,9 @@ import com.rustedwax.app.ui.snaps.SnapNoticeController
 import com.rustedwax.app.ui.snaps.SnapPostController
 import com.rustedwax.app.ui.snaps.SnapPostStatus
 import com.rustedwax.app.ui.snaps.SnapThreadController
+import com.rustedwax.app.ui.snaps.ComposerAttachments
+import com.rustedwax.app.ui.snaps.SnapAttachmentController
+import com.rustedwax.app.snaps.SnapAttachmentBlock
 import com.rustedwax.app.ui.snaps.SnapRootComposing
 import com.rustedwax.app.ui.snaps.SnapThreadMedia
 import com.rustedwax.app.ui.snaps.SnapThreadPreviewStrip
@@ -173,6 +176,8 @@ fun MainScreen(
 	threads: SnapThreadController,
 	/** Likes on other people's comments, inside those threads. */
 	likes: SnapLikeController,
+	/** Phone images on Snap and reply drafts (Issue 40D). */
+	attachments: SnapAttachmentController,
 	/**
 	 * Incoming replies, for the top bar's bell.
 	 *
@@ -259,6 +264,15 @@ fun MainScreen(
 	// (start-up already reads every posted Snap), so only a return counts.
 	val lifecycleOwner = LocalLifecycleOwner.current
 	val refreshNow by rememberUpdatedState { refreshSnaps(recent, snaps, posts, threads) }
+	// An edit saves in the background (Issue 40D), so its failure has to reach
+	// the author wherever they are — the conversation may be closed by then.
+	val editFailure = threads.editFailure
+	val toastContext = androidx.compose.ui.platform.LocalContext.current
+	LaunchedEffect(editFailure?.first) {
+		editFailure?.let {
+			android.widget.Toast.makeText(toastContext, it.second, android.widget.Toast.LENGTH_LONG).show()
+		}
+	}
 	DisposableEffect(lifecycleOwner) {
 		var created = false
 		val observer = LifecycleEventObserver { _, event ->
@@ -513,6 +527,7 @@ fun MainScreen(
 							posts,
 							threads,
 							likes,
+							attachments,
 							notices,
 							focusEventId,
 							{ focusEventId = null },
@@ -1401,6 +1416,7 @@ private fun HistoryList(
 	posts: SnapPostController,
 	threads: SnapThreadController,
 	likes: SnapLikeController,
+	attachments: SnapAttachmentController,
 	notices: SnapNoticeController,
 	/** A card the bell asked for, or null. Consumed once it has been reached. */
 	focusEventId: String?,
@@ -1470,6 +1486,7 @@ private fun HistoryList(
 			viewer = viewer,
 			rootComposer = null,
 			onDismiss = { threads.close() },
+			attachments = attachments,
 			thumbnails = thumbnails,
 		)
 	}
@@ -1496,17 +1513,31 @@ private fun HistoryList(
 					viewer = viewer,
 					rootComposer = SnapRootComposing(
 						draft = composeDraft,
-						canPost = SnapText.isValid(composeDraft) && !posts.isBusy(composeKey),
+						// Words, or images, or both (Issue 40D) — and never while
+						// images are still arriving or uploading.
+						canPost = SnapAttachmentBlock.canSend(composeDraft, attachments.count(composeKey)) &&
+							!posts.isBusy(composeKey) &&
+							!attachments.isUploading(composeKey) &&
+							attachments.arriving(composeKey) == 0,
 						onDraftChange = { snaps.edit(composeKey, it) },
-						onPost = {
+						liveDraft = { snaps.draft(composeKey) },
+						attachments = ComposerAttachments(
+							composeKey,
+							attachments,
+							visible = !posts.isBusy(composeKey),
+						),
+						onPost = { images ->
 							posts.post(
 								key = composeKey,
 								eventId = record.eventId,
 								media = SnapMedia(videoId = record.videoId),
-								userText = composeDraft,
+								// Hosted images sit after the words, inside the
+								// authored part, before the frozen youtu.be tail.
+								userText = SnapAttachmentBlock.append(snaps.draft(composeKey), images),
 								onStaged = { snaps.collapse() },
 								onPublished = { contentId ->
 									snaps.discard(composeKey)
+									attachments.clear(composeKey)
 									SnapReplyTarget.of(contentId.substringBefore('/'), contentId.substringAfter('/'))
 										?.let(threads::reloadAfterWrite)
 								},
