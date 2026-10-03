@@ -140,8 +140,8 @@ class RetainedRecordsRestoreTest {
 	}
 
 	@Test
-	fun `not-logged rows de-duplicate on the whole row`() {
-		// Skip rows carry no minted id, so equality is the data class's own.
+	fun `not-logged rows de-duplicate on their row id`() {
+		// Issue #41: a refusal now carries its own id, and that is the identity.
 		val shared = skipRow("alice", "s-1")
 		val merged = FinalizationRuntime.mergeRestoredSkipped(
 			current = listOf(shared),
@@ -298,5 +298,6 @@ class RetainedRecordsRestoreTest {
 			durationSeconds = 100,
 			videoId = null,
 			account = account,
+			rowId = "row-$title",
 		)
 }

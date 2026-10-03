@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import com.rustedwax.core.Clock
+import com.rustedwax.app.storage.db.LocalDatabase
 import com.rustedwax.hive.HivePreparationResult
 import com.rustedwax.hive.HiveRpc
 import com.rustedwax.hive.HiveScrobblePayload
@@ -49,6 +50,7 @@ import com.rustedwax.app.enrich.WatchHistoryResolver
 import com.rustedwax.app.enrich.YouTubePageResolver
 import com.rustedwax.app.storage.YouTubeSessionVault
 import java.util.UUID
+import java.util.concurrent.Executor
 
 /**
  * Turns finished tracks into on-chain scrobbles.
@@ -279,6 +281,21 @@ object FinalizationRuntime {
 		 * No default, for the same reason [ScrobbleRecord.eventId] has none.
 		 */
 		val account: String?,
+		/**
+		 * This row's own identity, minted once when the row is filed (Issue #41).
+		 *
+		 * A refusal used to have no identity at all; whole-row equality stood in
+		 * for one, which merged two genuine refusals that happened to agree on
+		 * every field. The structured store needs a key that cannot do that, and
+		 * that a row keeps across every save and restore.
+		 *
+		 * Rows written before this field existed get a deterministic one when
+		 * they are read back — see [RetainedRecordCodec.decodeSkipped] — so the
+		 * same stored row always comes back under the same id.
+		 *
+		 * No default, for the same reason [ScrobbleRecord.eventId] has none.
+		 */
+		val rowId: String,
 	)
 
 	private const val MIN_NOTABLE_PLAYED_MS = 3_000L
@@ -380,30 +397,38 @@ object FinalizationRuntime {
 	): List<ScrobbleRecord> {
 		if (restored.isEmpty()) return current
 		val known = current.mapTo(HashSet()) { it.eventId }
-		return (current + restored.filterNot { it.eventId in known }).take(RETAINED_ROWS)
+		return capHistory(current + restored.filterNot { it.eventId in known })
 	}
 
 	/**
-	 * The same merge for Not Logged, over rows that have no minted identity.
+	 * Keep at most [RETAINED_ROWS] History rows **per account**, in list order.
 	 *
-	 * A skip row carries no `eventId` — nothing downstream keys UI state on one,
-	 * so there was never a reason to mint it. Whole-row equality stands in: the
-	 * data class compares every field, including the second it was filed at and
-	 * the account that owns it, so a restored row is dropped exactly when this
-	 * process has already filed one describing the same refusal.
+	 * Issue #41. The cap used to be global, so a second account filing fifty
+	 * rows pushed every row of the first out of memory and then off disk —
+	 * switching back found nothing. Each owner now keeps its own fifty, and no
+	 * account's rows can displace another's.
+	 */
+	internal fun capHistory(rows: List<ScrobbleRecord>): List<ScrobbleRecord> = RetainedRetention.history(rows)
+
+	/** The same per-owner cap for Not Logged; the signed-out device is an owner of its own. */
+	internal fun capSkipped(rows: List<SkipRecord>): List<SkipRecord> = RetainedRetention.skipped(rows)
+
+	/**
+	 * The same merge for Not Logged, keyed on [SkipRecord.rowId].
 	 *
-	 * Two genuinely distinct refusals that agree on every field are
-	 * indistinguishable here and one of them is dropped. That is accepted: they
-	 * would draw as two identical rows, and a duplicate across a restart reads
-	 * as a bug where a missing identical twin does not.
+	 * Whole-row equality used to stand in for an identity, and dropped one of
+	 * two genuine refusals that agreed on every field. The row id is minted once
+	 * per refusal (or derived deterministically for rows stored before it
+	 * existed), so a restored row is dropped exactly when this process already
+	 * holds that same row — and identical twins stay two rows.
 	 */
 	internal fun mergeRestoredSkipped(
 		current: List<SkipRecord>,
 		restored: List<SkipRecord>,
 	): List<SkipRecord> {
 		if (restored.isEmpty()) return current
-		val known = current.toHashSet()
-		return (current + restored.filterNot { it in known }).take(RETAINED_ROWS)
+		val known = current.mapTo(HashSet()) { it.rowId }
+		return capSkipped(current + restored.filterNot { it.rowId in known })
 	}
 
 	private val _tracksWithoutVideoId = MutableStateFlow(0)
@@ -453,7 +478,48 @@ object FinalizationRuntime {
 		// before this method returns to the activity or service that asked. The
 		// UI collects both as state, so a restore that lands a moment later
 		// still draws — but nothing has to rely on that.
-		restoreFrom(SharedPreferencesRetainedRecords(appContext))
+		restoreRetained(
+			legacy = SharedPreferencesRetainedRecords(appContext),
+			openRows = { SqliteRetainedRecordRows(LocalDatabase.get(appContext)) },
+		)
+	}
+
+	/**
+	 * Bring History and Not Logged back, in the two phases `init` runs (Issue #41).
+	 *
+	 * 1. **Provisional legacy restore**, here and now: the rows are on screen
+	 *    at once, but the legacy store is not yet the authority, so its writes
+	 *    keep the legacy generation.
+	 * 2. **The structured store**, opened, migrated and read on its own ordered
+	 *    thread — every caller of `init` is on the main thread — and adopted as
+	 *    the authoritative store once it is ready ([adoptFrom]). If it cannot
+	 *    open, the legacy store becomes this run's fallback ([fallBackToLegacy])
+	 *    and stays in charge exactly as before the database existed.
+	 *
+	 * Separate from [init] so the sequence itself — not a copy of it — runs
+	 * against in-memory stores in tests.
+	 */
+	internal fun restoreRetained(
+		legacy: SharedPreferencesRetainedRecords,
+		openRows: () -> RetainedRecordRows,
+		writer: Executor = DatabaseRetainedRecords.WRITER,
+	) {
+		legacy.advancesGeneration = false
+		restoreFrom(legacy, provisional = true)
+		DatabaseRetainedRecords.start(
+			openRows = openRows,
+			legacy = legacy,
+			onReady = ::adoptFrom,
+			onFailure = { failure ->
+				fallBackToLegacy()
+				EventLog.append(
+					"retained",
+					"local database unavailable (${failure.javaClass.simpleName}); History and " +
+						"Not Logged keep using the previous store this run. Scrobbling is unaffected.",
+				)
+			},
+			writer = writer,
+		)
 	}
 
 	/**
@@ -466,7 +532,7 @@ object FinalizationRuntime {
 	 * not read these lists and is not reached from this path.
 	 */
 	@Synchronized
-	internal fun restoreFrom(store: RetainedRecordStore) {
+	internal fun restoreFrom(store: RetainedRecordStore, provisional: Boolean = false) {
 		val restored = runCatching {
 			store.loadHistory() to store.loadSkipped()
 		}.getOrElse {
@@ -481,11 +547,120 @@ object FinalizationRuntime {
 		retained = store
 		_recent.update { mergeRestoredHistory(it, restored.first) }
 		_skipped.update { mergeRestoredSkipped(it, restored.second) }
+		provisionalRows = if (provisional) {
+			Provisional(
+				history = restored.first.associateBy { it.eventId },
+				skipped = restored.second.associateBy { it.rowId },
+				recentAfterRestore = _recent.value,
+				skippedAfterRestore = _skipped.value,
+			)
+		} else {
+			null
+		}
 		// A row can be filed while the store is being read. Persist the merged
 		// value so that row and the restored tail both survive another process
 		// death even if no later row is filed in this process.
 		persistHistory()
 		persistSkipped()
+	}
+
+	/**
+	 * The rows a provisional restore put in memory, exactly as the store gave
+	 * them, and the two lists as they stood straight afterwards (Issue #41).
+	 *
+	 * Kept only between the legacy restore at startup and the structured
+	 * store's answer, so that [adoptFrom] can tell a row the runtime has not
+	 * touched since — which the database may replace — from one created or
+	 * updated live in the meantime, which it must not.
+	 */
+	private class Provisional(
+		val history: Map<String, ScrobbleRecord>,
+		val skipped: Map<String, SkipRecord>,
+		val recentAfterRestore: List<ScrobbleRecord>,
+		val skippedAfterRestore: List<SkipRecord>,
+	)
+
+	@Volatile
+	private var provisionalRows: Provisional? = null
+
+	/** The store the lists are currently written to. Tests only. */
+	internal fun retainedStore(): RetainedRecordStore? = retained
+
+	/**
+	 * Make [store] the authoritative persisted source (Issue #41).
+	 *
+	 * Unlike [restoreFrom], where rows already in memory win, here the store
+	 * wins for any row that is still exactly what the provisional legacy
+	 * restore produced: the database has already imported every legacy-only
+	 * row, so its version of a shared row is at least as new, and an older
+	 * legacy copy must not stay on screen. Rows created or updated live since
+	 * that restore are newer than anything stored and are kept as they are.
+	 * Stored rows not in memory are added; the result is newest first and
+	 * capped per owner, then written back so the store holds the live rows too.
+	 *
+	 * A store that cannot be read changes nothing: the legacy store stays in
+	 * charge, as it does when the database never opens.
+	 */
+	@Synchronized
+	internal fun adoptFrom(store: RetainedRecordStore) {
+		val stored = runCatching { store.loadHistory() to store.loadSkipped() }.getOrElse {
+			fallBackToLegacy()
+			return
+		}
+		val provisional = provisionalRows
+		retained = store
+		provisionalRows = null
+		_recent.update {
+			capHistory(
+				reconcileAuthoritative(it, stored.first, provisional?.history.orEmpty(), ScrobbleRecord::eventId)
+					.sortedByDescending(ScrobbleRecord::atEpochSec),
+			)
+		}
+		_skipped.update {
+			capSkipped(
+				reconcileAuthoritative(it, stored.second, provisional?.skipped.orEmpty(), SkipRecord::rowId)
+					.sortedByDescending(SkipRecord::atEpochSec),
+			)
+		}
+		persistHistory()
+		persistSkipped()
+	}
+
+	/**
+	 * [current] with [stored] made authoritative: a row the store holds
+	 * replaces the in-memory one only when that one is still exactly its
+	 * [provisional] copy; stored rows memory lacks are appended.
+	 */
+	internal fun <T> reconcileAuthoritative(
+		current: List<T>,
+		stored: List<T>,
+		provisional: Map<String, T>,
+		id: (T) -> String,
+	): List<T> {
+		val byId = stored.associateBy(id)
+		val merged = current.map { live ->
+			val key = id(live)
+			val fromStore = byId[key]
+			if (fromStore != null && provisional[key] == live) fromStore else live
+		}
+		val known = merged.mapTo(HashSet(), id)
+		return merged + stored.filterNot { id(it) in known }
+	}
+
+	/**
+	 * The structured store is not coming this run: the legacy store, already
+	 * in place, becomes the fallback. Its writes now advance the legacy
+	 * generation so the next run that opens the database imports them as
+	 * newer — and anything filed or updated since the provisional restore is
+	 * written once more now, so it carries that mark.
+	 */
+	@Synchronized
+	private fun fallBackToLegacy() {
+		val provisional = provisionalRows
+		provisionalRows = null
+		(retained as? SharedPreferencesRetainedRecords)?.advancesGeneration = true
+		if (provisional == null || _recent.value != provisional.recentAfterRestore) persistHistory()
+		if (provisional == null || _skipped.value != provisional.skippedAfterRestore) persistSkipped()
 	}
 
 	/**
@@ -760,6 +935,7 @@ object FinalizationRuntime {
 		// Replay never persists and never restores. Dropping the store here is
 		// what keeps one scenario's rows out of the next one's assertions.
 		retained = null
+		provisionalRows = null
 		_recent.value = emptyList()
 		_skipped.value = emptyList()
 		_tracksWithoutVideoId.value = 0
@@ -788,6 +964,7 @@ object FinalizationRuntime {
 		prefetches.reset()
 		verifiedPlaybackSequence.clear()
 		retained = null
+		provisionalRows = null
 		_recent.value = emptyList()
 		_skipped.value = emptyList()
 		_tracksWithoutVideoId.value = 0
@@ -2678,12 +2855,13 @@ object FinalizationRuntime {
 			// whose listen this was. Null when nobody is signed in, which is a
 			// stamp like any other. See [SkipRecord.account].
 			account = vault.account?.username,
+			rowId = UUID.randomUUID().toString(),
 		)
 		// `update` rather than a plain assignment: unlike every other list here,
 		// this one is written from two threads — the prefilter rejects on the
 		// media-session callback while the post-enrichment rules reject on the IO
 		// scope, and a shorts feed can have both in flight.
-		_skipped.update { (listOf(record) + it).take(RETAINED_ROWS) }
+		_skipped.update { capSkipped(listOf(record) + it) }
 		persistSkipped()
 	}
 
@@ -2789,7 +2967,7 @@ object FinalizationRuntime {
 					account = account,
 					queueOperationId = operationId,
 				),
-			) + it).take(RETAINED_ROWS)
+			) + it).let(::capHistory)
 		}
 		persistHistory()
 	}

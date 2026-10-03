@@ -79,6 +79,7 @@ class RetainedRecordCodecTest {
 			durationSeconds = 100,
 			videoId = "dQw4w9WgXcQ",
 			account = "alice",
+			rowId = "row-1",
 		)
 
 		assertEquals(
@@ -102,6 +103,7 @@ class RetainedRecordCodecTest {
 			durationSeconds = null,
 			videoId = null,
 			account = null,
+			rowId = "row-signed-out",
 		)
 
 		val back = RetainedRecordCodec.decodeSkipped(
@@ -322,5 +324,6 @@ class RetainedRecordCodecTest {
 			durationSeconds = 100,
 			videoId = null,
 			account = account,
+			rowId = "row-$title",
 		)
 }
