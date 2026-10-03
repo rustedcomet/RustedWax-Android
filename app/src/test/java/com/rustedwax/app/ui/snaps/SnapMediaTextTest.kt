@@ -63,10 +63,10 @@ class SnapMediaTextTest {
 		// http images are never fetched, so never previewed, so never hidden.
 		assertEquals("http://x.org/a.png", SnapMediaText.display("http://x.org/a.png").text)
 		// Past the per-comment cap a link is only a link, and stays one.
-		val five = (1..5).joinToString(" ") { "https://images.hive.blog/p$it.png" }
-		val capped = SnapMediaText.display(five)
+		val six = (1..6).joinToString(" ") { "https://images.hive.blog/p$it.png" }
+		val capped = SnapMediaText.display(six)
 		assertEquals(SnapMediaParser.MAX_PER_COMMENT, capped.media.size)
-		assertEquals("https://images.hive.blog/p4.png https://images.hive.blog/p5.png", capped.text)
+		assertEquals("https://images.hive.blog/p5.png https://images.hive.blog/p6.png", capped.text)
 	}
 
 	@Test

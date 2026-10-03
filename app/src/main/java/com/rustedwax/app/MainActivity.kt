@@ -71,6 +71,9 @@ import com.rustedwax.app.ui.snaps.SnapNoticeController
 import com.rustedwax.app.ui.snaps.SnapNoticeIntent
 import com.rustedwax.app.ui.snaps.SnapPostController
 import com.rustedwax.app.ui.snaps.SnapThreadController
+import com.rustedwax.app.ui.snaps.androidSnapImageIntake
+import com.rustedwax.app.ui.snaps.HiveSnapImageUploader
+import com.rustedwax.app.ui.snaps.SnapAttachmentController
 import com.rustedwax.app.ui.Thumbnails
 import com.rustedwax.app.ui.YouTubeSignInActivity
 
@@ -396,6 +399,24 @@ class MainActivity : ComponentActivity() {
 				),
 			)
 		}
+		// Phone images on Snap and reply drafts (Issue 40D). Uploaded to Hive's
+		// own image host with a signature from the same on-device posting key,
+		// read beside its account at upload time like every port above — no
+		// RustedWax server, no other account. Built before the thread controller
+		// because a published reply retires its images here.
+		val attachments = remember {
+			SnapAttachmentController(
+				scope = lifecycleScope,
+				intake = androidSnapImageIntake(applicationContext),
+				uploader = {
+					HiveSnapImageUploader(
+						loadKey = { vault.loadKey() },
+						storedAccount = { vault.account?.username },
+					)
+				},
+				account = { account?.username },
+			)
+		}
 		// Reply threads. A second, parallel assembly rather than an extension of
 		// the one above: replies get their own pending store, their own draft
 		// file and their own publisher instance, so the root-Snap write path of
@@ -473,6 +494,12 @@ class MainActivity : ComponentActivity() {
 				onRootDeleted = posts::applyDelete,
 				// Opening a conversation re-reads its root Snap too (Issue 40C).
 				onRootOpened = posts::refreshContent,
+				// A published reply's images went out with it (Issue 40D).
+				onReplyPublished = attachments::clear,
+				// Images added during an Edit, and a root's words shown while its
+				// edit settles in the background (Issue 40D).
+				editImagesPort = { attachments },
+				onRootPending = posts::showPendingEdit,
 			)
 		}
 		// Likes. A third parallel assembly, and the narrowest of the three: it
@@ -653,6 +680,7 @@ class MainActivity : ComponentActivity() {
 			posts = posts,
 			threads = threads,
 			likes = likes,
+			attachments = attachments,
 			notices = notices,
 			openThreadRequest = noticeTarget,
 			onThreadRequestConsumed = { noticeTarget = null },

@@ -133,11 +133,17 @@ object SnapPayloadBuilder {
 	 * 281 characters past a dead Post button. Measured on the user's text only:
 	 * the generated tail is RustedWax's, not theirs, and is not counted.
 	 */
-	fun textProblem(userText: String): String? = when {
-		!SnapText.hasVisible(userText) -> "a Snap needs something in it"
-		SnapText.count(userText) > SnapText.LIMIT ->
-			"this Snap is ${SnapText.count(userText)} characters, over ${SnapText.LIMIT}"
-		else -> null
+	fun textProblem(userText: String): String? {
+		// Hosted images (Issue 40D) ride inside the authored part but are not
+		// the user's characters: the limit is measured on the words alone, and
+		// an image lets the words be empty. See [SnapAttachmentBlock].
+		val (words, images) = SnapAttachmentBlock.split(userText)
+		return when {
+			!SnapText.hasVisible(words) && images.isEmpty() -> "a Snap needs something in it"
+			SnapText.count(words) > SnapText.LIMIT ->
+				"this Snap is ${SnapText.count(words)} characters, over ${SnapText.LIMIT}"
+			else -> null
+		}
 	}
 
 	/** The exact generated tail every Snap body ends with. */

@@ -5,6 +5,7 @@ import com.rustedwax.hive.HivePreparationResult
 import com.rustedwax.hive.HiveRpc
 import com.rustedwax.hive.PreparedHiveTransaction
 import com.rustedwax.hive.TxSerializer
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * One comment exactly as the chain holds it now — every field an edit has to
@@ -60,13 +61,10 @@ enum class SnapEditKind {
  *    exactly, so the link that associates the Snap with its media page cannot
  *    change, even if [SnapPayloadBuilder] has changed since it was posted.
  *
- * Duplicate safety is therefore a property of the operation, not of a local
- * state machine: rebroadcasting the same edit is the same edit. That is why
- * there is no pending record here and no intent — there is nothing to
- * reconcile that could become a second comment. What *is* still owed is
- * honesty about the outcome, so success is reported only on block inclusion or
- * on reading the new body back, and everything else leaves the previous text
- * on screen.
+ * An ambiguous broadcast keeps its transaction in memory. Retry reconciles
+ * that exact attempt without signing or sending again; another edit is allowed
+ * only after inclusion or proven irreversible absence. This also keeps a late
+ * edit from undoing a newer edit or recreating a deleted comment.
  *
  * The posting key is never held here. Signing and sending go through the same
  * [SnapHivePort] every Snap and reply already uses, with the same three-way
@@ -81,6 +79,21 @@ class SnapEditor(
 	 */
 	private val store: PendingSnapStore? = null,
 ) {
+
+	private data class Attempt(
+		val account: String,
+		val target: SnapReplyTarget,
+		val kind: SnapEditKind,
+		val text: String,
+		val body: String,
+		val prepared: PreparedHiveTransaction,
+	)
+
+	/** Memory only; never a confirmed record or an automatic restart job. */
+	private val unsettled = ConcurrentHashMap<String, Attempt>()
+
+	private fun attemptKey(account: String, target: SnapReplyTarget) =
+		"${account.lowercase()}|${target.contentId}"
 
 	sealed interface Outcome {
 		/** On chain. [userText] is what the screen should now show. */
@@ -97,9 +110,8 @@ class SnapEditor(
 		/**
 		 * The edit was sent and could not be proven either way.
 		 *
-		 * Not a risk of duplication — the operation targets an existing
-		 * object — only of the screen being behind the chain for a while. So
-		 * the previous text stays, and saving again is safe.
+		 * The previous text stays. Retry checks the retained transaction;
+		 * it never signs or broadcasts a replacement while this is unresolved.
 		 */
 		data class Uncertain(val message: String) : Outcome
 	}
@@ -118,6 +130,12 @@ class SnapEditor(
 			return Outcome.Failed(NOT_AUTHOR)
 		}
 		textProblem(newText)?.let { return Outcome.Failed(it) }
+		unsettled[attemptKey(account, target)]?.let { attempt ->
+			return settleUnproven(
+				attempt.account, attempt.target, attempt.kind,
+				attempt.text, attempt.body, attempt.prepared,
+			)
+		}
 
 		val current = runCatching { hive.readComment(target.author, target.permlink) }.getOrNull()
 			?: return Outcome.Failed(
@@ -176,6 +194,8 @@ class SnapEditor(
 			)
 		}
 
+		// Claim before crossing the network boundary, including a thrown/lost answer.
+		unsettled[attemptKey(account, target)] = Attempt(account, target, kind, newText, body, prepared)
 		val result = runCatching { hive.broadcastPrepared(prepared, account) }.getOrNull()
 		if (result is HiveRpc.BroadcastResult.Success &&
 			result.evidence == HiveRpc.BroadcastResult.Evidence.BLOCK
@@ -198,7 +218,9 @@ class SnapEditor(
 		prepared: PreparedHiveTransaction,
 	): Outcome {
 		val after = runCatching { hive.readComment(target.author, target.permlink) }.getOrNull()
-		if (after?.body == body) return edited(account, target, kind, newText, body, prepared.txId)
+		if (after?.author.equals(target.author, ignoreCase = true) &&
+			after?.permlink == target.permlink && after.body == body
+		) return edited(account, target, kind, newText, body, prepared.txId)
 		return when (
 			runCatching {
 				hive.observeTransaction(prepared.txId, prepared.expirationEpochSec)
@@ -206,12 +228,13 @@ class SnapEditor(
 		) {
 			HiveRpc.TransactionEvidence.BLOCK ->
 				edited(account, target, kind, newText, body, prepared.txId)
-			HiveRpc.TransactionEvidence.ABSENT -> Outcome.Failed(
-				"Your edit didn't reach Hive, so nothing changed. You can save it again.",
-			)
+			HiveRpc.TransactionEvidence.ABSENT -> {
+				unsettled.remove(attemptKey(account, target))
+				Outcome.Failed("Your edit didn't reach Hive, so nothing changed. You can save it again.")
+			}
 			else -> Outcome.Uncertain(
 				"RustedWax couldn't confirm your edit yet, so the previous text is still " +
-					"shown. Saving again is safe.",
+					"shown. Retry will check this edit without sending another.",
 			)
 		}
 	}
@@ -224,6 +247,7 @@ class SnapEditor(
 		body: String,
 		txId: String,
 	): Outcome.Edited {
+		unsettled.remove(attemptKey(account, target))
 		rememberBody(account, target, kind, body)
 		return Outcome.Edited(target.contentId, newText, txId)
 	}
@@ -272,11 +296,17 @@ class SnapEditor(
 		 * The same limit and the same "something visible" rule as writing a new
 		 * one, so an edit cannot become the way around either.
 		 */
-		fun textProblem(text: String): String? = when {
-			!SnapText.hasVisible(SnapReplyText.sanitize(text)) -> "An edit needs something in it."
-			SnapText.count(text) > SnapText.LIMIT ->
-				"This is ${SnapText.count(text)} characters, over ${SnapText.LIMIT}."
-			else -> null
+		fun textProblem(text: String): String? {
+			// Attached images (Issue 40D) are kept through an edit and never
+			// counted against the words.
+			val (words, images) = SnapAttachmentBlock.split(text)
+			return when {
+				!SnapText.hasVisible(SnapReplyText.sanitize(words)) && images.isEmpty() ->
+					"An edit needs something in it."
+				SnapText.count(words) > SnapText.LIMIT ->
+					"This is ${SnapText.count(words)} characters, over ${SnapText.LIMIT}."
+				else -> null
+			}
 		}
 	}
 }

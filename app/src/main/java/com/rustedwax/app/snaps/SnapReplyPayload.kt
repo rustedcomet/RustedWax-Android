@@ -203,11 +203,15 @@ object SnapReplyPayloadBuilder {
 	 * This binds **only** what RustedWax creates. External replies are read
 	 * through a different path entirely and are never measured against it.
 	 */
-	fun problem(payload: SnapPayload): String? = when {
-		!hasRenderable(payload.body) -> "a reply needs something in it"
-		SnapText.count(payload.body) > SnapText.LIMIT ->
-			"this reply is ${SnapText.count(payload.body)} characters, over ${SnapText.LIMIT}"
-		else -> null
+	fun problem(payload: SnapPayload): String? {
+		// Hosted images (Issue 40D) are not counted, and may stand alone.
+		val (words, images) = SnapAttachmentBlock.split(payload.body)
+		return when {
+			!hasRenderable(words) && images.isEmpty() -> "a reply needs something in it"
+			SnapText.count(words) > SnapText.LIMIT ->
+				"this reply is ${SnapText.count(words)} characters, over ${SnapText.LIMIT}"
+			else -> null
+		}
 	}
 
 	/**

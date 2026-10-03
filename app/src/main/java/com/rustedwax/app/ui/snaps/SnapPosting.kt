@@ -214,7 +214,25 @@ class SnapPostController(
 	fun status(key: String): SnapPostStatus = statuses[key] ?: SnapPostStatus.Idle
 
 	/** What this card's posted Snap says, once there is one to show. */
-	fun posted(key: String): PostedSnap? = posted[key]
+	fun posted(key: String): PostedSnap? = posted[key]?.let(::withPendingEdit)
+
+	/**
+	 * Account-scoped `author/permlink` to the words its root Snap shows while an
+	 * edit settles (Issue 40D). Display only: never stored, never compared with
+	 * the chain, and gone the moment the edit settles either way.
+	 */
+	private val pendingEdits = mutableStateMapOf<String, String>()
+
+	/** Show [text] on this Snap's card while its edit settles; null stops. */
+	fun showPendingEdit(account: String, contentId: String, text: String?) {
+		val key = "$account|$contentId"
+		if (text == null) pendingEdits.remove(key) else pendingEdits[key] = text
+	}
+
+	private fun withPendingEdit(snap: PostedSnap): PostedSnap {
+		val who = account()?.takeIf { it.isNotBlank() } ?: return snap
+		return pendingEdits["$who|${snap.contentId}"]?.let { snap.copy(userText = it) } ?: snap
+	}
 
 	/**
 	 * The signed-in account's posted Snap with this `author/permlink`, or null.
@@ -223,7 +241,7 @@ class SnapPostController(
 	fun postedFor(contentId: String): PostedSnap? {
 		val prefix = SnapDraftKey.of(account()?.takeIf { it.isNotBlank() } ?: return null, "")
 		return posted.entries.firstOrNull { it.key.startsWith(prefix) && it.value.contentId == contentId }
-			?.value
+			?.value?.let(::withPendingEdit)
 	}
 
 	// ── refreshing from the chain (Issue 40C) ──────────────────────────

@@ -225,6 +225,7 @@ class SnapThreadControllerTest {
 		store: Store = Store(),
 		permlinks: Permlinks = Permlinks(),
 		previews: Previews = Previews(),
+		onReplyPublished: (String) -> Unit = {},
 		account: () -> String?,
 	): SnapThreadController {
 		val publisher = SnapPublisher(
@@ -240,6 +241,7 @@ class SnapThreadControllerTest {
 			account = account,
 			drafts = drafts,
 			previewStore = previews,
+			onReplyPublished = onReplyPublished,
 			io = Dispatchers.Unconfined,
 		)
 	}
@@ -2383,5 +2385,91 @@ class SnapThreadControllerTest {
 		assertEquals(emptyList<Any>(), threads.thread(root)!!.rows)
 		assertEquals("nothing sent", 0, hive.broadcasts)
 		assertEquals("nothing written", before, store.saved)
+	}
+
+	// ── Issue 40D: replies carrying uploaded images ────────────────────
+
+	private val img1 = "https://images.hive.blog/DQm" + "a".repeat(44) + "/image.jpg"
+	private val img2 = "https://images.hive.blog/DQm" + "b".repeat(44) + "/image.png"
+
+	@Test
+	fun `a reply with images publishes the words and then the image block, once`() {
+		val hive = Hive(inBlock())
+		val drafts = Drafts()
+		val published = mutableListOf<String>()
+		val threads = controller(hive, drafts = drafts, onReplyPublished = { published += it }) { "alice" }
+		val key = threads.replyKey(root)
+		threads.edit(key, "x".repeat(280))
+
+		threads.send(root, root, listOf(img1, img2))
+
+		assertEquals(1, hive.broadcasts)
+		assertEquals("x".repeat(280) + "\n\n![]($img1)\n![]($img2)", hive.preparedOps.single().body)
+		assertTrue(threads.status(key) is SnapPostStatus.Posted)
+		assertEquals("the draft retires rather than lingering as released text", "", threads.draft(key))
+		assertFalse(drafts.saved.containsKey(key))
+		assertEquals("the images leave with the publication", listOf(key), published)
+	}
+
+	@Test
+	fun `an image-only reply is sendable and an empty one is not`() {
+		val hive = Hive(inBlock())
+		val threads = controller(hive) { "alice" }
+		val key = threads.replyKey(root)
+
+		threads.send(root, root)
+		assertEquals("empty composer: nothing", 0, hive.broadcasts)
+
+		threads.send(root, root, listOf(img1))
+		assertEquals(1, hive.broadcasts)
+		assertEquals("![]($img1)", hive.preparedOps.single().body)
+		assertTrue(threads.status(key) is SnapPostStatus.Posted)
+	}
+
+	@Test
+	fun `a failed reply with images keeps the words and does not retire the images`() {
+		val hive = Hive(inBlock()).apply { preparable = false }
+		val published = mutableListOf<String>()
+		val threads = controller(hive, onReplyPublished = { published += it }) { "alice" }
+		val key = threads.replyKey(root)
+		threads.edit(key, "words")
+
+		threads.send(root, root, listOf(img1))
+
+		assertEquals(0, hive.broadcasts)
+		assertEquals("words", threads.draft(key))
+		assertTrue(published.isEmpty())
+	}
+
+	@Test
+	fun `retrying an interrupted reply reuses its record and never broadcasts twice`() {
+		val hive = Hive(inBlock()).apply { preparable = false }
+		val store = Store()
+		val threads = controller(hive, store = store) { "alice" }
+		val key = threads.replyKey(root)
+		threads.edit(key, "words")
+		threads.send(root, root, listOf(img1))
+		val intent = soleIntent(store)
+
+		hive.preparable = true
+		threads.send(root, root, listOf(img1))
+
+		assertEquals(1, hive.broadcasts)
+		assertEquals("the same intent, the same permlink", intent, soleIntent(store))
+		assertEquals("words\n\n![]($img1)", hive.preparedOps.single().body)
+	}
+
+	@Test
+	fun `281 characters with images is refused before anything is staged`() {
+		val hive = Hive(inBlock())
+		val store = Store()
+		val threads = controller(hive, store = store) { "alice" }
+		val key = threads.replyKey(root)
+		threads.edit(key, "x".repeat(281))
+
+		threads.send(root, root, listOf(img1))
+
+		assertEquals(0, hive.broadcasts)
+		assertTrue(store.saved.isEmpty())
 	}
 }

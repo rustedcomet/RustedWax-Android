@@ -146,8 +146,12 @@ sealed interface SnapMediaRef {
  */
 object SnapMediaParser {
 
-	/** At most this many previews under one comment. The rest stay links. */
-	const val MAX_PER_COMMENT = 3
+	/**
+	 * At most this many previews under one comment. The rest stay links.
+	 * Four, so a Snap or reply carrying RustedWax's own maximum of four
+	 * attached images (Issue 40D) shows all of them.
+	 */
+	const val MAX_PER_COMMENT = 4
 
 	/** Longer than any real media URL; past this it is not one worth fetching. */
 	private const val MAX_URL_LENGTH = 2048

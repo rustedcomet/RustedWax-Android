@@ -206,14 +206,19 @@ class SnapMediaParserTest {
 	// ── ordering, duplicates, bounds ───────────────────────────────────
 
 	@Test
-	fun `order is as written, duplicates once, at most three`() {
+	fun `order is as written, duplicates once, at most four`() {
 		val text = "https://youtu.be/AAAAAAAAAAA https://x.example/1.png " +
 			"https://www.youtube.com/watch?v=AAAAAAAAAAA https://x.example/1.png " +
 			"https://x.example/2.gif https://x.example/3.jpg https://x.example/4.jpg"
 		val found = SnapMediaParser.find(text)
+		// Four since Issue 40D, so a comment with four attached images shows them all.
+		assertEquals(4, SnapMediaParser.MAX_PER_COMMENT)
 		assertEquals(SnapMediaParser.MAX_PER_COMMENT, found.size)
 		assertEquals(
-			listOf("https://youtu.be/AAAAAAAAAAA", "https://x.example/1.png", "https://x.example/2.gif"),
+			listOf(
+				"https://youtu.be/AAAAAAAAAAA", "https://x.example/1.png",
+				"https://x.example/2.gif", "https://x.example/3.jpg",
+			),
 			found.map { it.source },
 		)
 	}

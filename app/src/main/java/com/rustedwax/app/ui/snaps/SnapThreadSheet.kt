@@ -1,6 +1,37 @@
 package com.rustedwax.app.ui.snaps
 
+import android.graphics.Bitmap
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.content.MediaType
+import androidx.compose.foundation.content.TransferableContent
+import androidx.compose.foundation.content.consume
+import androidx.compose.foundation.content.contentReceiver
+import androidx.compose.foundation.content.hasMediaType
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.text.input.InputTransformation
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.runtime.key
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import com.rustedwax.app.snaps.SnapAttachmentBlock
+import com.rustedwax.app.snaps.SnapClipIntake
+import com.rustedwax.app.snaps.SnapImageFormat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -140,7 +171,12 @@ internal data class SnapRootComposing(
 	/** False while the text is invalid, or an attempt already owns this row. */
 	val canPost: Boolean,
 	val onDraftChange: (String) -> Unit,
-	val onPost: () -> Unit,
+	/** Called with every image's hosted address once all are uploaded (Issue 40D). */
+	val onPost: (List<String>) -> Unit,
+	/** The draft's words read live, for the field. */
+	val liveDraft: () -> String = { draft },
+	/** This row's images. Null: text only. */
+	val attachments: ComposerAttachments? = null,
 )
 
 /**
@@ -173,6 +209,8 @@ internal fun SnapThreadSheet(
 	 * same consent History's banners ride. Off still draws the play card.
 	 */
 	thumbnails: Boolean = false,
+	/** Phone images for replies (Issue 40D). Null: replies are text only. */
+	attachments: SnapAttachmentController? = null,
 ) {
 	val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 	// Which comment the composer at the bottom is aimed at. Null is the ordinary
@@ -285,6 +323,7 @@ internal fun SnapThreadSheet(
 								} else {
 									null
 								},
+								attachments = attachments,
 							)
 							HorizontalDivider(Modifier.padding(vertical = 8.dp))
 						}
@@ -338,7 +377,7 @@ internal fun SnapThreadSheet(
 							// adds a reply cannot hand one comment's composition to
 							// another comment.
 							items(nodes, key = { it.reply.contentId }) { node ->
-								ReplyBlock(node, root, threads, likes, nowEpochSec, thumbnails) {
+								ReplyBlock(node, root, threads, likes, nowEpochSec, thumbnails, attachments) {
 									replyTarget = it
 								}
 							}
@@ -387,7 +426,7 @@ internal fun SnapThreadSheet(
 			// either at a new comment or at an existing one of the viewer's own.
 			val editing = threads.editing?.takeIf { it.root == root }
 			if (editing != null) {
-				EditComposerBar(editing = editing, threads = threads, viewer = viewer)
+				EditComposerBar(editing = editing, threads = threads, viewer = viewer, attachments = attachments)
 			} else {
 				ThreadComposerBar(
 					root = root,
@@ -397,6 +436,7 @@ internal fun SnapThreadSheet(
 					viewer = viewer,
 					onSent = { sentKey = it },
 					onClearTarget = { replyTarget = null },
+					attachments = attachments,
 				)
 			}
 			Spacer(Modifier.height(12.dp))
@@ -430,6 +470,7 @@ private fun ThreadComposerBar(
 	/** Fired with the slot just sent, after [SnapThreadController.send] has it. */
 	onSent: (String) -> Unit,
 	onClearTarget: () -> Unit,
+	attachments: SnapAttachmentController?,
 ) {
 	val key = threads.replyKey(target)
 	// What the box shows, which empties on the tap. The draft itself is
@@ -498,23 +539,38 @@ private fun ThreadComposerBar(
 			}
 		}
 
-		QuickEmojiRow { threads.edit(key, draft + it) }
+		val busy = threads.isBusy(key)
+		val uploading = attachments?.isUploading(key) == true
+		val images = attachments?.count(key) ?: 0
+		QuickEmojiRow { if (!uploading) threads.edit(key, draft + it) }
 
 		ComposerPill(
 			viewer = viewer ?: root.author,
 			draft = draft,
 			hint = if (aimed != null) "Reply to @${aimed.author}…" else "Join the conversation…",
-			canSend = SnapText.isValid(draft) && !threads.isBusy(key),
+			canSend = SnapAttachmentBlock.canSend(draft, images) && !busy && !uploading &&
+				(attachments?.arriving(key) ?: 0) == 0,
 			focus = focus,
 			onDraftChange = { threads.edit(key, it) },
+			liveDraft = { threads.composerText(key) },
+			// The images ride with the words: hidden while an attempt holds them,
+			// back if it does not publish, gone once it does.
+			attachments = attachments?.let { ComposerAttachments(key, it, visible = !busy) },
+			readOnly = uploading,
 			// No "Sending…". The box clears on the durable write and the reply
 			// appears above it.
 			onSend = {
 				// `target` is this composable's parameter, captured when the bar
 				// was composed and closed over by the coroutine `send` starts —
 				// so reporting the slot afterwards cannot reparent anything.
-				threads.send(root, target)
-				onSent(key)
+				//
+				// Images first (Issue 40D): every one is uploaded, and only then
+				// is the reply staged with their addresses. With none, at once.
+				val publish = { urls: List<String> ->
+					threads.send(root, target, urls)
+					onSent(key)
+				}
+				attachments?.upload(key, publish) ?: publish(emptyList())
 				// Ending the IME session is part of sending, not decoration.
 				//
 				// The box is emptied by `composerText`, but a live IME session
@@ -532,7 +588,7 @@ private fun ThreadComposerBar(
 				focusManager.clearFocus()
 				keyboard?.hide()
 			},
-			onDiscard = if (draft.isNotEmpty() && !threads.isBusy(key)) {
+			onDiscard = if (draft.isNotEmpty() && !busy && !uploading) {
 				{ confirmDiscard = true }
 			} else {
 				null
@@ -549,6 +605,7 @@ private fun ThreadComposerBar(
 				// outright while the reply's outcome is unknown — see
 				// [SnapThreadController.discard].
 				threads.discard(target)
+				attachments?.clear(key)
 			},
 		)
 	}
@@ -576,6 +633,7 @@ private fun ThreadComposerBar(
  * count appears only once the limit is actually in sight, and Send is inert
  * until [SnapText.isValid] agrees — the same gate that was there before.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ComposerPill(
 	viewer: String,
@@ -588,92 +646,407 @@ private fun ComposerPill(
 	/** Absent for an empty draft: asking about nothing trains people to tap No. */
 	onDiscard: (() -> Unit)?,
 	sendLabel: String = "Send",
+	/**
+	 * The draft's words read live from where they are kept, not from this
+	 * composition. The field writes every keystroke through synchronously, so
+	 * the only differences this ever sees are changes made elsewhere — the box
+	 * emptying on Send, an emoji tapped in, the composer re-aimed.
+	 */
+	liveDraft: () -> String = { draft },
+	/** The images of this draft (Issue 40D). Null: no gallery and no image paste. */
+	attachments: ComposerAttachments? = null,
+	/** True while the images are uploading: nothing may change under the upload. */
+	readOnly: Boolean = false,
+	/** Edit only: the already-hosted images being kept, removable, never added to. */
+	editImages: EditImages? = null,
 ) {
 	val overflowing = SnapText.isOverflowing(draft)
-	Row(
-		Modifier.fillMaxWidth().padding(top = 6.dp),
-		verticalAlignment = Alignment.Bottom,
-	) {
-		HiveAvatar(account = viewer, size = 30.dp)
-		Spacer(Modifier.width(8.dp))
-		Column(Modifier.weight(1f)) {
-			Row(
-				Modifier
-					.fillMaxWidth()
-					.clip(RoundedCornerShape(22.dp))
-					.background(MaterialTheme.colorScheme.surfaceContainerHighest)
-					.padding(start = 14.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
-				verticalAlignment = Alignment.CenterVertically,
-			) {
-				BasicTextField(
-					value = draft,
-					onValueChange = onDraftChange,
-					textStyle = MaterialTheme.typography.bodyMedium.copy(
-						color = MaterialTheme.colorScheme.onSurface,
-					),
-					cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-					// Grows a little, never into a page. Past this the field
-					// scrolls rather than pushing the conversation off screen.
-					maxLines = 5,
-					modifier = Modifier
-						.weight(1f)
-						.focusRequester(focus)
-						.padding(vertical = 10.dp),
-					decorationBox = { field ->
-						if (draft.isEmpty()) {
-							Text(
-								hint,
-								style = MaterialTheme.typography.bodyMedium,
-								color = MaterialTheme.colorScheme.onSurfaceVariant,
-								maxLines = 1,
-								overflow = TextOverflow.Ellipsis,
-							)
-						}
-						field()
-					},
-				)
-				// Inside the pill, on the right, where the thumb already is.
-				IconButton(onClick = onSend, enabled = canSend, modifier = Modifier.size(36.dp)) {
-					Icon(
-						WaxIcons.Send,
-						contentDescription = sendLabel,
-						tint = if (canSend) {
-							MaterialTheme.colorScheme.primary
-						} else {
-							MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+	val state = remember { TextFieldState(draft) }
+	val currentLive by rememberUpdatedState(liveDraft)
+	val currentChange by rememberUpdatedState(onDraftChange)
+	LaunchedEffect(state) {
+		snapshotFlow { currentLive() }.collect { live ->
+			if (state.text.toString() != live) state.setTextAndPlaceCursorAtEnd(live)
+		}
+	}
+	Column(Modifier.fillMaxWidth()) {
+		attachments?.let { AttachmentStatus(it) }
+		Row(
+			Modifier.fillMaxWidth().padding(top = 6.dp),
+			verticalAlignment = Alignment.Bottom,
+		) {
+			HiveAvatar(account = viewer, size = 30.dp)
+			Spacer(Modifier.width(8.dp))
+			Column(Modifier.weight(1f)) {
+				// One field, as in Instagram's comment box: the words on top and
+				// the attached images inside the same rounded box, under them.
+				Column(
+					Modifier
+						.fillMaxWidth()
+						.clip(RoundedCornerShape(22.dp))
+						.background(MaterialTheme.colorScheme.surfaceContainerHighest),
+				) {
+				Row(
+					Modifier
+						.fillMaxWidth()
+						.padding(start = 14.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+					verticalAlignment = Alignment.CenterVertically,
+				) {
+					BasicTextField(
+						state = state,
+						readOnly = readOnly,
+						// Every user edit is handed to the owner as it happens. If the
+						// owner does not take it — a locked slot, an edit mid-save, the
+						// keyboard echoing words that were just sent — the field goes
+						// back to what the owner holds, as the old controlled field did.
+						inputTransformation = InputTransformation {
+							val proposed = asCharSequence().toString()
+							currentChange(proposed)
+							if (currentLive() != proposed) revertAllChanges()
 						},
-						modifier = Modifier.size(18.dp),
+						textStyle = MaterialTheme.typography.bodyMedium.copy(
+							color = MaterialTheme.colorScheme.onSurface,
+						),
+						cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+						// Grows a little, never into a page. Past this the field
+						// scrolls rather than pushing the conversation off screen.
+						lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = 5),
+						modifier = Modifier
+							.weight(1f)
+							.focusRequester(focus)
+							.then(attachments?.let { Modifier.imageReceiver(it) } ?: Modifier)
+							.padding(vertical = 10.dp),
+						decorator = { field ->
+							if (state.text.isEmpty()) {
+								Text(
+									hint,
+									style = MaterialTheme.typography.bodyMedium,
+									color = MaterialTheme.colorScheme.onSurfaceVariant,
+									maxLines = 1,
+									overflow = TextOverflow.Ellipsis,
+								)
+							}
+							field()
+						},
+					)
+					// Images, directly: one tap into the photo picker, no menu.
+					attachments?.let { GalleryButton(it, enabled = !readOnly) }
+					// Inside the pill, on the right, where the thumb already is.
+					IconButton(onClick = onSend, enabled = canSend, modifier = Modifier.size(36.dp)) {
+						Icon(
+							WaxIcons.Send,
+							contentDescription = sendLabel,
+							tint = if (canSend) {
+								MaterialTheme.colorScheme.primary
+							} else {
+								MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+							},
+							modifier = Modifier.size(18.dp),
+						)
+					}
+				}
+				if (editImages == null) {
+					attachments?.let { AttachmentThumbs(it) }
+				} else {
+					EditThumbs(editImages, attachments)
+				}
+				}
+				// Only ever shown when it is about to matter, and it is the one
+				// thing that must still be said out loud when it does.
+				if (overflowing || SnapText.count(draft) > SnapText.LIMIT - 20) {
+					Row(
+						Modifier.fillMaxWidth().padding(top = 2.dp, end = 4.dp),
+						horizontalArrangement = Arrangement.End,
+						verticalAlignment = Alignment.CenterVertically,
+					) {
+						onDiscard?.let {
+							TextButton(onClick = it) {
+								Text(
+									"Discard",
+									style = MaterialTheme.typography.labelSmall,
+									color = MaterialTheme.colorScheme.error,
+								)
+							}
+							Spacer(Modifier.width(4.dp))
+						}
+						Text(
+							SnapText.counterLabel(draft),
+							style = MaterialTheme.typography.labelSmall,
+							color = if (overflowing) {
+								MaterialTheme.colorScheme.error
+							} else {
+								MaterialTheme.colorScheme.onSurfaceVariant
+							},
+						)
+					}
+				}
+			}
+		}
+	}
+}
+
+/** One draft's images, as the composer needs them. */
+internal class ComposerAttachments(
+	/** The draft key: the same account + slot the words are stored under. */
+	val key: String,
+	val controller: SnapAttachmentController,
+	/** Hidden while an attempt holds them: they reappear only if it does not publish. */
+	val visible: Boolean = true,
+	/** Images already attached elsewhere that count towards the same four (an Edit's kept ones). */
+	val reserved: Int = 0,
+)
+
+/**
+ * Clipboard and keyboard images, into the same intake the picker uses.
+ *
+ * Anything that is only text — including a copied image *URL* — is left to
+ * the field and pastes as words. An item is taken as an image only when it
+ * carries a content URI and the clip says it is an image, or carries nothing
+ * else to paste; whatever it really is, the intake decides from its bytes.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+private fun Modifier.imageReceiver(attachments: ComposerAttachments): Modifier =
+	contentReceiver { content ->
+		val origin = if (content.source == TransferableContent.Source.Keyboard) {
+			SnapImageOrigin.KEYBOARD
+		} else {
+			SnapImageOrigin.CLIPBOARD
+		}
+		val imageClip = content.hasMediaType(MediaType.Image)
+		val taken = mutableListOf<SnapImageSource>()
+		val rest = content.consume { item ->
+			val uri = item.uri?.toString()
+			if (uri == null || !SnapClipIntake.takesAsImage(uri, item.text, imageClip)) return@consume false
+			taken += SnapImageSource(uri, origin)
+			true
+		}
+		if (taken.isNotEmpty()) attachments.controller.add(attachments.key, taken, attachments.reserved)
+		rest
+	}
+
+/** The gallery icon on the right of the pill. Goes straight to the photo picker. */
+@Composable
+private fun GalleryButton(attachments: ComposerAttachments, enabled: Boolean) {
+	val c = attachments.controller
+	val draftKey = attachments.key
+	val room = c.room(draftKey, attachments.reserved)
+	val request = PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+	fun sources(uris: List<Uri>) = uris.map { SnapImageSource(it.toString(), SnapImageOrigin.PICKER) }
+	val pickOne = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+		uri?.let { c.add(draftKey, sources(listOf(it)), attachments.reserved) }
+	}
+	// Asks the picker for no more than there is room for; a picker that ignores
+	// the cap is trimmed by the controller, with a message, not by losing anything.
+	val pickMany = rememberLauncherForActivityResult(
+		ActivityResultContracts.PickMultipleVisualMedia(maxOf(2, room)),
+	) { uris -> c.add(draftKey, sources(uris), attachments.reserved) }
+	val usable = enabled && room > 0 && !c.isUploading(draftKey)
+	IconButton(
+		onClick = { if (room == 1) pickOne.launch(request) else pickMany.launch(request) },
+		enabled = usable,
+		modifier = Modifier.size(36.dp),
+	) {
+		Icon(
+			WaxIcons.Gallery,
+			contentDescription = if (room > 0) "Add images" else "Image limit reached",
+			tint = if (usable) {
+				MaterialTheme.colorScheme.onSurfaceVariant
+			} else {
+				MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+			},
+			modifier = Modifier.size(20.dp),
+		)
+	}
+}
+
+/** Selected images side by side inside the field, under the words, each with its own ×. */
+@Composable
+private fun AttachmentThumbs(attachments: ComposerAttachments) {
+	val c = attachments.controller
+	val draftKey = attachments.key
+	val items = if (attachments.visible) c.items(draftKey) else emptyList()
+	val uploading = c.progress(draftKey)
+	val arriving = if (attachments.visible) c.arriving(draftKey) else 0
+	if (items.isNotEmpty() || arriving > 0) {
+		Row(
+			Modifier
+				.fillMaxWidth()
+				.horizontalScroll(rememberScrollState())
+				.padding(start = 14.dp, end = 14.dp, bottom = 12.dp),
+			horizontalArrangement = Arrangement.spacedBy(8.dp),
+		) {
+			items.forEach { item ->
+				key(item.id) {
+					AttachmentThumb(
+						item = item,
+						removable = uploading == null,
+						onRemove = { c.remove(draftKey, item.id) },
 					)
 				}
 			}
-			// Only ever shown when it is about to matter, and it is the one
-			// thing that must still be said out loud when it does.
-			if (overflowing || SnapText.count(draft) > SnapText.LIMIT - 20) {
-				Row(
-					Modifier.fillMaxWidth().padding(top = 2.dp, end = 4.dp),
-					horizontalArrangement = Arrangement.End,
-					verticalAlignment = Alignment.CenterVertically,
-				) {
-					onDiscard?.let {
-						TextButton(onClick = it) {
-							Text(
-								"Discard",
-								style = MaterialTheme.typography.labelSmall,
-								color = MaterialTheme.colorScheme.error,
-							)
-						}
-						Spacer(Modifier.width(4.dp))
-					}
-					Text(
-						SnapText.counterLabel(draft),
-						style = MaterialTheme.typography.labelSmall,
-						color = if (overflowing) {
-							MaterialTheme.colorScheme.error
-						} else {
-							MaterialTheme.colorScheme.onSurfaceVariant
-						},
-					)
-				}
+			repeat(arriving) {
+				Box(
+					Modifier
+						.size(64.dp)
+						.clip(RoundedCornerShape(10.dp))
+						.background(MaterialTheme.colorScheme.surfaceContainer),
+				)
+			}
+		}
+	}
+}
+
+/** Upload progress and intake notices for one draft, just above the field. */
+@Composable
+private fun AttachmentStatus(attachments: ComposerAttachments) {
+	val c = attachments.controller
+	val draftKey = attachments.key
+	c.progress(draftKey)?.let { p ->
+		Column(Modifier.fillMaxWidth().padding(start = 38.dp, top = 6.dp)) {
+			Text(
+				if (p.total == 1) "Uploading image…" else "Uploading image ${p.index} of ${p.total}…",
+				style = MaterialTheme.typography.labelSmall,
+				color = MaterialTheme.colorScheme.onSurfaceVariant,
+			)
+			LinearProgressIndicator(
+				progress = { ((p.index - 1) + p.fraction) / p.total },
+				modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+			)
+		}
+	}
+	c.notice(draftKey)?.let { message ->
+		Text(
+			message,
+			style = MaterialTheme.typography.labelSmall,
+			color = MaterialTheme.colorScheme.error,
+			modifier = Modifier
+				.fillMaxWidth()
+				.padding(start = 38.dp, top = 4.dp)
+				.clickable(onClickLabel = "Dismiss") { c.dismissNotice(draftKey) },
+		)
+	}
+}
+
+@Composable
+private fun AttachmentThumb(item: SnapAttachment, removable: Boolean, onRemove: () -> Unit) {
+	var bitmap by remember(item.file) { mutableStateOf<Bitmap?>(null) }
+	LaunchedEffect(item.file) {
+		bitmap = withContext(Dispatchers.IO) { SnapAttachmentThumbs.decode(item.file, 192) }
+	}
+	ThumbFrame(
+		image = bitmap?.asImageBitmap(),
+		description = if (item.format == SnapImageFormat.GIF) "Attached GIF" else "Attached image",
+		removable = removable,
+		onRemove = onRemove,
+	)
+}
+
+/**
+ * An Edit's images in one row, in the order they will be published: the
+ * already-hosted ones it keeps, then any it adds. Each has its own ×.
+ */
+@Composable
+private fun EditThumbs(kept: EditImages, added: ComposerAttachments?) {
+	val c = added?.controller
+	val items = added?.let { c!!.items(it.key) }.orEmpty()
+	val arriving = added?.let { c!!.arriving(it.key) } ?: 0
+	if (kept.urls.isEmpty() && items.isEmpty() && arriving == 0) return
+	Row(
+		Modifier
+			.fillMaxWidth()
+			.horizontalScroll(rememberScrollState())
+			.padding(start = 14.dp, end = 14.dp, bottom = 12.dp),
+		horizontalArrangement = Arrangement.spacedBy(8.dp),
+	) {
+		// Keyed by position as well as address: the same image may be attached
+		// twice, and × removes exactly the one tapped.
+		kept.urls.forEachIndexed { i, url ->
+			key("kept", i, url) {
+				HostedThumb(url, removable = kept.removable, onRemove = { kept.onRemove(i) })
+			}
+		}
+		items.forEach { item ->
+			key("new", item.id) {
+				AttachmentThumb(item, removable = true, onRemove = { c!!.remove(added!!.key, item.id) })
+			}
+		}
+		repeat(arriving) {
+			Box(
+				Modifier
+					.size(64.dp)
+					.clip(RoundedCornerShape(10.dp))
+					.background(MaterialTheme.colorScheme.surfaceContainer),
+			)
+		}
+	}
+}
+
+/** The images an Edit keeps (Issue 40D), each removable with the composer's ×. */
+internal class EditImages(
+	val urls: List<String>,
+	val removable: Boolean,
+	val onRemove: (Int) -> Unit,
+)
+
+/** An already-hosted attachment, drawn as the same compact still the composer uses. */
+@Composable
+private fun HostedThumb(url: String, removable: Boolean, onRemove: () -> Unit) {
+	// A still through the same bounded loader and proxy 40C previews use; a
+	// GIF shows its first frame here, as History does.
+	val ref = remember(url) { (SnapMediaParser.recognise(url) as? SnapMediaRef.Image)?.copy(animated = false) }
+	var image by remember(url) { mutableStateOf(ref?.let { SnapMediaLoader.cached(it) }) }
+	LaunchedEffect(url) {
+		if (image == null && ref != null) image = SnapMediaLoader.load(ref)
+	}
+	ThumbFrame(
+		image = (image as? SnapMediaImage.Still)?.bitmap,
+		description = if (url.endsWith(".gif")) "Attached GIF" else "Attached image",
+		removable = removable,
+		onRemove = onRemove,
+	)
+}
+
+@Composable
+private fun ThumbFrame(
+	image: androidx.compose.ui.graphics.ImageBitmap?,
+	description: String,
+	removable: Boolean,
+	onRemove: () -> Unit,
+) {
+	Box(Modifier.size(64.dp)) {
+		Box(
+			Modifier
+				.fillMaxSize()
+				.clip(RoundedCornerShape(10.dp))
+				.background(MaterialTheme.colorScheme.surfaceContainer)
+				.semantics { contentDescription = description },
+		) {
+			image?.let {
+				Image(
+					it,
+					contentDescription = null,
+					contentScale = ContentScale.Crop,
+					modifier = Modifier.fillMaxSize(),
+				)
+			}
+		}
+		if (removable) {
+			Box(
+				Modifier
+					.align(Alignment.TopEnd)
+					.padding(3.dp)
+					.size(22.dp)
+					.clip(RoundedCornerShape(50))
+					.background(Color.Black.copy(alpha = 0.6f))
+					.clickable(onClickLabel = "Remove image", onClick = onRemove),
+				contentAlignment = Alignment.Center,
+			) {
+				Icon(
+					WaxIcons.Close,
+					contentDescription = "Remove image",
+					tint = Color.White,
+					modifier = Modifier.size(14.dp),
+				)
 			}
 		}
 	}
@@ -722,13 +1095,16 @@ private fun EditComposerBar(
 	editing: SnapThreadController.Editing,
 	threads: SnapThreadController,
 	viewer: String?,
+	attachments: SnapAttachmentController?,
 ) {
 	val focus = remember { FocusRequester() }
 	val focusManager = LocalFocusManager.current
 	val keyboard = LocalSoftwareKeyboardController.current
 	val text = threads.editText
-	val saving = threads.isSavingEdit
+	// Save never waits on Hive any more (Issue 40D): the bar closes on the tap.
+	val saving = false
 	val what = if (editing.kind == SnapEditKind.ROOT) "Snap" else "reply"
+	val imagesKey = threads.editImagesKey(editing.target)
 
 	Column(Modifier.fillMaxWidth()) {
 		LaunchedEffect(editing.target.contentId) { runCatching { focus.requestFocus() } }
@@ -764,13 +1140,25 @@ private fun EditComposerBar(
 			}
 		}
 		QuickEmojiRow { if (!saving) threads.editDraft(text + it) }
+		// The words, the kept images and any added ones: × removes one from this
+		// edit only, and the gallery adds within the same four. Nothing changes
+		// on chain unless Save is proven.
 		ComposerPill(
 			viewer = viewer ?: editing.target.author,
 			draft = text,
 			hint = "Edit your $what…",
-			canSend = SnapText.isValid(text) && text != editing.original && !saving,
+			canSend = threads.canSaveEdit() && (attachments?.arriving(imagesKey) ?: 0) == 0,
 			focus = focus,
 			onDraftChange = threads::editDraft,
+			liveDraft = { threads.editText },
+			attachments = attachments?.let {
+				ComposerAttachments(imagesKey, it, reserved = threads.editImages.size)
+			},
+			editImages = EditImages(
+				urls = threads.editImages,
+				removable = !saving,
+				onRemove = threads::removeEditImage,
+			),
 			onSend = {
 				threads.saveEdit()
 				// See [ThreadComposerBar]: end the IME session with the tap.
@@ -798,7 +1186,9 @@ private fun RootComposerBar(composing: SnapRootComposing, viewer: String?) {
 	val focusManager = LocalFocusManager.current
 	val keyboard = LocalSoftwareKeyboardController.current
 	Column(Modifier.fillMaxWidth()) {
-		QuickEmojiRow { composing.onDraftChange(composing.draft + it) }
+		val images = composing.attachments
+		val uploading = images?.controller?.isUploading(images.key) == true
+		QuickEmojiRow { if (!uploading) composing.onDraftChange(composing.draft + it) }
 		ComposerPill(
 			viewer = viewer.orEmpty(),
 			draft = composing.draft,
@@ -806,8 +1196,13 @@ private fun RootComposerBar(composing: SnapRootComposing, viewer: String?) {
 			canSend = composing.canPost,
 			focus = focus,
 			onDraftChange = composing.onDraftChange,
+			liveDraft = composing.liveDraft,
+			attachments = images,
+			readOnly = uploading,
 			onSend = {
-				composing.onPost()
+				// Images first (Issue 40D); the Snap is posted only once every
+				// one has its hosted address.
+				images?.controller?.upload(images.key, composing.onPost) ?: composing.onPost(emptyList())
 				// See [ThreadComposerBar]: the IME session has to end with the
 				// send, or its next update writes the words back.
 				focusManager.clearFocus()
@@ -866,6 +1261,7 @@ private fun ReplyBlock(
 	likes: SnapLikeController,
 	nowEpochSec: Long,
 	thumbnails: Boolean,
+	attachments: SnapAttachmentController?,
 	onReplyTo: (SnapReplyTarget) -> Unit,
 ) {
 	val reply: SnapReply = node.reply
@@ -897,6 +1293,7 @@ private fun ReplyBlock(
 		onDelete = SnapReplyTarget.of(reply)
 			?.takeIf { threads.canDelete(reply.author) }
 			?.let { target -> { threads.requestDelete(root, target, SnapEditKind.REPLY, reply.body) } },
+		attachments = attachments,
 	)
 }
 
@@ -908,6 +1305,67 @@ private fun ReplyBlock(
  * all, and an empty body simply draws nothing; none of the three can stop the
  * rest of the thread rendering.
  */
+/**
+ * An edit that left the editor and is settling (Issue 40D): the images it is
+ * adding, drawn from this device until they are hosted, and what is going on.
+ * A failed one says so and offers to try again or let it go — the comment
+ * itself already shows what Hive holds.
+ */
+@Composable
+private fun PendingEditRow(
+	pending: SnapThreadController.PendingEdit,
+	target: SnapReplyTarget,
+	threads: SnapThreadController,
+	attachments: SnapAttachmentController?,
+) {
+	val added = attachments?.items(pending.imagesKey).orEmpty()
+	when (pending.phase) {
+		SnapThreadController.Phase.SAVING -> {
+			if (added.isNotEmpty()) {
+				Row(
+					Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 6.dp),
+					horizontalArrangement = Arrangement.spacedBy(8.dp),
+				) {
+					added.forEach { item ->
+						key(item.id) { AttachmentThumb(item, removable = false, onRemove = {}) }
+					}
+				}
+			}
+			val progress = attachments?.progress(pending.imagesKey)
+			Text(
+				when {
+					progress == null -> "Saving edit…"
+					progress.total == 1 -> "Uploading image…"
+					else -> "Uploading image ${progress.index} of ${progress.total}…"
+				},
+				style = MaterialTheme.typography.labelSmall,
+				color = MaterialTheme.colorScheme.onSurfaceVariant,
+				modifier = Modifier.padding(top = 4.dp),
+			)
+		}
+		SnapThreadController.Phase.FAILED, SnapThreadController.Phase.UNCERTAIN -> {
+			ThreadNotice(pending.message ?: "Your edit wasn't saved.")
+			Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+				TextButton(onClick = { threads.retryEdit(target) }) {
+					Text("Retry edit", style = MaterialTheme.typography.labelMedium)
+				}
+				// Only once the attempt is proven not to have landed. While its
+				// outcome is unresolved there is nothing safe to discard, and a
+				// disabled button in error red reads as available (A36, 40D retest).
+				if (pending.phase == SnapThreadController.Phase.FAILED) {
+					TextButton(onClick = { threads.discardEdit(target) }) {
+						Text(
+							"Discard edit",
+							style = MaterialTheme.typography.labelMedium,
+							color = MaterialTheme.colorScheme.error,
+						)
+					}
+				}
+			}
+		}
+	}
+}
+
 @Composable
 private fun CommentBlock(
 	author: String,
@@ -930,8 +1388,13 @@ private fun CommentBlock(
 	onEdit: (() -> Unit)? = null,
 	/** Present only on the viewer's own comments: asks Hive, then confirms. */
 	onDelete: (() -> Unit)? = null,
+	/** Where an edit's new images wait, for drawing them while the edit settles. */
+	attachments: SnapAttachmentController? = null,
 ) {
 	val key = target?.let { threads.replyKey(it) }
+	// An edit of this comment still settling, or one that failed (Issue 40D).
+	val pendingEdit = target?.let { threads.pendingEdit(it) }
+	val settling = target?.let(threads::isEditSettling) == true
 	val status = key?.let { threads.status(it) } ?: SnapPostStatus.Idle
 
 	Row(Modifier.fillMaxWidth().padding(start = (depth * 14).dp, top = 6.dp)) {
@@ -967,6 +1430,9 @@ private fun CommentBlock(
 				SnapLinkedText(it, style = MaterialTheme.typography.bodyMedium)
 			}
 			SnapMediaPreviews(shown.media, thumbnails)
+			if (target != null && pendingEdit != null) {
+				PendingEditRow(pendingEdit, target, threads, attachments)
+			}
 
 			// Both, in this order: a comment whose identity did not survive
 			// validation gets no Reply control at all.
@@ -1034,8 +1500,8 @@ private fun CommentBlock(
 									.padding(vertical = 4.dp, horizontal = 2.dp),
 							)
 							// Only the author's own, and never on a comment whose
-							// outcome is still being settled.
-							onEdit?.let { edit ->
+							// outcome — or whose edit — is still being settled.
+							onEdit?.takeIf { !settling }?.let { edit ->
 								Spacer(Modifier.width(10.dp))
 								Text(
 									"Edit",
@@ -1047,7 +1513,7 @@ private fun CommentBlock(
 										.padding(vertical = 4.dp, horizontal = 2.dp),
 								)
 							}
-							onDelete?.let { delete ->
+							onDelete?.takeIf { !settling }?.let { delete ->
 								Spacer(Modifier.width(10.dp))
 								// An unproven deletion offers a read, never a
 								// second delete — the controller settles it.
