@@ -158,5 +158,6 @@ class NotLoggedAccountScopeTest {
 		durationSeconds = 100,
 		videoId = null,
 		account = account,
+		rowId = "row-$title",
 	)
 }

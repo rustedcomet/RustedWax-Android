@@ -97,6 +97,8 @@ class Phase01EndToEndParityTest : ReplayScenarioTest() {
 		// runs by design — the same reason atEpochSec is erased above. Parity is
 		// about what the row claims about the world, not which row object it was.
 		.replace(Regex("eventId=[0-9a-fA-F-]{36}"), "eventId=<id>")
+		// A Not Logged row's rowId (Issue #41) is minted per row for the same reason.
+		.replace(Regex("rowId=[0-9a-fA-F-]{36}"), "rowId=<id>")
 
 	private fun outcomeOf(outcome: FinalizationOutcome): String = when (outcome) {
 		is FinalizationOutcome.Ignored -> "Ignored(${outcome.reason})"

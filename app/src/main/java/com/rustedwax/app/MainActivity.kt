@@ -48,12 +48,10 @@ import com.rustedwax.app.ui.LoadingScreen
 import com.rustedwax.app.ui.MainScreen
 import com.rustedwax.app.ui.RustedWaxWindow
 import com.rustedwax.app.ui.ThemeChoice
-import com.rustedwax.app.ui.snaps.SharedPreferencesSnapDraftStore
 import com.rustedwax.app.snaps.HivePostedSnapReader
 import com.rustedwax.app.snaps.HiveSnapPort
 import com.rustedwax.app.snaps.PostedSnaps
 import com.rustedwax.app.snaps.SharedPreferencesPendingSnapStore
-import com.rustedwax.app.snaps.SharedPreferencesPostedSnapCache
 import com.rustedwax.app.snaps.SnapDeleter
 import com.rustedwax.app.snaps.SnapEditKind
 import com.rustedwax.app.snaps.SnapEditor
@@ -62,9 +60,9 @@ import com.rustedwax.app.snaps.SnapReplyTarget
 import com.rustedwax.app.snaps.HiveSnapLikePort
 import com.rustedwax.app.snaps.HiveSnapThreadReader
 import com.rustedwax.app.ui.snaps.AndroidSnapNoticeNotifier
-import com.rustedwax.app.ui.snaps.SharedPreferencesSnapNoticeStore
+import com.rustedwax.app.ui.snaps.SnapNoticeLocal
 import com.rustedwax.app.ui.snaps.SharedPreferencesSnapReplyDraftStore
-import com.rustedwax.app.ui.snaps.SharedPreferencesSnapThreadPreviewStore
+import com.rustedwax.app.ui.snaps.SnapLocalState
 import com.rustedwax.app.ui.snaps.SnapComposerState
 import com.rustedwax.app.ui.snaps.SnapLikeController
 import com.rustedwax.app.ui.snaps.SnapNoticeController
@@ -334,7 +332,7 @@ class MainActivity : ComponentActivity() {
 		// keyed by account so one Hive user never sees another's unsent text.
 		val snaps = remember {
 			SnapComposerState(
-				store = SharedPreferencesSnapDraftStore(applicationContext),
+				store = SnapLocalState.get(applicationContext).drafts,
 				account = { account?.username },
 			)
 		}
@@ -345,8 +343,9 @@ class MainActivity : ComponentActivity() {
 			// One store, shared by the two halves that need it: the publisher,
 			// which writes it, and the posted-Snap view, which only ever reads it.
 			val pendingSnaps = SharedPreferencesPendingSnapStore(applicationContext)
-			// The last chain body each posted Snap was read with (Issue 40C).
-			val postedCache = SharedPreferencesPostedSnapCache(applicationContext)
+			// The last chain body each posted Snap was read with (Issue 40C), in
+			// the structured local store since Issue #41.
+			val postedCache = SnapLocalState.get(applicationContext).postedCache
 			val publisher = SnapPublisher(
 				// The key is read inside the port at signing time, so it is never
 				// held by the publisher and an account switch changes it.
@@ -386,7 +385,8 @@ class MainActivity : ComponentActivity() {
 		// through a notification can reach a Hive write.
 		val notices = remember {
 			SnapNoticeController(
-				store = SharedPreferencesSnapNoticeStore(applicationContext),
+				// In the structured local store since Issue #41.
+				store = SnapNoticeLocal.store(applicationContext),
 				// Read late, like everywhere else in this stack, so a switch
 				// mid-flight cannot file one account's replies under another's.
 				account = { account?.username },
@@ -470,7 +470,7 @@ class MainActivity : ComponentActivity() {
 				drafts = SharedPreferencesSnapReplyDraftStore(applicationContext),
 				// What a reopened History card draws before Hive answers. Only
 				// the card's own summary, never the conversation.
-				previewStore = SharedPreferencesSnapThreadPreviewStore(applicationContext),
+				previewStore = SnapLocalState.get(applicationContext).previews,
 				// Read-only, and the whole of Stage 6's data supply. The rows
 				// handed over are the ones this load already fetched and already
 				// checked against the account it was started under.
