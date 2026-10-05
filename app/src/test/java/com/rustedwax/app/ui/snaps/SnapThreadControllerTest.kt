@@ -18,8 +18,11 @@ import com.rustedwax.hive.PreparedHiveTransaction
 import com.rustedwax.hive.SnapContainer
 import com.rustedwax.hive.SnapContainerResolver
 import com.rustedwax.hive.TxSerializer
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -226,6 +229,7 @@ class SnapThreadControllerTest {
 		permlinks: Permlinks = Permlinks(),
 		previews: Previews = Previews(),
 		onReplyPublished: (String) -> Unit = {},
+		scope: CoroutineScope = CoroutineScope(Dispatchers.Unconfined),
 		account: () -> String?,
 	): SnapThreadController {
 		val publisher = SnapPublisher(
@@ -235,7 +239,7 @@ class SnapThreadControllerTest {
 			newReplyPermlink = { permlinks.mint() },
 		)
 		return SnapThreadController(
-			scope = CoroutineScope(Dispatchers.Unconfined),
+			scope = scope,
 			reader = { reader },
 			publisher = { publisher },
 			account = account,
@@ -2471,5 +2475,262 @@ class SnapThreadControllerTest {
 
 		assertEquals(0, hive.broadcasts)
 		assertTrue(store.saved.isEmpty())
+	}
+
+	// ── Stage 47D: My Snaps Comments counts ───────────────────────────────
+
+	/**
+	 * Starts [roots]' row effects the way My Snaps composes them, each waiting
+	 * on [gate] where the real row waits out its settle delay. Unconfined, so
+	 * everything before the gate has already happened when this returns.
+	 */
+	private fun rows(
+		threads: SnapThreadController,
+		roots: List<SnapReplyTarget>,
+		gate: CompletableDeferred<Unit>,
+	): List<Job> = roots.map { r ->
+		CoroutineScope(Dispatchers.Unconfined).launch { threads.loadWhenSettled(r) { gate.await() } }
+	}
+
+	private fun roots(n: Int) = (1..n).map { SnapReplyTarget.of("alice", "rustedwax-snap-1000-p${it}aaaa")!! }
+
+	@Test
+	fun `a My Snaps row shows its remembered count before anything is read`() {
+		val previews = Previews()
+		previews.saved[SnapDraftKey.of("alice", root.contentId)] = SnapThreadPreview.Preview(emptyList(), total = 5)
+		val reader = Reader(null)
+		val threads = controller(reader = reader, previews = previews) { "alice" }
+
+		rows(threads, listOf(root), CompletableDeferred())
+
+		assertEquals(5, threads.preview(root)!!.total)
+		assertEquals("no read while the row is still settling", 0, reader.reads)
+	}
+
+	@Test
+	fun `an unknown count is read once the row settles, without a refresh or an open`() {
+		val previews = Previews()
+		val reader = Reader(listOf(reply("bob", "r1", root), reply("carol", "r2", root)))
+		val threads = controller(reader = reader, previews = previews) { "alice" }
+		val gate = CompletableDeferred<Unit>()
+
+		rows(threads, listOf(root), gate)
+		assertNull("unknown is not zero", threads.preview(root))
+		gate.complete(Unit)
+
+		assertEquals(1, reader.reads)
+		assertEquals(2, threads.preview(root)!!.total)
+		assertEquals("remembered for the next start", 2, previews.saved[SnapDraftKey.of("alice", root.contentId)]!!.total)
+		assertNull("reading a count opens nothing", threads.openThread)
+	}
+
+	@Test
+	fun `rows flung past are never read, and a large catalog costs only the rows that stayed`() {
+		val reader = Reader(emptyList())
+		val threads = controller(reader = reader) { "alice" }
+		val all = roots(120)
+		val gate = CompletableDeferred<Unit>()
+
+		val jobs = rows(threads, all, gate)
+		// Scrolled past: every row but the last five left composition mid-settle.
+		jobs.dropLast(5).forEach { it.cancel() }
+		gate.complete(Unit)
+
+		assertEquals(5, reader.reads)
+		assertTrue(all.dropLast(5).none { threads.state(it) != null })
+	}
+
+	@Test
+	fun `scrolling back and recomposing does not read a conversation again`() {
+		val reader = Reader(listOf(reply("bob", "r1", root)))
+		val threads = controller(reader = reader) { "alice" }
+		val done = CompletableDeferred(Unit)
+
+		repeat(10) { rows(threads, listOf(root), done) }
+
+		assertEquals(1, reader.reads)
+		assertEquals(1, threads.preview(root)!!.total)
+	}
+
+	@Test
+	fun `a failed or offline read keeps the remembered count and never invents zero`() {
+		val previews = Previews()
+		previews.saved[SnapDraftKey.of("alice", root.contentId)] = SnapThreadPreview.Preview(emptyList(), total = 3)
+		val other = SnapReplyTarget.of("alice", "rustedwax-snap-1000-bbbbbb")!!
+		val threads = controller(reader = Reader(null), previews = previews) { "alice" }
+
+		rows(threads, listOf(root, other), CompletableDeferred(Unit))
+
+		assertEquals(3, threads.preview(root)!!.total)
+		assertEquals(3, previews.saved[SnapDraftKey.of("alice", root.contentId)]!!.total)
+		assertNull("a count never read stays unknown", threads.preview(other))
+		assertTrue(threads.state(other) is SnapThreadLoad.Unavailable)
+	}
+
+	@Test
+	fun `another account never sees a remembered count, and its own read is its own`() {
+		val previews = Previews()
+		previews.saved[SnapDraftKey.of("alice", root.contentId)] = SnapThreadPreview.Preview(emptyList(), total = 4)
+		var who = "bob"
+		val reader = Reader(null)
+		val threads = controller(reader = reader, previews = previews) { who }
+
+		rows(threads, listOf(root), CompletableDeferred(Unit))
+		assertNull("alice's count under bob", threads.preview(root))
+		assertEquals("bob", reader.lastViewer)
+
+		who = "alice"
+		rows(threads, listOf(root), CompletableDeferred())
+		assertEquals(4, threads.preview(root)!!.total)
+	}
+
+	@Test
+	fun `an account switch while a row settles reads for the account now signed in`() {
+		val previews = Previews()
+		previews.saved[SnapDraftKey.of("alice", root.contentId)] = SnapThreadPreview.Preview(emptyList(), total = 4)
+		var who = "alice"
+		val reader = Reader(listOf(reply("x", "r1", root)))
+		val threads = controller(reader = reader, previews = previews) { who }
+		val gate = CompletableDeferred<Unit>()
+
+		rows(threads, listOf(root), gate)
+		who = "bob"
+		gate.complete(Unit)
+
+		assertEquals("bob", reader.lastViewer)
+		assertEquals("alice's remembered count is untouched", 4, previews.saved[SnapDraftKey.of("alice", root.contentId)]!!.total)
+		assertEquals(1, previews.saved[SnapDraftKey.of("bob", root.contentId)]!!.total)
+	}
+
+	@Test
+	fun `a reply arriving moves the count by exactly one, and a repeat read does not double it`() {
+		val reader = Reader(listOf(reply("bob", "r1", root)))
+		val threads = controller(reader = reader) { "alice" }
+		rows(threads, listOf(root), CompletableDeferred(Unit))
+		assertEquals(1, threads.preview(root)!!.total)
+
+		reader.replies = listOf(reply("bob", "r1", root), reply("carol", "r2", root))
+		threads.reloadAfterWrite(root)
+		assertEquals(2, threads.preview(root)!!.total)
+
+		threads.reloadAfterWrite(root)
+		threads.open(root, null)
+		assertEquals("the same comments read again are not new ones", 2, threads.preview(root)!!.total)
+	}
+
+	// ── Stage 47D correction: an abandoned first read leaves no Loading ────
+
+	/** Codex's reproduction: uncached row under Alice, Bob signs in mid-read, Alice returns. */
+	@Test
+	fun `a count read abandoned by an account switch is asked again when the account returns`() {
+		var who = "alice"
+		val reader = Reader(listOf(reply("bob", "r1", root)))
+		reader.duringRead = { who = "bob" }
+		val threads = controller(reader = reader) { who }
+
+		rows(threads, listOf(root), CompletableDeferred(Unit))
+		assertEquals(1, reader.reads)
+		who = "alice"
+		assertNull("Bob's switch discarded Alice's answer", threads.preview(root))
+		assertNull("and left no placeholder behind", threads.state(root))
+
+		reader.duringRead = null
+		repeat(3) { rows(threads, listOf(root), CompletableDeferred(Unit)) }
+
+		assertEquals("one new read, not three", 2, reader.reads)
+		assertEquals(1, threads.preview(root)!!.total)
+		assertTrue(threads.state(root) is SnapThreadLoad.Ready)
+		assertNull("counted without opening anything", threads.openThread)
+	}
+
+	@Test
+	fun `a remembered count survives an abandoned read and the return`() {
+		val previews = Previews()
+		val key = SnapDraftKey.of("alice", root.contentId)
+		previews.saved[key] = SnapThreadPreview.Preview(emptyList(), total = 4)
+		var who = "alice"
+		val reader = Reader(null)
+		reader.duringRead = { who = "bob" }
+		val threads = controller(reader = reader, previews = previews) { who }
+
+		rows(threads, listOf(root), CompletableDeferred(Unit))
+		who = "alice"
+
+		assertEquals(4, threads.preview(root)!!.total)
+		assertEquals(4, previews.saved[key]!!.total)
+		assertEquals(0, previews.writes)
+		assertNull(threads.state(root))
+	}
+
+	@Test
+	fun `a conversation already read is not erased by a later read the switch discarded`() {
+		var who = "alice"
+		val reader = Reader(listOf(reply("bob", "r1", root)))
+		val threads = controller(reader = reader) { who }
+		rows(threads, listOf(root), CompletableDeferred(Unit))
+		val ready = threads.state(root)
+		assertTrue(ready is SnapThreadLoad.Ready)
+
+		// A forced re-read (an open) whose answer Bob's switch throws away.
+		reader.replies = listOf(reply("bob", "r1", root), reply("carol", "r2", root))
+		reader.duringRead = { who = "bob" }
+		threads.open(root, null)
+		who = "alice"
+		reader.duringRead = null
+
+		assertEquals("the earlier answer stands", ready, threads.state(root))
+		assertEquals(1, threads.preview(root)!!.total)
+		rows(threads, listOf(root), CompletableDeferred(Unit))
+		assertEquals("a read conversation is still not re-read by a row", 2, reader.reads)
+	}
+
+	@Test
+	fun `a row that arrives while the first read is out joins it, and that answer is kept`() {
+		var who = "alice"
+		val reader = Reader(listOf(reply("bob", "r1", root)))
+		val threads = controller(reader = reader) { who }
+		// Away and back again before the first read answers; the returning row
+		// effect finds the read still out.
+		reader.duringRead = {
+			who = "bob"
+			who = "alice"
+			rows(threads, listOf(root), CompletableDeferred(Unit))
+		}
+
+		rows(threads, listOf(root), CompletableDeferred(Unit))
+
+		assertEquals("joined, not duplicated", 1, reader.reads)
+		assertTrue("the answer arrived under the right account", threads.state(root) is SnapThreadLoad.Ready)
+		assertEquals(1, threads.preview(root)!!.total)
+	}
+
+	@Test
+	fun `a failed read reports Unavailable and an open still retries it`() {
+		val reader = Reader(null)
+		val threads = controller(reader = reader) { "alice" }
+
+		rows(threads, listOf(root), CompletableDeferred(Unit))
+		assertTrue(threads.state(root) is SnapThreadLoad.Unavailable)
+		assertNull(threads.preview(root))
+
+		reader.replies = listOf(reply("bob", "r1", root))
+		threads.open(root, null)
+		assertEquals(2, reader.reads)
+		assertEquals(1, threads.preview(root)!!.total)
+	}
+
+	@Test
+	fun `a cancelled read leaves no permanent Loading behind`() {
+		val job = Job()
+		val reader = Reader(listOf(reply("bob", "r1", root)))
+		reader.duringRead = { job.cancel() }
+		val threads = controller(reader = reader, scope = CoroutineScope(job + Dispatchers.Unconfined)) { "alice" }
+
+		threads.load(root)
+
+		assertEquals(1, reader.reads)
+		assertTrue(job.isCancelled)
+		assertNull("no answer and no placeholder", threads.state(root))
+		assertNull(threads.preview(root))
 	}
 }

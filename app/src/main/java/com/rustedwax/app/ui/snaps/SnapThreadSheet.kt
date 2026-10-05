@@ -53,7 +53,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -180,6 +183,33 @@ internal data class SnapRootComposing(
 )
 
 /**
+ * How tall the conversation sheet's body is, as a share of the height the
+ * sheet hands it (Stage 47D).
+ *
+ * The share is not the share of the screen. Material3 1.3.1 lifts the whole
+ * sheet above the keyboard, adds a 48dp drag handle and pads the bottom by
+ * the navigation bar, all outside this body. The old 0.88 therefore made a
+ * sheet of about 89% of the window, and because the sheet skips the partial
+ * state it opened with its top just under the status bar.
+ *
+ * [RESTING] makes the whole sheet about three quarters of the window: on the
+ * A36 that is 48dp + 48dp + 0.72 × the remaining 795dp ≈ 668dp of 891dp,
+ * whatever has been said. While the keyboard is up the window above it is
+ * small, so [TYPING] keeps the height every keyboard test so far has passed
+ * on, rather than shrinking the conversation to a sliver.
+ *
+ * The partial state stays skipped. Material's partial anchor is half the
+ * window with the body hanging off the bottom, which would put the composer
+ * off screen.
+ */
+internal object SnapThreadSheetHeight {
+	const val RESTING = 0.72f
+	const val TYPING = 0.88f
+
+	fun fraction(imeVisible: Boolean): Float = if (imeVisible) TYPING else RESTING
+}
+
+/**
  * The whole conversation under one Snap, with room to read it.
  *
  * This is the screen the 280-character limit does **not** apply to. RustedWax's
@@ -188,7 +218,7 @@ internal data class SnapRootComposing(
  * no ellipsis, no "read more". The History card is where a long reply is
  * summarised, and this is where the summary is redeemed.
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 internal fun SnapThreadSheet(
 	/** Null on a row that has not been Snapped yet — see [SnapRootComposing]. */
@@ -221,12 +251,13 @@ internal fun SnapThreadSheet(
 	var replyTarget by remember(root?.contentId) { mutableStateOf<SnapReplyTarget?>(null) }
 	/** The reply slot a Send was just fired for, while its outcome is unknown. */
 	var sentKey by remember(root?.contentId) { mutableStateOf<String?>(null) }
+	val typing = WindowInsets.isImeVisible
 	ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
 		Column(
 			Modifier
 				.fillMaxWidth()
-				// A definite, large height rather than the old 560dp ceiling and
-				// rather than wrapping the conversation.
+				// A definite height rather than the old 560dp ceiling and rather
+				// than wrapping the conversation.
 				//
 				// Both of those were wrong in the same way: they let the sheet's
 				// size be decided by how much had been said. A two-comment thread
@@ -236,7 +267,10 @@ internal fun SnapThreadSheet(
 				// somewhere to stay while the middle scrolls, and leaves History
 				// visible above the sheet — which is what tells the reader which
 				// row they are looking at.
-				.fillMaxHeight(0.88f)
+				//
+				// How much is left visible is [SnapThreadSheetHeight]'s to decide,
+				// and the keyboard changes it.
+				.fillMaxHeight(SnapThreadSheetHeight.fraction(typing))
 				.padding(horizontal = 16.dp)
 				// The keyboard lifts the composer instead of covering it.
 				.imePadding(),

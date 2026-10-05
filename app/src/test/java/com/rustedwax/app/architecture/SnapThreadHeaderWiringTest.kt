@@ -60,7 +60,10 @@ class SnapThreadHeaderWiringTest {
 			"the sheet's content must claim a definite fraction of the screen, " +
 				"so the header and the composer have somewhere to stay and only " +
 				"the conversation between them scrolls",
-			sheet.contains(Regex("""fillMaxHeight\(0\.\d+f\)""")),
+			// Stage 47D: one fraction at rest and one while typing, both fixed.
+			sheet.contains(".fillMaxHeight(SnapThreadSheetHeight.fraction(typing))") &&
+				sheet.contains(Regex("""const val RESTING = 0\.\d+f""")) &&
+				sheet.contains(Regex("""const val TYPING = 0\.\d+f""")),
 		)
 	}
 

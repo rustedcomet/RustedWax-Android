@@ -26,6 +26,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.rustedwax.hive.HiveRpc
 import com.rustedwax.hive.KeyValidator
 import com.rustedwax.app.scrobble.FinalizationRuntime
 import com.rustedwax.app.detect.AccessibilityGrantHealth
@@ -62,7 +63,12 @@ import com.rustedwax.app.snaps.HiveSnapThreadReader
 import com.rustedwax.app.ui.snaps.AndroidSnapNoticeNotifier
 import com.rustedwax.app.ui.snaps.SnapNoticeLocal
 import com.rustedwax.app.ui.snaps.SharedPreferencesSnapReplyDraftStore
+import com.rustedwax.app.storage.db.LocalDatabase
+import com.rustedwax.app.ui.snaps.MySnapsController
+import com.rustedwax.app.ui.snaps.MySnapsDiscovery
+import com.rustedwax.app.ui.snaps.MySnapsIdentity
 import com.rustedwax.app.ui.snaps.SnapLocalState
+import com.rustedwax.app.ui.snaps.SqliteMySnapRows
 import com.rustedwax.app.ui.snaps.SnapComposerState
 import com.rustedwax.app.ui.snaps.SnapLikeController
 import com.rustedwax.app.ui.snaps.SnapNoticeController
@@ -376,6 +382,43 @@ class MainActivity : ComponentActivity() {
 				},
 			)
 		}
+		// My Snaps (Issue #47): the account's own root Snaps from the local
+		// catalog. It reads the root publication records and never writes them —
+		// no publisher, port, key or broadcaster is reachable from here.
+		val mySnaps = remember {
+			val pendingSnaps = SharedPreferencesPendingSnapStore(applicationContext)
+			val postedSnaps = PostedSnaps(
+				store = pendingSnaps,
+				reader = HivePostedSnapReader(),
+				cache = SnapLocalState.get(applicationContext).postedCache,
+			)
+			MySnapsController(
+				scope = lifecycleScope,
+				account = { account?.username },
+				catalog = { SqliteMySnapRows(LocalDatabase.get(applicationContext)) },
+				confirmedRoots = { who -> pendingSnaps.all(who) },
+				// Disk only: the record's words as last reconciled with the chain.
+				latestText = { record -> postedSnaps.local(record.account, record.eventId)?.userText },
+				// Stage 47B: reads only. Each pass stays on one node, because nodes
+				// order an account's comments differently and a cursor must not
+				// cross from one to another.
+				discovery = MySnapsDiscovery(
+					nodes = HiveRpc.DEFAULT_NODES,
+					page = { node, who, after ->
+						HiveRpc(listOf(node)).getAccountPosts(
+							who, "comments", MySnapsDiscovery.PAGE_SIZE, after?.author, after?.permlink,
+						)
+					},
+				),
+				provenAbsent = { author, permlink ->
+					MySnapsIdentity.absence(HiveRpc().readCommentState(author, permlink, 2))
+				},
+				readRoot = { author, permlink -> HiveRpc().getContent(author, permlink) },
+				// A manual refresh that changed a locally published Snap's words
+				// has History's card re-read it the way it always does.
+				onReconciled = { who, ids -> ids.forEach { posts.refreshContent(who, it) } },
+			)
+		}
 		// Stage 6's bell. Built before the thread controller because that is what
 		// feeds it: the only way this app can learn that somebody replied is a
 		// thread read, and those already happen for every posted Snap on screen.
@@ -455,6 +498,20 @@ class MainActivity : ComponentActivity() {
 			val rootDeleter = SnapDeleter(
 				hive = editPort,
 				store = SharedPreferencesPendingSnapStore(applicationContext),
+				// Issue #47: the proven deletion reaches My Snaps' SQLite tombstone
+				// before the confirmed record is retired, so neither crash window
+				// can list the Snap again. A failed write keeps the record.
+				beforeRetire = { who, target, txId ->
+					mySnaps.recordProvenDeletion(who, target.contentId, txId).also { stored ->
+						if (!stored) {
+							EventLog.append(
+								"snaps",
+								"deleted ${target.contentId} on Hive, but couldn't record that on this device; " +
+									"its local record is kept",
+							)
+						}
+					}
+				},
 			)
 			val replyDeleter = SnapDeleter(hive = editPort, store = pendingReplies)
 			SnapThreadController(
@@ -481,17 +538,24 @@ class MainActivity : ComponentActivity() {
 						SnapEditKind.REPLY -> replyEditor
 					}
 				},
-				// An edited root Snap is also drawn on its History card, which
-				// belongs to the posting controller.
-				onRootEdited = posts::applyEdit,
+				// A proven edit updates History, and My Snaps' row with the proven
+				// words — a Snap discovered on Hive has no record to re-read them from.
+				onRootEdited = { who, contentId, text ->
+					posts.applyEdit(who, contentId, text)
+					mySnaps.applyEdit(who, contentId, text)
+				},
 				deleter = { kind ->
 					when (kind) {
 						SnapEditKind.ROOT -> rootDeleter
 						SnapEditKind.REPLY -> replyDeleter
 					}
 				},
-				// A deleted root Snap leaves its History card; the row stays.
-				onRootDeleted = posts::applyDelete,
+				// A deleted root Snap leaves its History card; the row stays. Only
+				// a proven deletion reaches here, and it leaves My Snaps too.
+				onRootDeleted = { who, contentId ->
+					posts.applyDelete(who, contentId)
+					mySnaps.applyDelete(who, contentId)
+				},
 				// Opening a conversation re-reads its root Snap too (Issue 40C).
 				onRootOpened = posts::refreshContent,
 				// A published reply's images went out with it (Issue 40D).
@@ -680,6 +744,7 @@ class MainActivity : ComponentActivity() {
 			posts = posts,
 			threads = threads,
 			likes = likes,
+			mySnaps = mySnaps,
 			attachments = attachments,
 			notices = notices,
 			openThreadRequest = noticeTarget,

@@ -82,7 +82,7 @@ class LocalDatabaseDeviceTest {
 			.use { c -> buildSet { while (c.moveToNext()) add(c.getString(0)) } }
 
 	@Test
-	fun createsVersionOneWithEveryTableAndIndex() {
+	fun createsTheCurrentVersionWithEveryTableAndIndex() {
 		open().read { db ->
 			assertEquals(LocalDatabaseSchema.VERSION, db.version)
 			assertEquals(LocalDatabaseSchema.TABLES.toSet(), names(db, "table"))
@@ -90,6 +90,7 @@ class LocalDatabaseDeviceTest {
 				setOf(
 					"history_owner_at", "history_owner_queue_op", "not_logged_owner_at",
 					"posted_snap_cache_owner_at", "thread_preview_owner_at", "reply_notice_owner_read_at",
+					"my_snap_owner_created",
 				),
 				names(db, "index"),
 			)
@@ -287,6 +288,133 @@ class LocalDatabaseDeviceTest {
 		}
 		assertTrue(DatabaseQuarantine.existing(file).isEmpty())
 		assertEquals(bytes.size, file.readBytes().size)
+	}
+
+	/**
+	 * Issue #47: a version 1 file written by the #41 build upgrades in place.
+	 * Every row it held is still there, byte for byte, and the new catalog
+	 * arrives empty beside them.
+	 */
+	@Test
+	fun aVersionOneDatabaseUpgradesWithoutLosingARow() {
+		file.parentFile!!.mkdirs()
+		SQLiteDatabase.openOrCreateDatabase(file, null).use { v1 ->
+			v1.beginTransaction()
+			try {
+				LocalDatabaseSchema.CREATE_V1.forEach(v1::execSQL)
+				v1.insertOrThrow("history", null, history("h1", eventId = "e1"))
+				v1.insertOrThrow("history", null, history("h2", eventId = "e2", owner = "bob"))
+				v1.insertOrThrow(
+					"posted_snap_cache",
+					null,
+					ContentValues().apply {
+						put("owner", "alice"); put("content_id", "alice/p"); put("chain_body", "c")
+						put("record_body", "r"); put("at", 5L)
+					},
+				)
+				v1.insertOrThrow(
+					"sync_checkpoint",
+					null,
+					ContentValues().apply {
+						put("owner", "alice"); put("scope", "s"); put("value", "v"); put("updated_at", 1L)
+					},
+				)
+				v1.version = 1
+				v1.setTransactionSuccessful()
+			} finally {
+				v1.endTransaction()
+			}
+		}
+		fun dump(db: SQLiteDatabase) = listOf("history", "posted_snap_cache", "sync_checkpoint").associateWith { table ->
+			db.rawQuery("SELECT * FROM $table ORDER BY 1, 2", null).use { c ->
+				buildList { while (c.moveToNext()) add((0 until c.columnCount).map { c.getString(it) }) }
+			}
+		}
+		val before = SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use(::dump)
+
+		open().read { db ->
+			assertEquals(LocalDatabaseSchema.VERSION, db.version)
+			assertEquals(LocalDatabaseSchema.TABLES.toSet(), names(db, "table"))
+			assertEquals(before, dump(db))
+			listOf("my_snap", "my_snap_tombstone").forEach { table ->
+				val n = db.rawQuery("SELECT count(*) FROM $table", null).use { it.moveToFirst(); it.getInt(0) }
+				assertEquals(table, 0, n)
+			}
+		}
+		// And it stays upgraded: a second open runs no step again.
+		open().read { db -> assertEquals(before, dump(db)) }
+	}
+
+	/**
+	 * Issue #47: a version 2 file — the 47A build the A36 already runs — gains
+	 * the tombstone table and keeps every catalog row it held.
+	 */
+	@Test
+	fun aVersionTwoDatabaseUpgradesWithoutLosingACatalogRow() {
+		file.parentFile!!.mkdirs()
+		SQLiteDatabase.openOrCreateDatabase(file, null).use { v2 ->
+			v2.beginTransaction()
+			try {
+				(LocalDatabaseSchema.CREATE_V1 + LocalDatabaseSchema.UPGRADE_V2).forEach(v2::execSQL)
+				v2.insertOrThrow("history", null, history("h1", eventId = "e1"))
+				v2.insertOrThrow(
+					"my_snap",
+					null,
+					ContentValues().apply {
+						put("owner", "alice"); put("author", "alice"); put("permlink", "p"); put("created_at", 7L)
+						put("title", "Song"); put("indexed_at", 1L); put("updated_at", 1L)
+					},
+				)
+				v2.version = 2
+				v2.setTransactionSuccessful()
+			} finally {
+				v2.endTransaction()
+			}
+		}
+		fun dump(db: SQLiteDatabase) = listOf("history", "my_snap").associateWith { table ->
+			db.rawQuery("SELECT * FROM $table ORDER BY 1, 2", null).use { c ->
+				buildList { while (c.moveToNext()) add((0 until c.columnCount).map { c.getString(it) }) }
+			}
+		}
+		val before = SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use(::dump)
+		open().read { db ->
+			assertEquals(3, db.version)
+			assertEquals(LocalDatabaseSchema.TABLES.toSet(), names(db, "table"))
+			assertEquals(before, dump(db))
+			val n = db.rawQuery("SELECT count(*) FROM my_snap_tombstone", null).use { it.moveToFirst(); it.getInt(0) }
+			assertEquals(0, n)
+		}
+	}
+
+	@Test
+	fun tombstonesMustBeTheirOwnersAndUnique() {
+		val db = open()
+		fun stone(owner: String, author: String = owner, permlink: String = "p") = ContentValues().apply {
+			put("owner", owner); put("author", author); put("permlink", permlink); put("deleted_at", 1L)
+		}
+		db.write { it.insertOrThrow("my_snap_tombstone", null, stone("alice")) }
+		assertRejected { db.write { it.insertOrThrow("my_snap_tombstone", null, stone("alice")) } }
+		assertRejected { db.write { it.insertOrThrow("my_snap_tombstone", null, stone("alice", author = "bob", permlink = "q")) } }
+		assertRejected { db.write { it.insertOrThrow("my_snap_tombstone", null, stone("-", permlink = "q")) } }
+		assertRejected { db.write { it.insertOrThrow("my_snap_tombstone", null, stone("alice", permlink = "")) } }
+		db.write { it.insertOrThrow("my_snap_tombstone", null, stone("bob")) }
+	}
+
+	@Test
+	fun myCatalogRowsMustBeTheirOwnersAndUnique() {
+		val db = open()
+		fun snap(owner: String, author: String = owner, permlink: String = "p") = ContentValues().apply {
+			put("owner", owner); put("author", author); put("permlink", permlink); put("created_at", 1L)
+			put("indexed_at", 1L); put("updated_at", 1L)
+		}
+		db.write { it.insertOrThrow("my_snap", null, snap("alice")) }
+		assertRejected { db.write { it.insertOrThrow("my_snap", null, snap("alice")) } }
+		assertRejected { db.write { it.insertOrThrow("my_snap", null, snap("alice", author = "bob", permlink = "q")) } }
+		assertRejected { db.write { it.insertOrThrow("my_snap", null, snap("-", permlink = "q")) } }
+		assertRejected { db.write { it.insertOrThrow("my_snap", null, snap("Alice", author = "Alice", permlink = "q")) } }
+		assertRejected { db.write { it.insertOrThrow("my_snap", null, snap("alice", permlink = "")) } }
+		// The same permlink under another account is another row.
+		db.write { it.insertOrThrow("my_snap", null, snap("bob")) }
 	}
 
 	@Test

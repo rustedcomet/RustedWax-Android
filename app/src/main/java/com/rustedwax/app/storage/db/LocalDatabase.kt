@@ -72,6 +72,9 @@ internal class LocalDatabase internal constructor(
 		// The helper has already opened a transaction around this call, so the
 		// schema is created whole or not at all.
 		LocalDatabaseSchema.CREATE_V1.forEach(db::execSQL)
+		if (LocalDatabaseSchema.VERSION > 1) {
+			LocalDatabaseSchema.upgradeSteps(1, LocalDatabaseSchema.VERSION).forEach(db::execSQL)
+		}
 	}
 
 	override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
