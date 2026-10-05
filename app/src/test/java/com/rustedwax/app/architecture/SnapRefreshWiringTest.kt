@@ -79,6 +79,9 @@ class SnapRefreshWiringTest {
 	fun `the Comments root is the refreshed copy and opening re-reads it`() {
 		assertTrue(main.contains("rootSnap = posts.postedFor(root.contentId) ?: threads.openRootSnap"))
 		assertTrue(activity.contains("onRootOpened = posts::refreshContent"))
+		// Stage 47E: opening Comments starts no My Snaps catalog read; external
+		// edits reach My Snaps through a manual pull only.
+		assertFalse(activity.contains("reconcileOpened"))
 		assertTrue(activity.contains("cache = postedCache"))
 	}
 }

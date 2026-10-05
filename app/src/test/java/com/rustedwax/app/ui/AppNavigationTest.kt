@@ -2,17 +2,13 @@ package com.rustedwax.app.ui
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Navigation is by named destination, not by tab number.
- *
- * The numeric scheme is what made `Log` unsafe to hide: every destination after
- * it shifted by one, so the same stored `4` meant `Log` on one install and
- * `Settings` on another. These tests are about identity surviving a change in
- * which destinations exist at all.
+ * Navigation is by named destination, not by tab number, and since Issue #47
+ * the strip holds exactly four primary destinations while Settings and the
+ * Event Log live in the top bar's overflow menu.
  */
 class AppNavigationTest {
 
@@ -25,55 +21,48 @@ class AppNavigationTest {
 	}
 
 	@Test
-	fun `the event log switch decides whether Log is a destination`() {
+	fun `the primary destinations are exactly Now, History, My Snaps and Not logged`() {
 		assertEquals(
 			listOf(
 				Destination.NOW,
 				Destination.HISTORY,
+				Destination.MY_SNAPS,
 				Destination.NOT_LOGGED,
-				Destination.SETTINGS,
 			),
-			AppNavigation.destinations(eventLogEnabled = false),
-		)
-		assertEquals(
-			listOf(
-				Destination.NOW,
-				Destination.HISTORY,
-				Destination.NOT_LOGGED,
-				Destination.SETTINGS,
-				Destination.LOG,
-			),
-			AppNavigation.destinations(eventLogEnabled = true),
+			AppNavigation.destinations(),
 		)
 	}
 
-	/**
-	 * `Log` is last, and that is the point of where it sits.
-	 *
-	 * It is the only conditional destination, so putting it anywhere else means
-	 * the strip's contents shift when the switch is touched. At the end it can
-	 * appear and disappear without moving a single neighbour — the four ordinary
-	 * destinations occupy the same positions either way.
-	 */
 	@Test
-	fun `Log is last, so turning it on moves no other destination`() {
-		val on = AppNavigation.destinations(eventLogEnabled = true)
-		assertEquals(Destination.LOG, on.last())
-		assertEquals(
-			"the ordinary destinations moved when Log appeared",
-			AppNavigation.destinations(eventLogEnabled = false),
-			on.dropLast(1),
+	fun `Settings, the Event Log and About are overflow entries, in that order, and only there`() {
+		assertEquals(listOf(Destination.SETTINGS, Destination.LOG, Destination.ABOUT), AppNavigation.overflow)
+		AppNavigation.overflow.forEach {
+			assertFalse("$it is in the strip", it in AppNavigation.destinations())
+			assertFalse(AppNavigation.isPrimary(it))
+		}
+		assertFalse("My Snaps is repeated in the overflow", Destination.MY_SNAPS in AppNavigation.overflow)
+	}
+
+	@Test
+	fun `every destination is either primary or in the overflow, never both`() {
+		Destination.entries.forEach {
+			assertTrue(
+				"$it is reachable from exactly one place",
+				(it in AppNavigation.destinations()) != (it in AppNavigation.overflow),
+			)
+		}
+	}
+
+	/** The Event Log no longer appears and disappears with the logging switch. */
+	@Test
+	fun `the destination lists take no logging switch`() {
+		assertTrue(
+			AppNavigation::class.java.methods
+				.filter { it.name == "destinations" }
+				.all { it.parameterCount == 0 },
 		)
 	}
 
-	/**
-	 * `Export` used to be a conditional trailing button on the tab strip, which
-	 * needed a rule saying when it was allowed to exist. It is now inside the
-	 * `Log` page beside `Clear log`, where the same guarantee holds structurally:
-	 * the page exists only while a log does, so a button on it cannot attach an
-	 * empty file. The rule that stood in for that is gone rather than kept as a
-	 * second answer to a question the destination list already settles.
-	 */
 	@Test
 	fun `the export visibility rule is gone, not merely unused`() {
 		assertFalse(
@@ -82,105 +71,62 @@ class AppNavigationTest {
 		)
 	}
 
-	/**
-	 * The drift the numeric scheme had: adding `Log` in the middle moved every
-	 * later tab down one, so a selection made before the toggle pointed at a
-	 * different screen after it.
-	 */
 	@Test
-	fun `adding or removing Log never moves another destination`() {
-		val off = AppNavigation.destinations(eventLogEnabled = false)
-		val on = AppNavigation.destinations(eventLogEnabled = true)
-		off.forEach { destination ->
-			assertEquals(
-				"$destination was not preserved across the toggle",
-				destination,
-				AppNavigation.resolve(destination, on),
-			)
-			assertEquals(
-				"$destination was not preserved across the toggle",
-				destination,
-				AppNavigation.resolve(destination, off),
-			)
+	fun `swiping moves one primary destination in each direction`() {
+		val strip = AppNavigation.destinations()
+		assertEquals(Destination.HISTORY, AppNavigation.swipe(Destination.NOW, strip, 1))
+		assertEquals(Destination.MY_SNAPS, AppNavigation.swipe(Destination.HISTORY, strip, 1))
+		assertEquals(Destination.NOT_LOGGED, AppNavigation.swipe(Destination.MY_SNAPS, strip, 1))
+		assertEquals(Destination.MY_SNAPS, AppNavigation.swipe(Destination.NOT_LOGGED, strip, -1))
+		assertEquals(Destination.NOW, AppNavigation.swipe(Destination.HISTORY, strip, -1))
+	}
+
+	@Test
+	fun `swiping stops at both ends rather than wrapping or reaching the overflow`() {
+		val strip = AppNavigation.destinations()
+		assertEquals(Destination.NOW, AppNavigation.swipe(Destination.NOW, strip, -1))
+		assertEquals(Destination.NOT_LOGGED, AppNavigation.swipe(Destination.NOT_LOGGED, strip, 1))
+	}
+
+	@Test
+	fun `a swipe on an overflow page stays there`() {
+		val strip = AppNavigation.destinations()
+		AppNavigation.overflow.forEach { page ->
+			assertEquals(page, AppNavigation.swipe(page, strip, 1))
+			assertEquals(page, AppNavigation.swipe(page, strip, -1))
 		}
 	}
 
 	@Test
-	fun `a selection that stopped existing lands on Settings rather than a neighbour`() {
-		assertEquals(
-			Destination.SETTINGS,
-			AppNavigation.resolve(
-				Destination.LOG,
-				AppNavigation.destinations(eventLogEnabled = false),
-			),
-		)
+	fun `every primary destination is reachable by swiping from the first one`() {
+		val strip = AppNavigation.destinations()
+		var at = strip.first()
+		val visited = mutableListOf(at)
+		repeat(strip.size - 1) {
+			at = AppNavigation.swipe(at, strip, 1)
+			visited += at
+		}
+		assertEquals(strip, visited)
 	}
 
 	@Test
-	fun `swiping moves one destination in each direction`() {
-		val on = AppNavigation.destinations(eventLogEnabled = true)
-		assertEquals(Destination.HISTORY, AppNavigation.swipe(Destination.NOW, on, 1))
-		assertEquals(Destination.NOW, AppNavigation.swipe(Destination.HISTORY, on, -1))
-		assertEquals(Destination.LOG, AppNavigation.swipe(Destination.SETTINGS, on, 1))
-		assertEquals(Destination.SETTINGS, AppNavigation.swipe(Destination.LOG, on, -1))
+	fun `labels name every destination`() {
+		assertEquals("My Snaps", AppNavigation.label(Destination.MY_SNAPS, 1, 2, 3))
+		assertEquals("Settings", AppNavigation.label(Destination.SETTINGS, 1, 2, 3))
+		assertEquals("Event Log", AppNavigation.label(Destination.LOG, 1, 2, 3))
+		assertEquals("About", AppNavigation.label(Destination.ABOUT, 1, 2, 3))
+		assertEquals("Now (1)", AppNavigation.label(Destination.NOW, 1, 2, 3))
+		assertEquals("History (2)", AppNavigation.label(Destination.HISTORY, 1, 2, 3))
+		assertEquals("Not logged (3)", AppNavigation.label(Destination.NOT_LOGGED, 1, 2, 3))
 	}
 
 	@Test
-	fun `swiping stops at both ends rather than wrapping`() {
-		val on = AppNavigation.destinations(eventLogEnabled = true)
-		val off = AppNavigation.destinations(eventLogEnabled = false)
-		assertEquals(Destination.NOW, AppNavigation.swipe(Destination.NOW, on, -1))
-		assertEquals(Destination.LOG, AppNavigation.swipe(Destination.LOG, on, 1))
-		assertEquals(Destination.SETTINGS, AppNavigation.swipe(Destination.SETTINGS, off, 1))
-	}
-
-	@Test
-	fun `with the log off Settings is simply the end of the strip`() {
-		val off = AppNavigation.destinations(eventLogEnabled = false)
-		assertEquals(Destination.SETTINGS, AppNavigation.swipe(Destination.NOT_LOGGED, off, 1))
-		assertEquals(Destination.NOT_LOGGED, AppNavigation.swipe(Destination.SETTINGS, off, -1))
-		assertEquals(Destination.SETTINGS, off.last())
-	}
-
-	/**
-	 * A swipe and a tab tap are the same movement expressed twice, so they have
-	 * to agree by construction rather than by two lists being kept in step.
-	 */
-	@Test
-	fun `every destination is reachable by swiping from the first one`() {
-		listOf(false, true).forEach { logging ->
-			val destinations = AppNavigation.destinations(logging)
-			var at = destinations.first()
-			val visited = mutableListOf(at)
-			repeat(destinations.size - 1) {
-				at = AppNavigation.swipe(at, destinations, 1)
-				visited += at
+	fun `no swipe ever reaches a utility page from the four tabs`() {
+		val strip = AppNavigation.destinations()
+		strip.forEach { from ->
+			listOf(-1, 1).forEach { delta ->
+				assertTrue("$from $delta", AppNavigation.swipe(from, strip, delta) in strip)
 			}
-			assertEquals("log=$logging", destinations, visited)
 		}
-	}
-
-	@Test
-	fun `a page index means the same destination either side of the toggle`() {
-		val off = AppNavigation.destinations(eventLogEnabled = false)
-		val on = AppNavigation.destinations(eventLogEnabled = true)
-
-		off.forEachIndexed { index, destination ->
-			assertEquals(
-				"index $index is not the destination it was",
-				destination,
-				on[index],
-			)
-			assertEquals(index, AppNavigation.indexOf(destination, off))
-			assertEquals(index, AppNavigation.indexOf(destination, on))
-		}
-		assertEquals(3, AppNavigation.indexOf(Destination.SETTINGS, off))
-		assertEquals(3, AppNavigation.indexOf(Destination.SETTINGS, on))
-		assertEquals(4, AppNavigation.indexOf(Destination.LOG, on))
-	}
-
-	@Test
-	fun `every destination carries a label`() {
-		Destination.entries.forEach { assertNotNull(it.name) }
 	}
 }

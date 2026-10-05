@@ -25,14 +25,19 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.activity.compose.BackHandler
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -75,6 +80,8 @@ import androidx.compose.ui.unit.sp
 import com.rustedwax.app.R
 import com.rustedwax.app.scrobble.FinalizationRuntime
 import com.rustedwax.app.ui.snaps.DiscardSnapDialog
+import com.rustedwax.app.ui.snaps.MySnapMedia
+import com.rustedwax.app.ui.snaps.MySnapsController
 import com.rustedwax.app.ui.snaps.PostedSnapCard
 import com.rustedwax.app.ui.snaps.SnapComposer
 import com.rustedwax.app.snaps.SnapMedia
@@ -116,9 +123,9 @@ import kotlin.math.roundToInt
  * Utilitarian by design — this is a tool for one person, and the log being
  * readable matters more than the chrome around it.
  *
- * Navigation is by [Destination], never by tab number: which destinations exist
- * depends on whether the event log is switched on, and an index cannot survive
- * that list changing under it.
+ * Navigation is by [Destination], never by tab number. The strip holds the four
+ * primary destinations; Settings and the Event Log are reached from the top
+ * bar's overflow menu (Issue #47).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -176,6 +183,8 @@ fun MainScreen(
 	threads: SnapThreadController,
 	/** Likes on other people's comments, inside those threads. */
 	likes: SnapLikeController,
+	/** The local My Snaps catalog (Issue #47). Read-only presentation state. */
+	mySnaps: MySnapsController,
 	/** Phone images on Snap and reply drafts (Issue 40D). */
 	attachments: SnapAttachmentController,
 	/**
@@ -235,20 +244,21 @@ fun MainScreen(
 	onValidateAndSave: (String, String) -> Unit,
 	onForgetKey: () -> Unit,
 ) {
-	val destinations = AppNavigation.destinations(eventLogEnabled)
+	val destinations = AppNavigation.destinations()
 	var chosen by remember { mutableStateOf(Destination.NOW) }
-	// Resolved every composition rather than repaired by an effect: a selection
-	// that stopped existing has to be handled before anything draws with it, and
-	// there is no frame in which the screen should be showing a destination that
-	// is not in the list beside it.
-	val selected = AppNavigation.resolve(chosen, destinations)
-
-	// Repair a selection whose conditional destination disappeared. The screen
-	// owns only the named destination; there is deliberately no second numeric
-	// pager state to reconcile with it.
-	LaunchedEffect(destinations) {
-		chosen = AppNavigation.resolve(chosen, destinations)
+	// Every destination always exists now, so the selection is simply the one
+	// chosen. There is deliberately no second numeric pager state beside it.
+	val selected = chosen
+	// Where Back returns from an overflow page: the primary destination it was
+	// opened over, so Settings and the Event Log never need a back-arrow page.
+	var lastPrimary by remember { mutableStateOf(Destination.NOW) }
+	LaunchedEffect(selected) {
+		if (AppNavigation.isPrimary(selected)) lastPrimary = selected
 	}
+	BackHandler(enabled = !AppNavigation.isPrimary(selected)) { chosen = lastPrimary }
+	// Hoisted so My Snaps keeps its scroll position across the other destinations.
+	val mySnapsListState = rememberLazyListState()
+	var overflowOpen by remember { mutableStateOf(false) }
 	val swipeThreshold = with(LocalDensity.current) { 48.dp.toPx() }
 
 	// The History row the bell was asked to show, until History has shown it.
@@ -334,9 +344,8 @@ fun MainScreen(
 						Text("RustedWax", style = MaterialTheme.typography.titleLarge)
 					}
 				},
-				// The top bar is where an overflow would go, and the bell goes
-				// there with it. It draws nothing at all while there is nothing
-				// to say — see [SnapAttentionBell].
+				// The bell, then the overflow. The bell draws nothing at all while
+				// there is nothing to say — see [SnapAttentionBell].
 				actions = {
 					SnapAttentionBell(
 						rows = attention,
@@ -376,6 +385,35 @@ fun MainScreen(
 							}
 						},
 					)
+					// Utility destinations (Issue #47): an icon and a visible label
+					// each, and deliberately short. My Snaps is primary, so it is
+					// not repeated here.
+					Box {
+						IconButton(onClick = { overflowOpen = true }) {
+							Icon(WaxIcons.MoreVert, contentDescription = "More options")
+						}
+						DropdownMenu(expanded = overflowOpen, onDismissRequest = { overflowOpen = false }) {
+							AppNavigation.overflow.forEach { destination ->
+								DropdownMenuItem(
+									text = { Text(AppNavigation.label(destination, 0, 0, 0)) },
+									leadingIcon = {
+										Icon(
+											when (destination) {
+												Destination.SETTINGS -> WaxIcons.Gear
+												Destination.ABOUT -> WaxIcons.Info
+												else -> WaxIcons.ListLines
+											},
+											contentDescription = null,
+										)
+									},
+									onClick = {
+										overflowOpen = false
+										chosen = destination
+									},
+								)
+							}
+						}
+					}
 				},
 				colors = TopAppBarDefaults.topAppBarColors(
 					containerColor = MaterialTheme.colorScheme.background,
@@ -486,6 +524,15 @@ fun MainScreen(
 				},
 			)
 
+			// An overflow page has no tab lit in the strip, so it names itself.
+			if (!AppNavigation.isPrimary(selected)) {
+				Text(
+					AppNavigation.label(selected, 0, 0, 0),
+					style = MaterialTheme.typography.titleMedium,
+					modifier = Modifier.padding(bottom = 6.dp),
+				)
+			}
+
 			Box(
 				modifier = Modifier
 					.weight(1f)
@@ -535,9 +582,36 @@ fun MainScreen(
 							onMute,
 						)
 
+					Destination.MY_SNAPS -> MySnapsList(
+						mySnaps = mySnaps,
+						listState = mySnapsListState,
+						recent = recent,
+						thumbnails = youTubeScrobbling,
+						viewer = account?.username,
+						posts = posts,
+						threads = threads,
+						likes = likes,
+						attachments = attachments,
+						notices = notices,
+						onOpenVideo = onOpenVideo,
+					)
+
 					Destination.NOT_LOGGED -> SkippedList(skipped, youTubeScrobbling, onOpenVideo)
 
-					Destination.LOG -> LogList(logLines, onExportLog, onClearLog)
+					// Reachable from the overflow whether or not a log is being
+					// written. Off means nothing was recorded, so the page says so
+					// and points at the switch rather than showing an empty log
+					// with an Export button that could only send an empty file.
+					// A short page about the app itself. The version line in Settings,
+					// with its seven-tap developer unlock, is untouched; this page only
+					// shows the version.
+					Destination.ABOUT -> AboutPage(appVersion)
+
+					Destination.LOG -> if (eventLogEnabled) {
+						LogList(logLines, onExportLog, onClearLog)
+					} else {
+						EventLogOff(onOpenSettings = { chosen = Destination.SETTINGS })
+					}
 
 					// Its own scroll, so a switch added next month pushes nothing
 					// off the bottom of a small screen.
@@ -1404,6 +1478,47 @@ private fun VideoLink(
 	}
 }
 
+/**
+ * The open conversation, drawn over whichever list opened it — History or My
+ * Snaps. One host for both, so every route into the sheet passes through the
+ * same rules; the list only says what media header, if any, the root belongs to.
+ */
+@Composable
+private fun ConversationSheet(
+	threads: SnapThreadController,
+	posts: SnapPostController,
+	likes: SnapLikeController,
+	attachments: SnapAttachmentController,
+	notices: SnapNoticeController,
+	viewer: String?,
+	thumbnails: Boolean,
+	media: (SnapReplyTarget) -> SnapThreadMedia?,
+) {
+	threads.openThread?.let { root ->
+		// Reaching a conversation is what answers a notification about it. This
+		// is the one place every route into the sheet passes through — the bell,
+		// the card's Thread button and the preview strip all end here — so the
+		// rule is stated once instead of beside three click handlers, one of
+		// which would eventually be added without it.
+		LaunchedEffect(root.contentId) { notices.markThreadRead(root) }
+		SnapThreadSheet(
+			root = root,
+			// The posting controller's copy when it has one, so a refresh of the
+			// root (on open, on return, after an edit) reaches the sheet too.
+			rootSnap = posts.postedFor(root.contentId) ?: threads.openRootSnap,
+			threads = threads,
+			likes = likes,
+			nowEpochSec = System.currentTimeMillis() / 1000,
+			media = media(root),
+			viewer = viewer,
+			rootComposer = null,
+			onDismiss = { threads.close() },
+			attachments = attachments,
+			thumbnails = thumbnails,
+		)
+	}
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun HistoryList(
@@ -1450,13 +1565,7 @@ private fun HistoryList(
 	// The full conversation, over the top of the list. Hoisted out of the card
 	// that opened it so the sheet is not a child of a `LazyColumn` item that can
 	// scroll away, or be recycled, underneath it.
-	threads.openThread?.let { root ->
-		// Reaching a conversation is what answers a notification about it. This
-		// is the one place every route into the sheet passes through — the bell,
-		// the card's Thread button and the preview strip all end here — so the
-		// rule is stated once instead of beside three click handlers, one of
-		// which would eventually be added without it.
-		LaunchedEffect(root.contentId) { notices.markThreadRead(root) }
+	ConversationSheet(threads, posts, likes, attachments, notices, viewer, thumbnails) { root ->
 		// Which History row this conversation belongs to, if History is still
 		// showing it. Found by asking each row for the Snap it posted and
 		// matching that Snap's identity against the thread that is open — the
@@ -1471,24 +1580,9 @@ private fun HistoryList(
 		// notification both open threads for Snaps whose History row has long
 		// since fallen off the list, and the header is built to say less in
 		// exactly that case.
-		val media = recent
+		recent
 			.firstOrNull { posts.posted(snaps.key(it.eventId))?.contentId == root.contentId }
 			?.let { SnapThreadMedia(videoId = it.videoId, title = it.title, artist = it.artist) }
-		SnapThreadSheet(
-			root = root,
-			// The posting controller's copy when it has one, so a refresh of the
-			// root (on open, on return, after an edit) reaches the sheet too.
-			rootSnap = posts.postedFor(root.contentId) ?: threads.openRootSnap,
-			threads = threads,
-			likes = likes,
-			nowEpochSec = System.currentTimeMillis() / 1000,
-			media = media,
-			viewer = viewer,
-			rootComposer = null,
-			onDismiss = { threads.close() },
-			attachments = attachments,
-			thumbnails = thumbnails,
-		)
 	}
 
 	// The same sheet, opened on a row that has not been Snapped yet. There is no
@@ -2326,6 +2420,253 @@ private fun platformIcon(platform: NowCard.Platform): ImageVector = when (platfo
 	NowCard.Platform.YOUTUBE_MUSIC -> WaxIcons.MusicNote
 	NowCard.Platform.BRAVE, NowCard.Platform.CHROME -> WaxIcons.Search
 	else -> WaxIcons.PlayBox
+}
+
+/**
+ * About (Issue #47): what RustedWax is, which version is installed, and where
+ * the project lives. The description is the project README's own; the links
+ * are its published GitHub repository, its releases and Scrobble.life.
+ */
+@Composable
+private fun AboutPage(version: String) {
+	val uris = androidx.compose.ui.platform.LocalUriHandler.current
+	Column(
+		Modifier
+			.fillMaxSize()
+			.verticalScroll(rememberScrollState()),
+	) {
+		SettingCard {
+			Row(verticalAlignment = Alignment.CenterVertically) {
+				Image(
+					painter = painterResource(R.drawable.rustedwax_mark),
+					contentDescription = null,
+					modifier = Modifier
+						.size(48.dp)
+						.clip(RoundedCornerShape(percent = 50)),
+				)
+				Spacer(Modifier.width(12.dp))
+				Column {
+					Text("RustedWax", style = MaterialTheme.typography.titleMedium)
+					Text(
+						"Version $version",
+						style = MaterialTheme.typography.bodySmall,
+						color = MaterialTheme.colorScheme.onSurfaceVariant,
+					)
+				}
+			}
+			Spacer(Modifier.height(10.dp))
+			Text(
+				"Android media scrobbling, with conversations around what you play. " +
+					"Keep a verified listening and viewing history on Hive.",
+				style = MaterialTheme.typography.bodyMedium,
+			)
+		}
+		Spacer(Modifier.height(6.dp))
+		ABOUT_LINKS.forEach { (label, url) ->
+			SettingCard(
+				modifier = Modifier.clickable(onClickLabel = "Open $label") {
+					runCatching { uris.openUri(url) }
+				},
+			) {
+				Text(label, style = MaterialTheme.typography.titleSmall)
+				Text(
+					url.removePrefix("https://"),
+					style = MaterialTheme.typography.bodySmall,
+					color = MaterialTheme.colorScheme.onSurfaceVariant,
+				)
+			}
+			Spacer(Modifier.height(6.dp))
+		}
+	}
+}
+
+/** The project's published addresses, exactly as the README links them. */
+internal val ABOUT_LINKS = listOf(
+	"Source code on GitHub" to "https://github.com/rustedcomet/RustedWax-Android",
+	"Releases" to "https://github.com/rustedcomet/RustedWax-Android/releases/latest",
+	"Scrobble.life" to "https://scrobble.life/",
+)
+
+/**
+ * The Event Log while logging is off: nothing has been recorded, so there is
+ * nothing to show or export. The switch lives under Developer mode in Settings,
+ * which is where this sends the reader. Nothing here changes what is collected.
+ */
+@Composable
+private fun EventLogOff(onOpenSettings: () -> Unit) {
+	Column(Modifier.padding(top = 8.dp)) {
+		Text(
+			"Event logging is off, so nothing is being recorded.",
+			style = MaterialTheme.typography.bodyMedium,
+		)
+		Spacer(Modifier.height(4.dp))
+		Text(
+			"It is switched on under Developer mode in Settings, and is only " +
+				"needed to diagnose a problem.",
+			style = MaterialTheme.typography.bodySmall,
+			color = MaterialTheme.colorScheme.onSurfaceVariant,
+		)
+		Spacer(Modifier.height(10.dp))
+		WaxOutlinedButton(onClick = onOpenSettings, icon = WaxIcons.Gear) {
+			Text("Open Settings")
+		}
+	}
+}
+
+/**
+ * My Snaps (Issue #47, Stage 47A): the signed-in account's own root Snaps,
+ * newest first, from the local catalog alone.
+ *
+ * Opening it reads the catalog and folds in what this device's confirmed
+ * publication records prove; nothing here asks Hive anything. A row opens the
+ * same conversation sheet History uses, by the Snap's exact author/permlink,
+ * and every reply, Like, edit and delete in it is that sheet's own behaviour.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MySnapsList(
+	mySnaps: MySnapsController,
+	listState: LazyListState,
+	recent: List<FinalizationRuntime.ScrobbleRecord>,
+	thumbnails: Boolean,
+	viewer: String?,
+	posts: SnapPostController,
+	threads: SnapThreadController,
+	likes: SnapLikeController,
+	attachments: SnapAttachmentController,
+	notices: SnapNoticeController,
+	onOpenVideo: (String) -> Unit,
+) {
+	// The sheet belongs to this list being on screen, exactly as on History.
+	DisposableEffect(Unit) { onDispose { threads.close() } }
+
+	// Re-read on every visit and on every account change: the local catalog
+	// first, then — only when the last one is five minutes old or more — a Hive
+	// discovery pass behind it (Stage 47B).
+	val latestRecent by rememberUpdatedState(recent)
+	LaunchedEffect(viewer) {
+		mySnaps.open(
+			latestRecent.map { MySnapMedia(eventId = it.eventId, videoId = it.videoId, title = it.title, artist = it.artist) },
+		)
+		mySnaps.refresh(force = false)
+	}
+	// Coming back to the app with My Snaps on screen follows the same rule. No timer.
+	val lifecycleOwner = LocalLifecycleOwner.current
+	DisposableEffect(lifecycleOwner) {
+		val observer = LifecycleEventObserver { _, event ->
+			if (event == Lifecycle.Event.ON_START) mySnaps.refresh(force = false)
+		}
+		lifecycleOwner.lifecycle.addObserver(observer)
+		onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+	}
+
+	val rows = mySnaps.rows
+
+	ConversationSheet(threads, posts, likes, attachments, notices, viewer, thumbnails) { root ->
+		// Only with the History row's own title, when the catalog kept one; a
+		// Snap without it gets a header that says less rather than a guess.
+		rows.firstOrNull { it.contentId == root.contentId }
+			?.let { row -> row.title?.let { SnapThreadMedia(videoId = row.videoId, title = it, artist = row.artist) } }
+	}
+
+	if (viewer.isNullOrBlank()) {
+		Text(
+			"Add your Hive account in Settings to see your Snaps.",
+			style = MaterialTheme.typography.bodyMedium,
+			modifier = Modifier.padding(top = 24.dp),
+		)
+		return
+	}
+	if (!mySnaps.ready) return
+	Column {
+		Text(
+			"@$viewer",
+			style = MaterialTheme.typography.labelMedium,
+			color = MaterialTheme.colorScheme.onSurfaceVariant,
+			modifier = Modifier.padding(bottom = 8.dp),
+		)
+		if (mySnaps.failed) {
+			SnapNotice("Couldn't read your saved Snaps on this device.")
+		}
+		// A failed refresh leaves every row as it was — the last known good list,
+		// never a deletion — and says so.
+		if (mySnaps.refreshFailed) {
+			SnapNotice("Couldn't refresh My Snaps from Hive. Pull down to try again.")
+		}
+		// A manual refresh that could not check every older Snap's current words.
+		if (!mySnaps.refreshFailed && mySnaps.contentPending) {
+			SnapNotice("Some older Snaps weren't checked against Hive yet. Pull down to continue.")
+		}
+		// Paged from the database: the next page is read as the end comes into
+		// view, and once the catalog runs out an unfinished Hive scan continues.
+		val nearEnd by remember(listState) {
+			androidx.compose.runtime.derivedStateOf {
+				val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+				last >= listState.layoutInfo.totalItemsCount - 5
+			}
+		}
+		LaunchedEffect(nearEnd, rows.size) {
+			if (!nearEnd) return@LaunchedEffect
+			if (mySnaps.hasMore) mySnaps.loadMore() else if (mySnaps.deepPending) mySnaps.refresh(force = true)
+		}
+		// Pulling down always asks Hive, whatever the five-minute rule says. The
+		// list stays exactly as it is while the reads run.
+		PullToRefreshBox(
+			isRefreshing = mySnaps.refreshing,
+			onRefresh = { mySnaps.refresh(force = true, manual = true) },
+			modifier = Modifier.fillMaxSize(),
+		) {
+			LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+				if (rows.isEmpty() && !mySnaps.failed) {
+					item(key = "empty") {
+						Text(
+							"No RustedWax Snaps known for this account yet.\n\nA Snap you post " +
+								"from a History row appears here once Hive confirms it.",
+							style = MaterialTheme.typography.bodyMedium,
+							modifier = Modifier.padding(top = 16.dp),
+						)
+					}
+				}
+				// Keyed by the Snap's permanent Hive identity: one row per object.
+				items(rows, key = { it.contentId }) { row ->
+					val root = SnapReplyTarget.of(row.author, row.permlink)
+					// The posting controller's copy when it has one, so an edit or a
+					// refresh made anywhere is what this row shows too.
+					val shown = posts.postedFor(row.contentId) ?: row.toPosted()
+					// The Comments count, as History gets it: the remembered one at
+					// once, then one read of the conversation if the row stays on
+					// screen. Keyed by account and Snap, so a switch re-asks.
+					if (root != null) {
+						LaunchedEffect(threads.threadKey(root)) { threads.loadWhenSettled(root) }
+					}
+					SettingCard {
+						VideoBanner(row.videoId, thumbnails, onOpenVideo) { titleModifier ->
+							row.title?.let { title ->
+								Text(
+									row.artist?.let { "$it — $title" } ?: title,
+									style = MaterialTheme.typography.titleSmall,
+									modifier = titleModifier,
+								)
+							}
+						}
+						PostedSnapCard(
+							posted = shown,
+							nowEpochSec = System.currentTimeMillis() / 1000,
+							onOpenThumbnail = { root?.let { threads.open(it, shown) } },
+						)
+						WaxOutlinedButton(
+							onClick = { root?.let { threads.open(it, shown) } },
+							enabled = root != null,
+							modifier = Modifier.fillMaxWidth(),
+						) {
+							val replies = root?.let { threads.preview(it)?.total } ?: 0
+							Text(if (replies > 0) "Comments ($replies)" else "Comments")
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
 @Composable

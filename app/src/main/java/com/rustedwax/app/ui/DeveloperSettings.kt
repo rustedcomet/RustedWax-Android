@@ -99,8 +99,8 @@ fun DeveloperModeSection(
 			// Not "erased when you turned this off": on a fresh install this is
 			// the default and nobody turned anything off. Erasure is stated as
 			// what the switch does rather than as something that happened.
-			"Off (default) — nothing is written anywhere, and the Log tab and " +
-				"Export button are not shown. Turning this off also erases " +
+			"Off (default) — nothing is written anywhere, so the Event Log " +
+				"has nothing to show or export. Turning this off also erases " +
 				"whatever had already been recorded."
 		},
 		checked = eventLogging,

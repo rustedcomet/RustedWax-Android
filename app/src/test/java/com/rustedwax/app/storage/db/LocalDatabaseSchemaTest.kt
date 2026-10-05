@@ -8,13 +8,16 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * The version 1 schema as text: what it creates, who owns each row, and what
- * it refuses to do. Executing it against real SQLite is the instrumented
- * suite's job ([LocalDatabaseDeviceTest]).
+ * The schema as text: what it creates, who owns each row, and what it refuses
+ * to do. Executing it against real SQLite is the instrumented suite's job
+ * ([LocalDatabaseDeviceTest]).
+ *
+ * [statements] is what a new install runs: version 1, then every upgrade step.
  */
 class LocalDatabaseSchemaTest {
 
-	private val statements = LocalDatabaseSchema.CREATE_V1
+	private val statements =
+		LocalDatabaseSchema.CREATE_V1 + LocalDatabaseSchema.upgradeSteps(1, LocalDatabaseSchema.VERSION)
 
 	private fun createTable(table: String): String =
 		statements.single { it.startsWith("CREATE TABLE $table (") }
@@ -41,8 +44,8 @@ class LocalDatabaseSchemaTest {
 		statements.filter { Regex("^CREATE (UNIQUE )?INDEX \\w+ ON $table ").containsMatchIn(it) }
 
 	@Test
-	fun `version 1 lives in its own file`() {
-		assertEquals(1, LocalDatabaseSchema.VERSION)
+	fun `the schema lives in its own file at version 3`() {
+		assertEquals(3, LocalDatabaseSchema.VERSION)
 		assertEquals("rustedwax.db", LocalDatabaseSchema.NAME)
 		// Not the name of any store the legacy data lives in.
 		val legacy = setOf(
@@ -60,7 +63,7 @@ class LocalDatabaseSchemaTest {
 		val expected = listOf(
 			"history", "not_logged", "snap_draft", "posted_snap_cache", "snap_refresh",
 			"thread_preview", "seen_reply", "reply_notice", "thread_seed",
-			"sync_checkpoint", "legacy_import",
+			"sync_checkpoint", "legacy_import", "my_snap", "my_snap_tombstone",
 		)
 		assertEquals(expected, LocalDatabaseSchema.TABLES)
 		val created = statements.mapNotNull {
@@ -76,7 +79,7 @@ class LocalDatabaseSchemaTest {
 	}
 
 	@Test
-	fun `version 1 creates and never drops or deletes`() {
+	fun `every version creates and never drops or deletes`() {
 		statements.forEach { sql ->
 			assertTrue(sql, sql.startsWith("CREATE "))
 			assertFalse(sql, Regex("(?i)\\b(DROP|DELETE|ALTER|REPLACE)\\b").containsMatchIn(sql))
@@ -173,7 +176,7 @@ class LocalDatabaseSchemaTest {
 
 	@Test
 	fun `there is no upgrade path the schema does not define`() {
-		listOf(0 to 1, 1 to 1, 1 to 2, 2 to 1, 2 to 3).forEach { (from, to) ->
+		listOf(0 to 1, 0 to 3, 1 to 1, 3 to 3, 3 to 2, 2 to 1, 3 to 4, 1 to 4).forEach { (from, to) ->
 			try {
 				LocalDatabaseSchema.upgradeSteps(from, to)
 				fail("upgrade $from -> $to should be refused")
@@ -191,5 +194,86 @@ class LocalDatabaseSchemaTest {
 		assertEquals("alice", LocalOwner.of("ALICE"))
 		assertEquals("-", LocalOwner.of(null))
 		assertEquals("-", LocalOwner.of(""))
+	}
+
+	// ── Version 2: the My Snaps catalog (Issue #47) ───────────────────────────
+
+	@Test
+	fun `version 1 is unchanged and version 2 only adds the My Snaps catalog`() {
+		val v1 = LocalDatabaseSchema.CREATE_V1
+		assertFalse("version 1 must not grow", v1.any { "my_snap" in it })
+		val step = LocalDatabaseSchema.upgradeSteps(1, 2)
+		assertEquals(LocalDatabaseSchema.UPGRADE_V2, step)
+		assertEquals(2, step.size)
+		assertTrue(step[0].startsWith("CREATE TABLE my_snap ("))
+		assertEquals(
+			"CREATE INDEX my_snap_owner_created ON my_snap (owner, created_at DESC, permlink DESC)",
+			step[1],
+		)
+		// Touches no table version 1 created.
+		LocalDatabaseSchema.CREATE_V1.mapNotNull {
+			Regex("^CREATE TABLE (\\w+) \\(").find(it)?.groupValues?.get(1)
+		}.forEach { table ->
+			step.forEach { sql -> assertFalse("$table touched: $sql", Regex("\\b$table\\b").containsMatchIn(sql)) }
+		}
+	}
+
+	@Test
+	fun `my snap is keyed by owner and the exact Hive identity`() {
+		assertEquals(listOf("owner", "author", "permlink"), primaryKey("my_snap"))
+		assertEquals(
+			listOf(
+				"owner", "author", "permlink", "created_at", "event_id", "video_id", "title",
+				"artist", "service", "user_text", "indexed_at", "updated_at",
+			),
+			columns("my_snap").keys.toList(),
+		)
+		assertTrue("an author must be the owner", "CHECK (author = owner)" in columns("my_snap").getValue("author"))
+		listOf("event_id", "video_id", "title", "artist", "service", "user_text").forEach {
+			assertFalse("$it must be optional", "NOT NULL" in columns("my_snap").getValue(it))
+		}
+	}
+
+	@Test
+	fun `my snap has no retention limit and no write-authorizing state`() {
+		val sql = createTable("my_snap")
+		listOf("state", "tx", "signed", "broadcast", "pending", "limit").forEach {
+			assertFalse("my_snap carries \"$it\"", Regex("(?i)\\b\\w*$it\\w*\\b").containsMatchIn(sql))
+		}
+	}
+
+	// ── Version 3: proven-deletion tombstones (Issue #47) ────────────────────
+
+	@Test
+	fun `every upgrade path is the earlier steps followed by the later ones`() {
+		assertEquals(LocalDatabaseSchema.UPGRADE_V2, LocalDatabaseSchema.upgradeSteps(1, 2))
+		assertEquals(LocalDatabaseSchema.UPGRADE_V3, LocalDatabaseSchema.upgradeSteps(2, 3))
+		assertEquals(
+			LocalDatabaseSchema.UPGRADE_V2 + LocalDatabaseSchema.UPGRADE_V3,
+			LocalDatabaseSchema.upgradeSteps(1, 3),
+		)
+	}
+
+	@Test
+	fun `version 3 only adds the tombstone table`() {
+		val step = LocalDatabaseSchema.UPGRADE_V3
+		assertEquals(1, step.size)
+		assertTrue(step[0].startsWith("CREATE TABLE my_snap_tombstone ("))
+		(LocalDatabaseSchema.CREATE_V1 + LocalDatabaseSchema.UPGRADE_V2).mapNotNull {
+			Regex("^CREATE TABLE (\\w+) \\(").find(it)?.groupValues?.get(1)
+		}.forEach { table ->
+			assertFalse("$table touched", Regex("\\b$table\\b").containsMatchIn(step[0]))
+		}
+	}
+
+	@Test
+	fun `a tombstone is keyed exactly like the catalog and belongs to its author`() {
+		assertEquals(listOf("owner", "author", "permlink"), primaryKey("my_snap_tombstone"))
+		assertEquals(
+			listOf("owner", "author", "permlink", "tx_id", "deleted_at"),
+			columns("my_snap_tombstone").keys.toList(),
+		)
+		assertTrue("CHECK (author = owner)" in columns("my_snap_tombstone").getValue("author"))
+		assertFalse("tx_id is optional: an already-gone proof has none", "NOT NULL" in columns("my_snap_tombstone").getValue("tx_id"))
 	}
 }

@@ -126,6 +126,37 @@ object WaxIcons {
 		"M8.2 12.2 11 15l5-5.6",
 	)
 
+	/** Settings, in the top bar's overflow menu: a cog. */
+	val Gear = stroked(
+		"M12 9.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6z",
+		"M12 5.6a6.4 6.4 0 1 0 0 12.8 6.4 6.4 0 0 0 0-12.8z",
+		"M12 3v2.6",
+		"M12 18.4V21",
+		"M3 12h2.6",
+		"M18.4 12H21",
+		"M5.6 5.6l1.9 1.9",
+		"M16.5 16.5l1.9 1.9",
+		"M5.6 18.4l1.9-1.9",
+		"M16.5 7.5l1.9-1.9",
+	)
+
+	/** The Event Log, in the top bar's overflow menu: lines of a list. */
+	val ListLines = stroked(
+		"M9 6.5h11",
+		"M9 12h11",
+		"M9 17.5h11",
+		"M4.6 6.5h.4",
+		"M4.6 12h.4",
+		"M4.6 17.5h.4",
+	)
+
+	/** About, in the top bar's overflow menu: an "i" in a circle. */
+	val Info = stroked(
+		"M12 3.6a8.4 8.4 0 1 0 0 16.8 8.4 8.4 0 0 0 0-16.8z",
+		"M12 11v5.2",
+		"M12 7.9h.01",
+	)
+
 	/** The overflow affordance in the top bar and on a list row. */
 	val MoreVert = stroked(
 		fills = listOf(

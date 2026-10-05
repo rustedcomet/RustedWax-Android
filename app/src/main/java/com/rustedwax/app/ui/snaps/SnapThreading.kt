@@ -25,6 +25,7 @@ import com.rustedwax.app.snaps.SnapThreadReader
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -544,6 +545,41 @@ class SnapThreadController internal constructor(
 	}
 
 	/**
+	 * Draw the last good summary this device kept for [root], asking Hive
+	 * nothing. [load] starts with this; My Snaps also calls it on its own so a
+	 * row shows its remembered count the moment it is composed, before it
+	 * decides whether to read the chain (Stage 47D).
+	 *
+	 * Called from an effect and from the open handler, never from a draw, so
+	 * seeding snapshot state here is safe. Scoped by [threadKey], so another
+	 * account's summary is never the one found.
+	 */
+	fun restorePreview(root: SnapReplyTarget) {
+		val key = threadKey(root)
+		if (key in deletedRoots) return
+		if (!previews.containsKey(key)) previewStore.read(key)?.let { previews[key] = it }
+	}
+
+	/**
+	 * A My Snaps row's Comments count (Stage 47D): the remembered count at
+	 * once, then one unforced [load] if the row is still on screen after
+	 * [settle].
+	 *
+	 * Run from the row's own effect, so a row flung past is cancelled during
+	 * [settle] and never reaches Hive. Reads are therefore bounded by the rows
+	 * a reader actually stopped on, and [load]'s unforced rule makes each of
+	 * those one read per conversation for the life of this controller.
+	 */
+	internal suspend fun loadWhenSettled(
+		root: SnapReplyTarget,
+		settle: suspend () -> Unit = { delay(ROW_READ_SETTLE_MS) },
+	) {
+		restorePreview(root)
+		settle()
+		load(root)
+	}
+
+	/**
 	 * Fetch this conversation.
 	 *
 	 * Two callers with two different needs, and [force] is what separates them.
@@ -572,9 +608,7 @@ class SnapThreadController internal constructor(
 		val key = threadKey(root)
 		if (key in deletedRoots) return
 		// Draw the last good summary before anything is asked of the network.
-		// Called from an effect and from the open handler, never from a draw, so
-		// seeding snapshot state here is safe.
-		if (!previews.containsKey(key)) previewStore.read(key)?.let { previews[key] = it }
+		restorePreview(root)
 
 		val cached = loads[key]
 		if (!force && cached != null) return
@@ -637,6 +671,14 @@ class SnapThreadController internal constructor(
 			} finally {
 				// Released on every path, including the account-switch return, so
 				// a later open is never refused by a guard nobody cleared.
+				//
+				// A placeholder this read put up and never answered — the account
+				// changed, or the read was cancelled — goes with it, or an unforced
+				// load would take it for an answer and never ask again. Only
+				// `Loading`: while this read held [inFlight] no other read of this
+				// key could start, so it is this read's own, and a Ready or
+				// Unavailable answer is never touched.
+				if (loads[key] == SnapThreadLoad.Loading) loads.remove(key)
 				inFlight.remove(key)
 				if (again.remove(key) && accountId() == who) load(root, force = true)
 			}
@@ -1885,5 +1927,8 @@ class SnapThreadController internal constructor(
 	private companion object {
 		/** What [SnapDraftKey] files a signed-out user's rows under. */
 		const val ANONYMOUS = "-"
+
+		/** How long a My Snaps row must stay composed before its thread is read. */
+		const val ROW_READ_SETTLE_MS = 400L
 	}
 }

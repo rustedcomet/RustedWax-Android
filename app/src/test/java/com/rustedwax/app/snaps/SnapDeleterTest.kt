@@ -456,4 +456,97 @@ class SnapDeleterTest {
 		// Case-only account difference is the same account, as at signing.
 		assertNull(SnapDeleter.rulesProblem(account.uppercase(), reply, state(reply)))
 	}
+
+	// ── the durable step before retirement (Issue #47) ─────────────────
+
+	/** Records each hook call and what the store held at that moment. */
+	private class Hook(var answer: () -> Boolean = { true }) {
+		val calls = mutableListOf<Triple<String, String, String?>>()
+		val heldAtCall = mutableListOf<Int>()
+	}
+
+	private fun hooked(chain: Chain, store: Store, hook: Hook) =
+		SnapDeleter(chain, store, sleep = {}, settleAttempts = 3, beforeRetire = { who, target, tx ->
+			hook.calls += Triple(who, target.contentId, tx)
+			hook.heldAtCall += store.saved.size
+			hook.answer()
+		})
+
+	@Test
+	fun `the durable step runs after proof and before the record is retired`() {
+		val chain = Chain().apply { put(state(root, parentAuthor = "peak.snaps")) }
+		val store = Store().apply { write(record("e1", root, PendingSnapState.CONFIRMED)) }
+		val hook = Hook()
+
+		val outcome = hooked(chain, store, hook).delete(account, root)
+
+		assertEquals(SnapDeleter.Outcome.Deleted(root.contentId, "tx-1"), outcome)
+		assertEquals(listOf(Triple(account, root.contentId, "tx-1")), hook.calls)
+		assertEquals("the record was still there when the step ran", listOf(1), hook.heldAtCall)
+		assertTrue(store.saved.isEmpty())
+	}
+
+	@Test
+	fun `a failed durable step keeps the record, sends nothing more, and still reports what Hive proved`() {
+		listOf<() -> Boolean>({ false }, { error("disk") }).forEach { answer ->
+			val chain = Chain().apply { put(state(root, parentAuthor = "peak.snaps")) }
+			val store = Store().apply { write(record("e1", root, PendingSnapState.CONFIRMED)) }
+
+			val outcome = hooked(chain, store, Hook(answer)).delete(account, root)
+
+			assertEquals(SnapDeleter.Outcome.Deleted(root.contentId, "tx-1"), outcome)
+			assertEquals("the last local evidence was kept", setOf("$account|e1"), store.saved.keys)
+			assertEquals(1, chain.broadcasts)
+		}
+	}
+
+	@Test
+	fun `after a failed step, asking again proves absence by reading and finishes without a broadcast`() {
+		val chain = Chain().apply { put(state(root, parentAuthor = "peak.snaps")) }
+		val store = Store().apply { write(record("e1", root, PendingSnapState.CONFIRMED)) }
+		val hook = Hook { false }
+		val del = hooked(chain, store, hook)
+		del.delete(account, root)
+
+		// As after a restart: the same object asked about again, by a fresh deleter.
+		hook.answer = { true }
+		val again = hooked(chain, store, hook).delete(account, root)
+
+		assertEquals(SnapDeleter.Outcome.Deleted(root.contentId, null), again)
+		assertEquals("no second delete was signed or sent", 1, chain.prepared.size)
+		assertEquals(1, chain.broadcasts)
+		assertTrue(store.saved.isEmpty())
+	}
+
+	@Test
+	fun `the durable step never runs without proven deletion`() {
+		val cases = listOf(
+			Chain(result = HiveRpc.BroadcastResult.AcceptedUnconfirmed("tx-1", "n", "no"), applies = false),
+			Chain(result = HiveRpc.BroadcastResult.Rejected("no")),
+			Chain(nodes = 1, result = HiveRpc.BroadcastResult.AcceptedUnconfirmed("tx-1", "n", "no")),
+			Chain(nodes = 0),
+		)
+		cases.forEach { chain ->
+			chain.put(state(root, parentAuthor = "peak.snaps"))
+			val store = Store().apply { write(record("e1", root, PendingSnapState.CONFIRMED)) }
+			val hook = Hook()
+			val outcome = hooked(chain, store, hook).delete(account, root)
+			assertFalse("$outcome", outcome is SnapDeleter.Outcome.Deleted)
+			assertTrue("$outcome wrote a tombstone", hook.calls.isEmpty())
+			assertEquals(1, store.saved.size)
+		}
+		// Blocked by the rules: nothing proven either.
+		val blocked = Chain().apply { put(state(root, children = 1, parentAuthor = "peak.snaps")) }
+		val hook = Hook()
+		hooked(blocked, Store(), hook).delete(account, root)
+		assertTrue(hook.calls.isEmpty())
+	}
+
+	@Test
+	fun `without a durable step a deleter retires exactly as before`() {
+		val chain = Chain().apply { put(state(reply)) }
+		val store = Store().apply { write(record("e1", reply, PendingSnapState.CONFIRMED)) }
+		assertEquals(SnapDeleter.Outcome.Deleted(reply.contentId, "tx-1"), deleter(chain, store).delete(account, reply))
+		assertTrue(store.saved.isEmpty())
+	}
 }

@@ -19,14 +19,15 @@ package com.rustedwax.app.storage.db
  *
  * Version 1 is created whole. A later version adds explicit steps in
  * [upgradeSteps]; there is deliberately no "drop everything and recreate"
- * fallback anywhere in this layer.
+ * fallback anywhere in this layer. A new install runs [CREATE_V1] and then
+ * every step, so a fresh database and an upgraded one are the same schema.
  */
 internal object LocalDatabaseSchema {
 
 	/** The file under the app's private databases directory. */
 	const val NAME = "rustedwax.db"
 
-	const val VERSION = 1
+	const val VERSION = 3
 
 	const val HISTORY = "history"
 	const val NOT_LOGGED = "not_logged"
@@ -39,6 +40,8 @@ internal object LocalDatabaseSchema {
 	const val THREAD_SEED = "thread_seed"
 	const val SYNC_CHECKPOINT = "sync_checkpoint"
 	const val LEGACY_IMPORT = "legacy_import"
+	const val MY_SNAP = "my_snap"
+	const val MY_SNAP_TOMBSTONE = "my_snap_tombstone"
 
 	/**
 	 * Owner column for rows that can belong to the signed-out device.
@@ -208,7 +211,76 @@ internal object LocalDatabaseSchema {
 		""",
 	).map { it.trimIndent() }
 
-	/** Every table version 1 creates. */
+	/**
+	 * Version 2 (Issue #47): the My Snaps catalog — one row per root Snap an
+	 * account is known to have published, keyed by its permanent Hive identity.
+	 *
+	 * Presentation state only. A row says "show this Snap under My Snaps" and
+	 * nothing more: no write path reads it, and it can neither authorize nor
+	 * block a Hive operation. The root Snap publication records stay where they
+	 * are and remain the only thing that decides a write.
+	 *
+	 *  - **Keyed by `(owner, author, permlink)`.** Two local references to one
+	 *    Hive object are one row. The author must be the owner: My Snaps lists
+	 *    an account's own Snaps and nobody else's, and the schema says so.
+	 *  - **No row limit.** History keeps 50 rows and the posted-Snap cache 100;
+	 *    this table keeps every row, so a Snap stays reachable after its History
+	 *    row has gone. Readers page it through [MY_SNAP_INDEX] instead.
+	 *  - **Media context is optional.** `video_id`, `title`, `artist` and
+	 *    `service` are filled only from what is known locally and are never
+	 *    guessed; `user_text` is the last known words, for display.
+	 */
+	val UPGRADE_V2: List<String> = listOf(
+		"""
+		CREATE TABLE $MY_SNAP (
+			$OWNER_ACCOUNT,
+			author TEXT NOT NULL CHECK (author = owner),
+			permlink TEXT NOT NULL CHECK (length(permlink) > 0),
+			created_at INTEGER NOT NULL,
+			event_id TEXT,
+			video_id TEXT,
+			title TEXT,
+			artist TEXT,
+			service TEXT,
+			user_text TEXT,
+			indexed_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY (owner, author, permlink)
+		)
+		""",
+		// Newest first within one account, with the permlink as the tiebreak a
+		// keyset page continues from.
+		"CREATE INDEX $MY_SNAP_INDEX ON $MY_SNAP (owner, created_at DESC, permlink DESC)",
+	).map { it.trimIndent() }
+
+	const val MY_SNAP_INDEX = "my_snap_owner_created"
+
+	/**
+	 * Version 3 (Issue #47): a durable record that Hive **proved** one root
+	 * Snap deleted, so My Snaps never lists it again.
+	 *
+	 * Written only by the existing deletion path, after the chain has shown
+	 * the exact object gone and before the Snap's confirmed publication record
+	 * is retired — in the same transaction that removes its catalog row. A
+	 * failed read, a missing local record or a tap is never a tombstone.
+	 *
+	 * Keyed exactly like [MY_SNAP]. Presentation state like the catalog: it
+	 * cannot authorize, retry or block any Hive operation.
+	 */
+	val UPGRADE_V3: List<String> = listOf(
+		"""
+		CREATE TABLE $MY_SNAP_TOMBSTONE (
+			$OWNER_ACCOUNT,
+			author TEXT NOT NULL CHECK (author = owner),
+			permlink TEXT NOT NULL CHECK (length(permlink) > 0),
+			tx_id TEXT,
+			deleted_at INTEGER NOT NULL,
+			PRIMARY KEY (owner, author, permlink)
+		)
+		""",
+	).map { it.trimIndent() }
+
+	/** Every table the current version holds, in creation order. */
 	val TABLES: List<String> = listOf(
 		HISTORY,
 		NOT_LOGGED,
@@ -221,12 +293,15 @@ internal object LocalDatabaseSchema {
 		THREAD_SEED,
 		SYNC_CHECKPOINT,
 		LEGACY_IMPORT,
+		MY_SNAP,
+		MY_SNAP_TOMBSTONE,
 	)
 
 	/**
 	 * The statements that move a database from [from] to [to], in order.
 	 *
-	 * Version 1 is the first schema, so there are none yet. Any other request is
+	 * Additive only: each step creates, and none drops, deletes or rewrites a
+	 * row an earlier version holds. Any request outside the known versions is
 	 * an error rather than an empty list: an upgrade this code does not know
 	 * how to perform must stop the open, never fall through to a destructive
 	 * recreate that would throw away the user's rows.
@@ -235,7 +310,13 @@ internal object LocalDatabaseSchema {
 		require(from in 1 until to && to <= VERSION) {
 			"no upgrade path from local database version $from to $to"
 		}
-		return emptyList()
+		return (from + 1..to).flatMap { version ->
+			when (version) {
+				2 -> UPGRADE_V2
+				3 -> UPGRADE_V3
+				else -> throw IllegalArgumentException("no upgrade step to local database version $version")
+			}
+		}
 	}
 }
 

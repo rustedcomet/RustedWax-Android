@@ -55,6 +55,15 @@ class SnapDeleter(
 	private val store: PendingSnapStore? = null,
 	private val sleep: (Long) -> Unit = { Thread.sleep(it) },
 	private val settleAttempts: Int = SETTLE_ATTEMPTS,
+	/**
+	 * A durable local step that must land **after** the chain proved the
+	 * deletion and **before** [store]'s record is retired — My Snaps' tombstone
+	 * for a root (Issue #47). False, or a throw, means it did not land: the
+	 * record is then kept as the last local evidence, and nothing is sent. The
+	 * outcome is still [Outcome.Deleted], because that is what Hive proved.
+	 */
+	private val beforeRetire: (account: String, target: SnapReplyTarget, txId: String?) -> Boolean =
+		{ _, _, _ -> true },
 ) {
 
 	sealed interface Outcome {
@@ -237,7 +246,9 @@ class SnapDeleter(
 
 	private fun deleted(account: String, target: SnapReplyTarget, txId: String?): Outcome.Deleted {
 		forget(account, target)
-		retireLocal(account, target)
+		if (runCatching { beforeRetire(account, target, txId) }.getOrDefault(false)) {
+			retireLocal(account, target)
+		}
 		return Outcome.Deleted(target.contentId, txId)
 	}
 

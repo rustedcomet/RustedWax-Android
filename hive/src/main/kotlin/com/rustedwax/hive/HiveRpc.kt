@@ -134,11 +134,25 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 	 * returned by **`posts`** and not by `blog`, which answers with an empty list
 	 * for `@peak.snaps`. Verified against the live chain on 2026-09-17.
 	 */
-	fun getAccountPosts(account: String, sort: String, limit: Int): List<JSONObject> {
+	fun getAccountPosts(
+		account: String,
+		sort: String,
+		limit: Int,
+		/**
+		 * Continue after this `author/permlink` (Issue #47). Hivemind answers
+		 * with the cursor object itself first, and a page is at most 20 for
+		 * `sort = "comments"`; both verified live on 2026-10-04.
+		 */
+		startAuthor: String? = null,
+		startPermlink: String? = null,
+	): List<JSONObject> {
 		val params = JSONObject()
 			.put("sort", sort)
 			.put("account", account)
 			.put("limit", limit)
+		if (startAuthor != null && startPermlink != null) {
+			params.put("start_author", startAuthor).put("start_permlink", startPermlink)
+		}
 		val result = callObject("bridge.get_account_posts", params) as? JSONArray
 			?: throw RpcException("unexpected get_account_posts response")
 		return (0 until result.length()).mapNotNull { result.optJSONObject(it) }
