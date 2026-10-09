@@ -1004,6 +1004,10 @@ class SnapEditControllerTest {
 			h.threads.retryEdit(target)
 		}
 		assertEquals("never a second broadcast of the same edit", afterFirst, h.chain.broadcasts)
+		// The words being there is not this transaction's proof; its inclusion is.
+		h.chain.evidence = HiveRpc.TransactionEvidence.BLOCK
+		h.threads.retryEdit(target)
+		assertEquals(afterFirst, h.chain.broadcasts)
 		assertNull(h.threads.pendingEdit(target))
 	}
 

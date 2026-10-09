@@ -16,6 +16,22 @@ import com.rustedwax.hive.TxSerializer
  * publication rules can be tested without a private key existing anywhere in
  * the test sources. [SnapPublisher] never holds key material.
  */
+/**
+ * What happened at the transmission boundary of one prepared transaction.
+ *
+ * Kept apart from [HiveRpc.BroadcastResult] because a node's rejection and
+ * this device's refusal look identical there, and only one of them proves the
+ * transaction never left: the broadcast moves on to another node after one
+ * whose answer was lost, so a rejection may follow a delivery.
+ */
+sealed interface SnapSend {
+	/** This device refused before transmitting anything. Proven, not inferred. */
+	data class NotSent(val reason: String) : SnapSend
+
+	/** The network may have been reached, whatever [result] says. */
+	data class Sent(val result: HiveRpc.BroadcastResult) : SnapSend
+}
+
 interface SnapHivePort {
 	fun resolveContainer(): SnapContainerResolver.Result
 
@@ -42,14 +58,33 @@ interface SnapHivePort {
 		prepared: PreparedHiveTransaction,
 		author: String,
 	): HiveRpc.BroadcastResult
+
+	/**
+	 * [broadcastPrepared], also saying whether the transaction can have left
+	 * the device (Issue #56). Only a port whose own guard refused before its
+	 * transmission seam may answer [SnapSend.NotSent]; this default cannot know
+	 * that, so every answer — a rejection included — is [SnapSend.Sent].
+	 */
+	fun sendPrepared(prepared: PreparedHiveTransaction, author: String): SnapSend =
+		SnapSend.Sent(broadcastPrepared(prepared, author))
+
 	fun observeTransaction(txId: String, expirationEpochSec: Long): HiveRpc.TransactionEvidence
+
+	/**
+	 * When current nodes prove a transaction with this expiration can no longer
+	 * be included, the irreversible block time that proves it; otherwise null.
+	 * Never evidence of whether it *was* included — see [HiveRpc.irreversiblyPast].
+	 * Defaulted to null so nothing that cannot answer ever releases a lock.
+	 */
+	fun irreversiblyPast(expirationEpochSec: Long): Long? = null
 
 	/** True/false when the chain could answer, null when it could not be asked. */
 	fun contentExists(author: String, permlink: String): Boolean?
 
 	/**
 	 * The comment at `author/permlink` as the chain holds it now, or null when
-	 * it is absent or could not be read. What [SnapEditor] carries forward.
+	 * it is absent or could not be read. What [SnapEditor] carries forward, so
+	 * it must come from a node proven current, with that node's head time.
 	 *
 	 * Defaulted so the publication fakes, which never edit, need not answer it.
 	 */
@@ -179,13 +214,20 @@ internal class HiveSnapPort(
 	override fun broadcastPrepared(
 		prepared: PreparedHiveTransaction,
 		author: String,
-	): HiveRpc.BroadcastResult {
+	): HiveRpc.BroadcastResult = when (val sent = sendPrepared(prepared, author)) {
+		is SnapSend.NotSent -> HiveRpc.BroadcastResult.Rejected(sent.reason)
+		is SnapSend.Sent -> sent.result
+	}
+
+	/**
+	 * The one place the account is checked before [send], so a refusal here is
+	 * known to have transmitted nothing. [broadcastPrepared] answers through it.
+	 */
+	override fun sendPrepared(prepared: PreparedHiveTransaction, author: String): SnapSend {
 		accountMismatch(author, author)?.let {
-			return HiveRpc.BroadcastResult.Rejected(
-				"You've switched Hive accounts — this Snap belonged to a different one.",
-			)
+			return SnapSend.NotSent("You've switched Hive accounts — this Snap belonged to a different one.")
 		}
-		return send(prepared)
+		return SnapSend.Sent(send(prepared))
 	}
 
 	/**
@@ -229,22 +271,35 @@ internal class HiveSnapPort(
 	override fun observeTransaction(txId: String, expirationEpochSec: Long) =
 		broadcaster.observeTransaction(txId, expirationEpochSec)
 
+	override fun irreversiblyPast(expirationEpochSec: Long): Long? =
+		runCatching { rpc.irreversiblyPast(expirationEpochSec) }.getOrNull()
+
 	override fun contentExists(author: String, permlink: String): Boolean? =
 		runCatching { rpc.getContent(author, permlink) != null }.getOrNull()
 
+	/**
+	 * Consensus state from a node that has caught up at the moment of the read,
+	 * with that node's head time (Issue #56) — `find_comments`, never
+	 * `get_content`, and never a node lagging behind the newest current head:
+	 * see [HiveRpc.readCommentCaughtUp]. Identity is checked byte for byte by
+	 * the parser; a node that answers absent, or without the words as strings,
+	 * is not a comment to sign back.
+	 */
 	override fun readComment(author: String, permlink: String): SnapChainComment? =
 		runCatching {
-			val c = rpc.getContent(author, permlink) ?: return null
+			val read = rpc.readCommentCaughtUp(author, permlink) as? HiveCommentRead.Present
+				?: return null
+			val s = read.state
 			// Strings only, never coerced: these fields are signed back verbatim.
-			fun field(name: String): String? = c.opt(name) as? String
 			SnapChainComment(
-				author = field("author") ?: return null,
-				permlink = field("permlink") ?: return null,
-				parentAuthor = field("parent_author") ?: return null,
-				parentPermlink = field("parent_permlink") ?: return null,
-				title = field("title") ?: "",
-				body = field("body") ?: return null,
-				jsonMetadata = field("json_metadata") ?: "",
+				author = s.author,
+				permlink = s.permlink,
+				parentAuthor = s.parentAuthor,
+				parentPermlink = s.parentPermlink,
+				title = s.title ?: return null,
+				body = s.body ?: return null,
+				jsonMetadata = s.jsonMetadata ?: return null,
+				headEpochSec = s.headEpochSec,
 			)
 		}.getOrNull()
 }

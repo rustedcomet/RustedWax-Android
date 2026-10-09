@@ -13,6 +13,7 @@ import com.rustedwax.app.snaps.SnapHivePort
 import com.rustedwax.app.snaps.SnapPublisher
 import com.rustedwax.app.snaps.SnapReply
 import com.rustedwax.app.snaps.SnapReplyTarget
+import com.rustedwax.app.snaps.SnapSend
 import com.rustedwax.app.snaps.SnapThreadPreview
 import com.rustedwax.app.snaps.SnapThreadReader
 import com.rustedwax.hive.HiveCommentRead
@@ -45,6 +46,7 @@ class SnapDeleteControllerTest {
 	private val root = SnapReplyTarget.of("alice", "rustedwax-snap-1000-aaaaaa")!!
 	private val mine = SnapReply("alice", "rustedwax-reply-1000-mine", "alice", root.permlink, "old words", 1_000L)
 	private val theirs = SnapReply("bob", "re-alice-1001", "alice", root.permlink, "bob says", 1_001L)
+	private val mine2 = SnapReply("alice", "rustedwax-reply-1002-mine", "alice", root.permlink, "more words", 1_002L)
 
 	private class Chain : SnapHivePort {
 		val states = mutableMapOf<String, HiveCommentState>()
@@ -61,7 +63,7 @@ class SnapDeleteControllerTest {
 			val id = "${r.author}/${r.permlink}"
 			states[id] = HiveCommentState(
 				r.author, r.permlink, r.parentAuthor, r.parentPermlink, children, net,
-				4_000_000_000L, 2_000_000_000L,
+				4_000_000_000L, head,
 			)
 			comments[id] = SnapChainComment(r.author, r.permlink, r.parentAuthor, r.parentPermlink, "", r.body, "{}")
 		}
@@ -90,8 +92,18 @@ class SnapDeleteControllerTest {
 			}
 			return result
 		}
-		override fun observeTransaction(txId: String, expirationEpochSec: Long) =
-			HiveRpc.TransactionEvidence.UNAVAILABLE
+		var evidence = HiveRpc.TransactionEvidence.UNAVAILABLE
+		/** Head time of the node answering presence reads, as of the next [put]. */
+		var head = 2_000_000_000L
+		/** The irreversible block time proven past an expiration, or null. */
+		var finality: Long? = null
+		override fun irreversiblyPast(expirationEpochSec: Long): Long? =
+			finality?.takeIf { it > expirationEpochSec }
+		/** Set to stand in for the real port's own guard refusing before the network. */
+		var refuseBeforeSending: String? = null
+		override fun sendPrepared(prepared: PreparedHiveTransaction, author: String): SnapSend =
+			refuseBeforeSending?.let { SnapSend.NotSent(it) } ?: SnapSend.Sent(broadcastPrepared(prepared, author))
+		override fun observeTransaction(txId: String, expirationEpochSec: Long) = evidence
 		override fun contentExists(author: String, permlink: String): Boolean? =
 			comments.containsKey("$author/$permlink")
 		override fun readComment(author: String, permlink: String) = comments["$author/$permlink"]
@@ -324,7 +336,8 @@ class SnapDeleteControllerTest {
 		h.threads.requestDelete(root, mineTarget, SnapEditKind.REPLY, mine.body)
 		h.threads.confirmDelete()
 
-		assertTrue(h.threads.deleteNotice(mineTarget) is SnapPostStatus.Failed)
+		// A rejection from one node does not prove another never took it.
+		assertTrue(h.threads.deleteNotice(mineTarget) is SnapPostStatus.Uncertain)
 		assertTrue(mine.contentId in ids(h))
 	}
 
@@ -468,5 +481,159 @@ class SnapDeleteControllerTest {
 		h.threads.saveEdit()
 		assertEquals(1, h.chain.edits.size)
 		assertTrue(h.chain.deletes.isEmpty())
+	}
+
+	// ── an unsettled delete keeps Edit away (Issue #56 F03a) ───────────
+
+	private fun unsettledDelete(result: HiveRpc.BroadcastResult): Harness {
+		val h = opened()
+		h.chain.result = result
+		h.threads.requestDelete(root, mineTarget, SnapEditKind.REPLY, mine.body)
+		h.threads.confirmDelete()
+		assertTrue(h.threads.deleteNotice(mineTarget) is SnapPostStatus.Uncertain)
+		assertNull("the delete UI has finished", h.threads.deleting)
+		assertTrue(h.deleter.hasUnsettled("alice", mineTarget))
+		return h
+	}
+
+	@Test
+	fun `Edit stays unavailable while the comment's delete is unsettled`() {
+		val h = unsettledDelete(HiveRpc.BroadcastResult.AcceptedUnconfirmed("del-1", "n", "no confirmation"))
+
+		h.threads.startEdit(root, mineTarget, SnapEditKind.REPLY, mine.body)
+		assertNull(h.threads.editing)
+		h.threads.saveEdit()
+		assertTrue("nothing was signed as an edit", h.chain.edits.isEmpty())
+		assertEquals(1, h.chain.broadcasts)
+	}
+
+	@Test
+	fun `a rejected delete keeps Edit away until reading proves it landed`() {
+		val h = unsettledDelete(HiveRpc.BroadcastResult.Rejected("Duplicate transaction check failed"))
+		h.threads.startEdit(root, mineTarget, SnapEditKind.REPLY, mine.body)
+		assertNull(h.threads.editing)
+
+		// The original lands. Asking again settles it and sends nothing more.
+		h.chain.states.remove(mine.contentId)
+		h.threads.requestDelete(root, mineTarget, SnapEditKind.REPLY, mine.body)
+
+		assertEquals(1, h.chain.deletes.size)
+		assertEquals(1, h.chain.broadcasts)
+		assertTrue(h.chain.edits.isEmpty())
+		assertEquals(setOf(theirs.contentId), ids(h))
+	}
+
+	@Test
+	fun `a delete proven never included gives Edit back`() {
+		val h = unsettledDelete(HiveRpc.BroadcastResult.Rejected("Duplicate transaction check failed"))
+		h.chain.evidence = HiveRpc.TransactionEvidence.ABSENT
+		h.threads.requestDelete(root, mineTarget, SnapEditKind.REPLY, mine.body)
+		assertTrue(h.threads.deleteNotice(mineTarget) is SnapPostStatus.Failed)
+		assertFalse(h.deleter.hasUnsettled("alice", mineTarget))
+
+		h.chain.result = HiveRpc.BroadcastResult.Success("tx", "n", HiveRpc.BroadcastResult.Evidence.BLOCK)
+		h.threads.startEdit(root, mineTarget, SnapEditKind.REPLY, mine.body)
+		h.threads.editDraft("new words")
+		h.threads.saveEdit()
+		assertEquals(1, h.chain.edits.size)
+		assertEquals(1, h.chain.deletes.size)
+	}
+
+	@Test
+	fun `another comment can still be edited while one delete is unsettled`() {
+		val h = opened()
+		h.chain.put(mine2)
+		h.reader.replies = listOf(mine, theirs, mine2)
+		h.threads.open(root, null)
+		h.chain.result = HiveRpc.BroadcastResult.AcceptedUnconfirmed("del-1", "n", "no confirmation")
+		h.threads.requestDelete(root, mineTarget, SnapEditKind.REPLY, mine.body)
+		h.threads.confirmDelete()
+
+		h.chain.result = HiveRpc.BroadcastResult.Success("tx", "n", HiveRpc.BroadcastResult.Evidence.BLOCK)
+		val other = SnapReplyTarget.of(mine2)!!
+		h.threads.startEdit(root, other, SnapEditKind.REPLY, mine2.body)
+		h.threads.editDraft("edited elsewhere")
+		h.threads.saveEdit()
+
+		assertEquals(listOf(other.permlink), h.chain.edits.map { it.permlink })
+		assertTrue(h.deleter.hasUnsettled("alice", mineTarget))
+	}
+
+	@Test
+	fun `a failed edit cannot be retried while the comment's delete is unsettled`() {
+		val h = opened()
+		// An edit that is proven never to have landed: FAILED, kept for retry.
+		h.chain.result = HiveRpc.BroadcastResult.NetworkFailure("down")
+		h.chain.evidence = HiveRpc.TransactionEvidence.ABSENT
+		h.threads.startEdit(root, mineTarget, SnapEditKind.REPLY, mine.body)
+		h.threads.editDraft("new words")
+		h.threads.saveEdit()
+		assertEquals(1, h.chain.edits.size)
+
+		// Then a delete that cannot be settled.
+		h.chain.result = HiveRpc.BroadcastResult.AcceptedUnconfirmed("del-1", "n", "no confirmation")
+		h.chain.evidence = HiveRpc.TransactionEvidence.UNAVAILABLE
+		h.threads.requestDelete(root, mineTarget, SnapEditKind.REPLY, mine.body)
+		h.threads.confirmDelete()
+		assertTrue(h.deleter.hasUnsettled("alice", mineTarget))
+
+		h.chain.result = HiveRpc.BroadcastResult.Success("tx", "n", HiveRpc.BroadcastResult.Evidence.BLOCK)
+		h.threads.retryEdit(mineTarget)
+		h.threads.startEdit(root, mineTarget, SnapEditKind.REPLY, mine.body)
+
+		assertEquals("the failed edit was not signed again", 1, h.chain.edits.size)
+		assertNull(h.threads.editing)
+	}
+
+	@Test
+	fun `the guard survives an account switch and back`() {
+		val h = unsettledDelete(HiveRpc.BroadcastResult.AcceptedUnconfirmed("del-1", "n", "no confirmation"))
+		h.who = "bob"
+		h.threads.startEdit(root, mineTarget, SnapEditKind.REPLY, mine.body)
+		h.who = "alice"
+		h.threads.startEdit(root, mineTarget, SnapEditKind.REPLY, mine.body)
+
+		assertNull(h.threads.editing)
+		assertTrue(h.chain.edits.isEmpty())
+	}
+
+	@Test
+	fun `a delete refused on this device before sending leaves Edit available`() {
+		val h = opened()
+		h.chain.refuseBeforeSending = "You've switched Hive accounts — this Snap belonged to a different one."
+		h.threads.requestDelete(root, mineTarget, SnapEditKind.REPLY, mine.body)
+		h.threads.confirmDelete()
+
+		assertTrue(h.threads.deleteNotice(mineTarget) is SnapPostStatus.Failed)
+		assertEquals("nothing reached the network", 0, h.chain.broadcasts)
+		assertFalse(h.deleter.hasUnsettled("alice", mineTarget))
+
+		h.threads.startEdit(root, mineTarget, SnapEditKind.REPLY, mine.body)
+		h.threads.editDraft("new words")
+		h.threads.saveEdit()
+		assertEquals(1, h.chain.edits.size)
+	}
+
+	@Test
+	fun `a delete proven unable to land, with the reply still there, gives Edit back`() {
+		val h = unsettledDelete(HiveRpc.BroadcastResult.AcceptedUnconfirmed("del-1", "n", "no confirmation"))
+		h.threads.startEdit(root, mineTarget, SnapEditKind.REPLY, mine.body)
+		assertNull(h.threads.editing)
+
+		h.chain.finality = 2_000_000_003L
+		h.chain.head = 2_000_000_003L
+		h.chain.put(mine)
+		h.threads.requestDelete(root, mineTarget, SnapEditKind.REPLY, mine.body)
+
+		assertTrue(h.threads.deleteNotice(mineTarget) is SnapPostStatus.Failed)
+		assertFalse(h.deleter.hasUnsettled("alice", mineTarget))
+		assertEquals("settling sent nothing", 1, h.chain.broadcasts)
+		assertTrue(mine.contentId in ids(h))
+
+		h.chain.result = HiveRpc.BroadcastResult.Success("tx", "n", HiveRpc.BroadcastResult.Evidence.BLOCK)
+		h.threads.startEdit(root, mineTarget, SnapEditKind.REPLY, mine.body)
+		h.threads.editDraft("new words")
+		h.threads.saveEdit()
+		assertEquals(1, h.chain.edits.size)
 	}
 }

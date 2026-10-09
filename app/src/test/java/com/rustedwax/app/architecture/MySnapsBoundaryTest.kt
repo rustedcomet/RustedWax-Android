@@ -78,7 +78,8 @@ class MySnapsBoundaryTest {
 		)
 		assertTrue(
 			"the reply deleter changed",
-			activity.contains("val replyDeleter = SnapDeleter(hive = editPort, store = pendingReplies)"),
+			// Issue #56 3A adds only the process-wide write guard every editor and deleter shares.
+			activity.contains("val replyDeleter = SnapDeleter(hive = editPort, store = pendingReplies, guards = writeGuards)"),
 		)
 		assertEquals(1, Regex("beforeRetire =").findAll(activity).count())
 	}

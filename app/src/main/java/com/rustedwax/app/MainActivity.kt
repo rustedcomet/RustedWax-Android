@@ -56,6 +56,7 @@ import com.rustedwax.app.snaps.SharedPreferencesPendingSnapStore
 import com.rustedwax.app.snaps.SnapDeleter
 import com.rustedwax.app.snaps.SnapEditKind
 import com.rustedwax.app.snaps.SnapEditor
+import com.rustedwax.app.snaps.SnapWriteGuards
 import com.rustedwax.app.snaps.SnapPublisher
 import com.rustedwax.app.snaps.SnapReplyTarget
 import com.rustedwax.app.snaps.HiveSnapLikePort
@@ -487,11 +488,17 @@ class MainActivity : ComponentActivity() {
 				loadKey = { vault.loadKey() },
 				storedAccount = { vault.account?.username },
 			)
+			// An unsettled Edit or Delete outlives this Activity: every editor and
+			// deleter in the process shares one guard (Issue #56). It holds data
+			// only — nothing of this Activity — and is saved before anything is
+			// sent, then restored from disk before any editor or deleter has it.
+			val writeGuards = SnapWriteGuards.process(applicationContext)
 			val rootEditor = SnapEditor(
 				hive = editPort,
 				store = SharedPreferencesPendingSnapStore(applicationContext),
+				guards = writeGuards,
 			)
-			val replyEditor = SnapEditor(hive = editPort, store = pendingReplies)
+			val replyEditor = SnapEditor(hive = editPort, store = pendingReplies, guards = writeGuards)
 			// Deleting. The same port and the same per-kind stores: a proven
 			// deletion retires that kind's confirmed record so it is not drawn
 			// back from disk.
@@ -512,8 +519,9 @@ class MainActivity : ComponentActivity() {
 						}
 					}
 				},
+				guards = writeGuards,
 			)
-			val replyDeleter = SnapDeleter(hive = editPort, store = pendingReplies)
+			val replyDeleter = SnapDeleter(hive = editPort, store = pendingReplies, guards = writeGuards)
 			SnapThreadController(
 				scope = lifecycleScope,
 				// Reading a thread cannot publish one: this port has no key and no
