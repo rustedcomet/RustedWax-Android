@@ -108,8 +108,9 @@ class QueueWakeupWiringTest {
 		assertTrue("the receiver is not the queue alarm", ".scrobble.QueueRetryAlarmReceiver" in receiver)
 		assertTrue("the receiver is exported", "android:exported=\"false\"" in receiver)
 		assertFalse("the receiver listens for outside broadcasts", "intent-filter" in receiver)
+		// RECEIVE_BOOT_COMPLETED is now declared, by Issue #42 Stage 2 for the
+		// persisted reply job alone; the queue job above stays unpersisted.
 		listOf(
-			"RECEIVE_BOOT_COMPLETED",
 			"SCHEDULE_EXACT_ALARM",
 			"USE_EXACT_ALARM",
 			"WAKE_LOCK",

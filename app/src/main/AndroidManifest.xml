@@ -22,14 +22,22 @@
 	<!--
 		History Snap replies. Stage 6 posts one notification when a conversation
 		this app was already reading turns out to contain a new reply to the
-		signed-in account — nothing schedules, wakes or polls for it, so there is
-		no service, receiver or worker beside this line.
+		signed-in account; Issue #42 Stage 2 adds one periodic job (below) that
+		asks the same question while the app is closed. No receiver, worker or
+		polling service exists for it.
 
 		Required from Android 13 (API 33) and requested at runtime; on 26–32 it
 		is granted at install and the runtime request is skipped. Refusing it
 		costs the shade only: the in-app bell is unaffected.
 	-->
 	<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+	<!--
+		Issue #42 Stage 2: the background reply check is a persisted periodic
+		job, so it survives a reboot. JobScheduler requires this permission to
+		persist a job; there is no boot receiver behind it.
+	-->
+	<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
 	<!-- Lets us resolve app labels for the packages publishing media sessions. -->
 	<queries>
@@ -100,6 +108,16 @@
 		-->
 		<service
 			android:name=".scrobble.QueueRetryJobService"
+			android:exported="false"
+			android:permission="android.permission.BIND_JOB_SERVICE" />
+
+		<!--
+			Issue #42 Stage 2: the periodic background reply check. Reads only,
+			about every fifteen minutes at most, with a network, while somebody is
+			signed in. Not exported; only the system's job scheduler can bind it.
+		-->
+		<service
+			android:name=".ui.snaps.SnapReplyJobService"
 			android:exported="false"
 			android:permission="android.permission.BIND_JOB_SERVICE" />
 
