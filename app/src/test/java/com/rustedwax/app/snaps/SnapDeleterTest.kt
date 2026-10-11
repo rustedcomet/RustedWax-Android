@@ -33,6 +33,7 @@ class SnapDeleterTest {
 		net: Long = 0,
 		cashout: Long? = head + 6 * 86_400,
 		parentAuthor: String = "alice",
+		headAt: Long = head,
 	) = HiveCommentState(
 		author = target.author,
 		permlink = target.permlink,
@@ -41,7 +42,7 @@ class SnapDeleterTest {
 		children = children,
 		netRshares = net,
 		cashoutEpochSec = cashout,
-		headEpochSec = head,
+		headEpochSec = headAt,
 	)
 
 	/**
@@ -61,6 +62,11 @@ class SnapDeleterTest {
 		var broadcasts = 0
 		var reads = 0
 		var beforeSigning: (() -> Unit)? = null
+		/**
+		 * An earlier node took the transaction and lost its answer; a later
+		 * node then rejected the same bytes. The deletion still applies.
+		 */
+		var landsDespiteRejection = false
 
 		fun put(s: HiveCommentState) { objects["${s.author}/${s.permlink}"] = s }
 
@@ -71,11 +77,17 @@ class SnapDeleterTest {
 		override fun contentExists(author: String, permlink: String): Boolean? =
 			error("a delete reads consensus state, not existence")
 
+		/** Head time the answering nodes report with an absence. */
+		var absentHead: Long? = 2_000_000_000L
+		/** Per-node answer, when a test needs nodes to differ. */
+		var answerFrom: ((Int) -> HiveCommentRead)? = null
+
 		override fun readCommentState(author: String, permlink: String, limit: Int): List<HiveCommentRead> {
 			reads++
 			return (0 until minOf(limit, nodes)).map { n ->
-				objects["$author/$permlink"]?.let { HiveCommentRead.Present(it, "node$n") }
-					?: HiveCommentRead.Absent("node$n")
+				answerFrom?.invoke(n)
+					?: objects["$author/$permlink"]?.let { HiveCommentRead.Present(it, "node$n") }
+					?: HiveCommentRead.Absent("node$n", absentHead)
 			}
 		}
 
@@ -95,11 +107,24 @@ class SnapDeleterTest {
 		override fun broadcastPrepared(prepared: PreparedHiveTransaction, author: String): HiveRpc.BroadcastResult {
 			broadcasts++
 			val op = this.prepared.last()
-			if (applies && result !is HiveRpc.BroadcastResult.Rejected) objects.remove("${op.author}/${op.permlink}")
+			if (applies && (result !is HiveRpc.BroadcastResult.Rejected || landsDespiteRejection)) {
+				objects.remove("${op.author}/${op.permlink}")
+			}
 			return result
 		}
 
 		override fun observeTransaction(txId: String, expirationEpochSec: Long) = evidence
+
+		/** The irreversible block time proven past an expiration, or null — see [HiveRpc.irreversiblyPast]. */
+		var finality: Long? = null
+		val finalityAsked = mutableListOf<Long>()
+		/** Runs while finality is being proven — nodes catching up meanwhile. */
+		var duringFinality: (() -> Unit)? = null
+		override fun irreversiblyPast(expirationEpochSec: Long): Long? {
+			finalityAsked += expirationEpochSec
+			duringFinality?.invoke()
+			return finality?.takeIf { it > expirationEpochSec }
+		}
 
 		companion object {
 			fun inBlock() =
@@ -287,19 +312,126 @@ class SnapDeleterTest {
 	// ── failures never remove anything ─────────────────────────────────
 
 	@Test
-	fun `a chain rejection reports Hive's reason and keeps everything`() {
+	fun `a chain rejection is not proof, so the delete stays guarded and everything is kept`() {
 		val chain = Chain(result = HiveRpc.BroadcastResult.Rejected("Cannot delete a comment with replies."))
 			.apply { put(state(reply)) }
 		val store = Store().apply { write(record("e1", reply, PendingSnapState.CONFIRMED)) }
+		val del = deleter(chain, store)
 
-		val outcome = deleter(chain, store).delete(account, reply)
+		val outcome = del.delete(account, reply)
 
-		assertEquals(
-			SnapDeleter.Outcome.Failed("Hive refused the deletion: Cannot delete a comment with replies."),
-			outcome,
+		assertTrue("got $outcome", outcome is SnapDeleter.Outcome.Uncertain)
+		assertTrue(
+			"Hive's words are still shown",
+			(outcome as SnapDeleter.Outcome.Uncertain).message.contains("Cannot delete a comment with replies."),
 		)
+		assertTrue(del.hasUnsettled(account, reply))
 		assertTrue(chain.objects.containsKey(reply.contentId))
 		assertEquals(setOf("$account|e1"), store.saved.keys)
+	}
+
+	// ── a rejection that may have raced an earlier node's acceptance ───
+
+	@Test
+	fun `a later node's rejection keeps the original transaction, and asking again only settles it`() {
+		val chain = Chain(
+			result = HiveRpc.BroadcastResult.Rejected("Duplicate transaction check failed"),
+			applies = false,
+		).apply { put(state(reply)) }
+		val del = deleter(chain)
+
+		assertTrue(del.delete(account, reply) is SnapDeleter.Outcome.Uncertain)
+		assertTrue(del.hasUnsettled(account, reply))
+
+		repeat(3) { assertTrue(del.delete(account, reply) is SnapDeleter.Outcome.Uncertain) }
+		assertEquals("signed exactly once", 1, chain.prepared.size)
+		assertEquals("sent exactly once", 1, chain.broadcasts)
+	}
+
+	@Test
+	fun `a rejected delete that landed anyway is proven deleted, with its tombstone, without resending`() {
+		val chain = Chain(result = HiveRpc.BroadcastResult.Rejected("Duplicate transaction check failed"))
+			.apply {
+				put(state(root, parentAuthor = "peak.snaps"))
+				landsDespiteRejection = true
+			}
+		val store = Store().apply { write(record("e1", root, PendingSnapState.CONFIRMED)) }
+		val hook = Hook()
+
+		val outcome = hooked(chain, store, hook).delete(account, root)
+
+		assertEquals(SnapDeleter.Outcome.Deleted(root.contentId, "tx-1"), outcome)
+		assertEquals(listOf(Triple(account, root.contentId, "tx-1")), hook.calls)
+		assertTrue(store.saved.isEmpty())
+		assertEquals(1, chain.broadcasts)
+	}
+
+	@Test
+	fun `a rejected delete confirmed late is settled by reading the original transaction`() {
+		val chain = Chain(
+			result = HiveRpc.BroadcastResult.Rejected("Duplicate transaction check failed"),
+			applies = false,
+		).apply { put(state(root, parentAuthor = "peak.snaps")) }
+		val store = Store().apply { write(record("e1", root, PendingSnapState.CONFIRMED)) }
+		val hook = Hook()
+		val del = hooked(chain, store, hook)
+		assertTrue(del.delete(account, root) is SnapDeleter.Outcome.Uncertain)
+		assertTrue(hook.calls.isEmpty())
+
+		// The original lands: block evidence for tx-1, and the object is gone.
+		chain.objects.clear()
+		chain.evidence = HiveRpc.TransactionEvidence.BLOCK
+
+		assertEquals(SnapDeleter.Outcome.Deleted(root.contentId, "tx-1"), del.delete(account, root))
+		assertEquals(listOf(Triple(account, root.contentId, "tx-1")), hook.calls)
+		assertTrue(store.saved.isEmpty())
+		assertFalse(del.hasUnsettled(account, root))
+		assertEquals(1, chain.prepared.size)
+		assertEquals(1, chain.broadcasts)
+	}
+
+	@Test
+	fun `a rejected delete proven expired is a plain failure, and only then may be retried`() {
+		val chain = Chain(
+			result = HiveRpc.BroadcastResult.Rejected("Duplicate transaction check failed"),
+			applies = false,
+		).apply { put(state(reply)) }
+		val del = deleter(chain)
+		assertTrue(del.delete(account, reply) is SnapDeleter.Outcome.Uncertain)
+
+		chain.evidence = HiveRpc.TransactionEvidence.ABSENT
+		val settled = del.delete(account, reply)
+		assertTrue("got $settled", settled is SnapDeleter.Outcome.Failed)
+		assertFalse(del.hasUnsettled(account, reply))
+		assertEquals("expiry proof alone sends nothing", 1, chain.broadcasts)
+
+		chain.result = Chain.inBlock()
+		chain.applies = true
+		chain.evidence = HiveRpc.TransactionEvidence.UNAVAILABLE
+		assertEquals(SnapDeleter.Outcome.Deleted(reply.contentId, "tx-2"), del.delete(account, reply))
+		assertEquals(2, chain.prepared.size)
+	}
+
+	@Test
+	fun `a guarded rejection blocks only that object, for that account`() {
+		val chain = Chain(
+			result = HiveRpc.BroadcastResult.Rejected("Duplicate transaction check failed"),
+			applies = false,
+		).apply {
+			put(state(reply))
+			put(state(other))
+		}
+		val del = deleter(chain)
+		del.delete(account, reply)
+
+		assertTrue(del.hasUnsettled(account, reply))
+		assertFalse(del.hasUnsettled(account, other))
+		assertFalse(del.hasUnsettled("someoneelse", reply))
+
+		chain.result = Chain.inBlock()
+		chain.applies = true
+		assertEquals(SnapDeleter.Outcome.Deleted(other.contentId, "tx-2"), del.delete(account, other))
+		assertTrue(del.hasUnsettled(account, reply))
 	}
 
 	@Test
@@ -548,5 +680,243 @@ class SnapDeleterTest {
 		val store = Store().apply { write(record("e1", reply, PendingSnapState.CONFIRMED)) }
 		assertEquals(SnapDeleter.Outcome.Deleted(reply.contentId, "tx-1"), deleter(chain, store).delete(account, reply))
 		assertTrue(store.saved.isEmpty())
+	}
+
+	// ── an expired transaction that can no longer be included ──────────
+
+	/** tx-1's expiration in [Chain]; the proof below is the irreversible block after it. */
+	private val expiry = 2_000_000_060L
+	private val pastExpiry = expiry + 3
+
+	private fun lostDelete(chain: Chain): SnapDeleter {
+		val del = deleter(chain)
+		assertTrue(del.delete(account, reply) is SnapDeleter.Outcome.Uncertain)
+		return del
+	}
+
+	@Test
+	fun `status history gone and no finality proof keeps the delete locked and signs nothing`() {
+		val chain = Chain(result = HiveRpc.BroadcastResult.NetworkFailure("lost"), applies = false)
+			.apply { put(state(reply)) }
+		val del = lostDelete(chain)
+
+		// too_old / unknown answers reach the deleter as UNAVAILABLE.
+		repeat(3) { assertTrue(del.delete(account, reply) is SnapDeleter.Outcome.Uncertain) }
+		assertTrue(del.hasUnsettled(account, reply))
+		assertEquals(1, chain.prepared.size)
+		assertEquals(1, chain.broadcasts)
+		assertTrue("it asked about tx-1's own expiration", chain.finalityAsked.all { it == expiry })
+	}
+
+	@Test
+	fun `proven unable to land and still present on a node past that point is a plain failure that frees the object`() {
+		val chain = Chain(result = HiveRpc.BroadcastResult.NetworkFailure("lost"), applies = false)
+			.apply { put(state(reply)) }
+		val del = lostDelete(chain)
+
+		chain.finality = pastExpiry
+		chain.put(state(reply, headAt = pastExpiry))
+		val outcome = del.delete(account, reply)
+
+		assertTrue("got $outcome", outcome is SnapDeleter.Outcome.Failed)
+		val message = (outcome as SnapDeleter.Outcome.Failed).message
+		assertFalse("never claims it did not reach Hive: $message", message.contains("didn't reach"))
+		// It may have been deleted and recreated since: only "it is there now" is proven.
+		assertFalse("never claims the delete did not happen: $message", message.contains("nothing was deleted"))
+		assertTrue(message, message.contains("can no longer"))
+		assertFalse(del.hasUnsettled(account, reply))
+		assertEquals("settling sent nothing", 1, chain.broadcasts)
+
+		// Only now may a fresh, re-checked delete be signed.
+		chain.result = Chain.inBlock()
+		chain.applies = true
+		assertEquals(SnapDeleter.Outcome.Deleted(reply.contentId, "tx-2"), del.delete(account, reply))
+	}
+
+	@Test
+	fun `a presence read from a node not yet past the proof keeps the lock`() {
+		val chain = Chain(result = HiveRpc.BroadcastResult.NetworkFailure("lost"), applies = false)
+			.apply { put(state(reply)) }
+		val del = lostDelete(chain)
+
+		chain.finality = pastExpiry
+		chain.put(state(reply, headAt = pastExpiry - 1))
+
+		assertTrue(del.delete(account, reply) is SnapDeleter.Outcome.Uncertain)
+		assertTrue(del.hasUnsettled(account, reply))
+		assertEquals(1, chain.broadcasts)
+	}
+
+	@Test
+	fun `a delete included before it expired is still proven by absence, with its tombstone`() {
+		val chain = Chain(result = HiveRpc.BroadcastResult.NetworkFailure("lost"), applies = false)
+			.apply { put(state(root, parentAuthor = "peak.snaps")) }
+		val store = Store().apply { write(record("e1", root, PendingSnapState.CONFIRMED)) }
+		val hook = Hook()
+		val del = hooked(chain, store, hook)
+		assertTrue(del.delete(account, root) is SnapDeleter.Outcome.Uncertain)
+
+		// tx-1 had landed; its status has since aged out (UNAVAILABLE).
+		chain.objects.clear()
+		chain.finality = pastExpiry
+
+		assertEquals(SnapDeleter.Outcome.Deleted(root.contentId, "tx-1"), del.delete(account, root))
+		assertEquals(listOf(Triple(account, root.contentId, "tx-1")), hook.calls)
+		assertTrue(store.saved.isEmpty())
+		assertEquals(1, chain.broadcasts)
+	}
+
+	@Test
+	fun `absence that only shows once finality is proven is still read as a deletion, with its tombstone`() {
+		val chain = Chain(result = HiveRpc.BroadcastResult.NetworkFailure("lost"), applies = false)
+			.apply { put(state(root, parentAuthor = "peak.snaps")) }
+		val store = Store().apply { write(record("e1", root, PendingSnapState.CONFIRMED)) }
+		val hook = Hook()
+		val del = hooked(chain, store, hook)
+		assertTrue(del.delete(account, root) is SnapDeleter.Outcome.Uncertain)
+
+		// The settle loop still sees the Snap; it is gone by the time the proof lands.
+		chain.finality = pastExpiry
+		chain.duringFinality = {
+			chain.objects.clear()
+			chain.absentHead = pastExpiry
+		}
+
+		assertEquals(SnapDeleter.Outcome.Deleted(root.contentId, "tx-1"), del.delete(account, root))
+		assertEquals(listOf(Triple(account, root.contentId, "tx-1")), hook.calls)
+		assertTrue(store.saved.isEmpty())
+		assertEquals(1, chain.broadcasts)
+	}
+
+	@Test
+	fun `absence on one node only is still not proof, with or without finality`() {
+		val chain = Chain(result = HiveRpc.BroadcastResult.NetworkFailure("lost"), applies = false)
+			.apply { put(state(reply)) }
+		val del = lostDelete(chain)
+		chain.objects.clear()
+		chain.nodes = 1
+		chain.finality = pastExpiry
+
+		assertTrue(del.delete(account, reply) is SnapDeleter.Outcome.Uncertain)
+		assertTrue(del.hasUnsettled(account, reply))
+	}
+
+	@Test
+	fun `proven unable to land but nothing current can read the object keeps the lock`() {
+		val chain = Chain(result = HiveRpc.BroadcastResult.NetworkFailure("lost"), applies = false)
+			.apply { put(state(reply)) }
+		val del = lostDelete(chain)
+		chain.finality = pastExpiry
+		chain.nodes = 0
+
+		assertTrue(del.delete(account, reply) is SnapDeleter.Outcome.Uncertain)
+		assertTrue(del.hasUnsettled(account, reply))
+	}
+
+	@Test
+	fun `a rejected delete proven unable to land and still present is a plain failure`() {
+		val chain = Chain(
+			result = HiveRpc.BroadcastResult.Rejected("Duplicate transaction check failed"),
+			applies = false,
+		).apply { put(state(reply, headAt = pastExpiry)) }
+		chain.finality = pastExpiry
+
+		val outcome = deleter(chain).delete(account, reply)
+
+		assertTrue("got $outcome", outcome is SnapDeleter.Outcome.Failed)
+		assertEquals(1, chain.broadcasts)
+	}
+
+	@Test
+	fun `freeing one object leaves another object's lock and other accounts alone`() {
+		val chain = Chain(result = HiveRpc.BroadcastResult.NetworkFailure("lost"), applies = false).apply {
+			put(state(reply))
+			put(state(other))
+		}
+		val del = deleter(chain)
+		del.delete(account, reply)
+		del.delete(account, other)
+		assertTrue(del.hasUnsettled(account, reply))
+		assertTrue(del.hasUnsettled(account, other))
+
+		// Settling reply frees reply alone; other is never touched by it.
+		chain.finality = pastExpiry
+		chain.put(state(reply, headAt = pastExpiry))
+		assertTrue(del.delete(account, reply) is SnapDeleter.Outcome.Failed)
+
+		assertFalse(del.hasUnsettled(account, reply))
+		assertTrue(del.hasUnsettled(account, other))
+		assertFalse(del.hasUnsettled("someoneelse", other))
+		assertEquals(2, chain.broadcasts)
+	}
+
+	// ── Block 3B-R1: absence after finality must be fenced by the proof ─
+
+	private fun rootLostDelete(): Triple<Chain, Store, Pair<SnapDeleter, Hook>> {
+		val chain = Chain(result = HiveRpc.BroadcastResult.NetworkFailure("lost"), applies = false)
+			.apply { put(state(root, parentAuthor = "peak.snaps")) }
+		val store = Store().apply { write(record("e1", root, PendingSnapState.CONFIRMED)) }
+		val hook = Hook()
+		val del = hooked(chain, store, hook)
+		assertTrue(del.delete(account, root) is SnapDeleter.Outcome.Uncertain)
+		return Triple(chain, store, del to hook)
+	}
+
+	@Test
+	fun `R1 two absences from nodes behind the finality fence write no tombstone`() {
+		val (chain, store, pair) = rootLostDelete()
+		val (del, hook) = pair
+		chain.finality = pastExpiry
+		chain.duringFinality = {
+			chain.objects.clear()
+			chain.absentHead = pastExpiry - 1
+		}
+
+		assertTrue(del.delete(account, root) is SnapDeleter.Outcome.Uncertain)
+		assertTrue("no tombstone", hook.calls.isEmpty())
+		assertEquals(setOf("$account|e1"), store.saved.keys)
+		assertTrue(del.hasUnsettled(account, root))
+	}
+
+	@Test
+	fun `R1 absences without a known head never count after finality`() {
+		val (chain, _, pair) = rootLostDelete()
+		val (del, hook) = pair
+		chain.finality = pastExpiry
+		chain.duringFinality = {
+			chain.objects.clear()
+			chain.absentHead = null
+		}
+
+		assertTrue(del.delete(account, root) is SnapDeleter.Outcome.Uncertain)
+		assertTrue(hook.calls.isEmpty())
+	}
+
+	@Test
+	fun `R1 the same node twice is not two absences`() {
+		val (chain, _, pair) = rootLostDelete()
+		val (del, hook) = pair
+		chain.finality = pastExpiry
+		chain.duringFinality = { chain.answerFrom = { HiveCommentRead.Absent("node0", pastExpiry) } }
+
+		assertTrue(del.delete(account, root) is SnapDeleter.Outcome.Uncertain)
+		assertTrue(hook.calls.isEmpty())
+	}
+
+	@Test
+	fun `R1 advanced nodes that disagree keep the lock`() {
+		val (chain, _, pair) = rootLostDelete()
+		val (del, hook) = pair
+		chain.finality = pastExpiry
+		val there = state(root, parentAuthor = "peak.snaps", headAt = pastExpiry)
+		chain.duringFinality = {
+			chain.answerFrom = { n ->
+				if (n == 0) HiveCommentRead.Absent("node0", pastExpiry) else HiveCommentRead.Present(there, "node1")
+			}
+		}
+
+		assertTrue(del.delete(account, root) is SnapDeleter.Outcome.Uncertain)
+		assertTrue(hook.calls.isEmpty())
+		assertTrue(del.hasUnsettled(account, root))
 	}
 }

@@ -40,7 +40,10 @@ sealed interface SnapDeleteCheck {
  *    a second current node — counts, and only then are local records touched;
  *  - **one delete in flight per object.** A sent transaction that could not
  *    be settled is remembered, and asking again settles *that* transaction by
- *    reading rather than signing a second one.
+ *    reading rather than signing a second one. A rejection counts as
+ *    unsettled too: it is released only by proof of inclusion or of expiry.
+ *    Only the port's own refusal before transmitting ([SnapSend.NotSent]) is
+ *    not a send at all.
  *
  * Signing goes through the same [SnapHivePort] as every other Snap write, with
  * the same three-way account binding at both signing and sending.
@@ -64,6 +67,8 @@ class SnapDeleter(
 	 */
 	private val beforeRetire: (account: String, target: SnapReplyTarget, txId: String?) -> Boolean =
 		{ _, _, _ -> true },
+	/** Shared with every editor and deleter in the process; see [SnapWriteGuards]. */
+	private val guards: SnapWriteGuards = SnapWriteGuards(),
 ) {
 
 	sealed interface Outcome {
@@ -87,12 +92,9 @@ class SnapDeleter(
 		data class Uncertain(val message: String) : Outcome
 	}
 
-	/** Account-scoped `author/permlink` to the delete sent and not yet settled. */
-	private val unsettled = mutableMapOf<String, PreparedHiveTransaction>()
-
-	/** True while a sent delete for this object still awaits proof. */
+	/** True while a sent delete for this object still awaits proof — from any deleter in the process. */
 	fun hasUnsettled(account: String, target: SnapReplyTarget): Boolean =
-		synchronized(unsettled) { slot(account, target) in unsettled }
+		guards.current(account, target) is SnapWriteGuards.DeleteAttempt
 
 	/**
 	 * Read whether this may be deleted right now. Read-only: never signs.
@@ -101,6 +103,19 @@ class SnapDeleter(
 	 * delete itself runs again immediately before signing.
 	 */
 	fun check(account: String, target: SnapReplyTarget): SnapDeleteCheck {
+		// An edit of this comment still unsettled — sent by any editor in the
+		// process — could land after the delete and recreate it.
+		when (guards.current(account, target)) {
+			is SnapWriteGuards.EditAttempt -> return SnapDeleteCheck.Blocked(EDIT_UNSETTLED)
+			is SnapWriteGuards.Reserved, is SnapWriteGuards.DeleteAttempt -> return SnapDeleteCheck.Blocked(BUSY)
+			is SnapWriteGuards.Locked -> return SnapDeleteCheck.Blocked(LOCKED)
+			null -> Unit
+		}
+		return checkChain(account, target)
+	}
+
+	/** [check] without the process guard: what the delete runs under its own reservation. */
+	private fun checkChain(account: String, target: SnapReplyTarget): SnapDeleteCheck {
 		if (account.isBlank()) return SnapDeleteCheck.Blocked(SIGN_IN)
 		if (!target.author.equals(account, ignoreCase = true)) {
 			return SnapDeleteCheck.Blocked(NOT_AUTHOR)
@@ -124,12 +139,34 @@ class SnapDeleter(
 		if (account.isBlank()) return Outcome.Failed(SIGN_IN)
 		if (!target.author.equals(account, ignoreCase = true)) return Outcome.Failed(NOT_AUTHOR)
 
-		// A delete already sent for this object is settled, never repeated.
-		synchronized(unsettled) { unsettled[slot(account, target)] }?.let {
-			return settle(account, target, it, blockProven = false)
+		// One Edit or Delete per comment at a time, across every editor and
+		// deleter in the process — including ones built by an earlier Activity.
+		when (val held = guards.current(account, target)) {
+			// A delete already sent for this object is settled, never repeated.
+			is SnapWriteGuards.DeleteAttempt -> return settle(account, target, held, blockProven = false)
+			is SnapWriteGuards.EditAttempt -> return Outcome.Blocked(EDIT_UNSETTLED)
+			is SnapWriteGuards.Reserved -> return Outcome.Blocked(BUSY)
+			is SnapWriteGuards.Locked -> return Outcome.Blocked(LOCKED)
+			null -> Unit
 		}
+		val reservation = guards.reserve(account, target, SnapWriteGuards.Operation.DELETE)
+			?: return Outcome.Blocked(BUSY)
+		var attached = false
+		try {
+			return signAndSend(account, target, reservation.id) { attached = true }
+		} finally {
+			if (!attached) guards.release(account, target, reservation.id)
+		}
+	}
 
-		val state = when (val c = check(account, target)) {
+	/** The delete itself, under this caller's reservation. [onAttached] marks the moment it may be sent. */
+	private fun signAndSend(
+		account: String,
+		target: SnapReplyTarget,
+		reservationId: Long,
+		onAttached: () -> Unit,
+	): Outcome {
+		val state = when (val c = checkChain(account, target)) {
 			is SnapDeleteCheck.Eligible -> c.state
 			is SnapDeleteCheck.Unknown -> return Outcome.Failed(c.message)
 			is SnapDeleteCheck.Blocked -> {
@@ -137,7 +174,7 @@ class SnapDeleter(
 				// whose answer was lost. Proven twice before anything local
 				// moves; nothing is sent either way.
 				if (c.reason == ALREADY_GONE && provenAbsent(target, blockProven = false)) {
-					return deleted(account, target, txId = null)
+					return deleted(account, target, txId = null, attemptId = null)
 				}
 				return Outcome.Blocked(c.reason)
 			}
@@ -162,19 +199,40 @@ class SnapDeleter(
 			null -> return Outcome.Failed("RustedWax couldn't prepare this deletion, so nothing was deleted.")
 		}
 
-		// Remembered before it can reach a node: from here on, a second tap
-		// settles this transaction instead of signing another.
-		synchronized(unsettled) { unsettled[slot(account, target)] = prepared }
-		val result = runCatching { hive.broadcastPrepared(prepared, account) }.getOrNull()
+		// Remembered before it can reach a node: from here on, a second tap —
+		// on this deleter or any other in the process — settles this transaction
+		// instead of signing another.
+		val attempt = SnapWriteGuards.DeleteAttempt(reservationId, prepared)
+		if (!guards.attach(account, target, attempt)) {
+			return Outcome.Failed("RustedWax couldn't save this deletion safely on your phone, so it wasn't sent.")
+		}
+		onAttached()
+		val sent = runCatching { hive.sendPrepared(prepared, account) }.getOrNull()
+		if (sent is SnapSend.NotSent) {
+			// Refused on this device before the network boundary, by the port's
+			// own account guard: this transaction never left, so nothing is owed.
+			guards.release(account, target, attempt.id)
+			return Outcome.Failed("${sent.reason} Nothing was deleted.")
+		}
+		// A thrown send is as unknown as any other: it stays remembered.
+		val result = (sent as? SnapSend.Sent)?.result
 		if (result is HiveRpc.BroadcastResult.Rejected) {
-			// Refused outright: the transaction cannot land. Say why, in the
-			// chain's words — a rule that changed after the check reads here.
-			forget(account, target)
-			return Outcome.Failed("Hive refused the deletion: ${result.message}")
+			// Not proof that nothing landed. The broadcast moves on to the next
+			// node after one whose answer was lost, so this refusal may come from
+			// a node that already had the transaction from that earlier one (Issue
+			// #56). The same transaction stays remembered and is settled by
+			// reading, exactly as any other unproven delete.
+			return when (val settled = settle(account, target, attempt, blockProven = false)) {
+				is Outcome.Uncertain -> Outcome.Uncertain(
+					"Hive refused the deletion (${result.message}), but another node may already have it, " +
+						"so this stays shown until Hive confirms either way. Checking again won't send another.",
+				)
+				else -> settled
+			}
 		}
 		val blockProven = result is HiveRpc.BroadcastResult.Success &&
 			result.evidence == HiveRpc.BroadcastResult.Evidence.BLOCK
-		return settle(account, target, prepared, blockProven)
+		return settle(account, target, attempt, blockProven)
 	}
 
 	/**
@@ -189,21 +247,22 @@ class SnapDeleter(
 	private fun settle(
 		account: String,
 		target: SnapReplyTarget,
-		prepared: PreparedHiveTransaction,
+		attempt: SnapWriteGuards.DeleteAttempt,
 		blockProven: Boolean,
 	): Outcome {
+		val prepared = attempt.prepared
 		var included = blockProven
-		repeat(settleAttempts) { attempt ->
-			if (attempt > 0) sleep(SETTLE_INTERVAL_MS)
-			if (provenAbsent(target, included)) return deleted(account, target, prepared.txId)
+		repeat(settleAttempts) { round ->
+			if (round > 0) sleep(SETTLE_INTERVAL_MS)
+			if (provenAbsent(target, included)) return deleted(account, target, prepared.txId, attempt.id)
 			if (!included) {
 				when (observe(prepared)) {
 					HiveRpc.TransactionEvidence.BLOCK -> {
 						included = true
-						if (provenAbsent(target, true)) return deleted(account, target, prepared.txId)
+						if (provenAbsent(target, true)) return deleted(account, target, prepared.txId, attempt.id)
 					}
 					HiveRpc.TransactionEvidence.ABSENT -> {
-						forget(account, target)
+						guards.release(account, target, attempt.id)
 						return Outcome.Failed("Your deletion didn't reach Hive, so nothing was deleted.")
 					}
 					else -> Unit
@@ -212,15 +271,50 @@ class SnapDeleter(
 		}
 		if (included && stillPresent(target)) {
 			// In a block, and the object is still there on a current node.
-			forget(account, target)
+			guards.release(account, target, attempt.id)
 			return Outcome.Failed(
 				"Hive accepted the deletion but this is still there, so RustedWax is leaving it on screen.",
 			)
 		}
+		if (!included) cannotLand(account, target, attempt)?.let { return it }
 		return Outcome.Uncertain(
 			"RustedWax couldn't confirm the deletion yet, so this is still shown. " +
 				"Checking again won't send another.",
 		)
+	}
+
+	/**
+	 * Settle a delete that current nodes prove can no longer be included (Issue
+	 * #56) — the case transaction status cannot answer once its history ages out.
+	 *
+	 * The proof says nothing about whether it already was included, so the
+	 * object decides, and only answers from nodes at or past the proving block
+	 * count: an earlier answer describes a chain the transaction could still
+	 * change. Two such distinct nodes holding nothing, with none holding it, is
+	 * a deletion. Such a node holding it, with none disagreeing, means it is
+	 * there now — not that the delete never applied, since it may have been
+	 * deleted and recreated. Anything else stays unsettled.
+	 */
+	private fun cannotLand(account: String, target: SnapReplyTarget, attempt: SnapWriteGuards.DeleteAttempt): Outcome? {
+		val prepared = attempt.prepared
+		val final = runCatching { hive.irreversiblyPast(prepared.expirationEpochSec) }.getOrNull() ?: return null
+		val fenced = runCatching { hive.readCommentState(target.author, target.permlink, 2) }
+			.getOrNull()
+			.orEmpty()
+			.filter { (headOf(it) ?: return@filter false) >= final }
+		val absentNodes = fenced.filterIsInstance<HiveCommentRead.Absent>().map { it.node }.toSet()
+		val present = fenced.any { it is HiveCommentRead.Present }
+		if (!present && absentNodes.size >= 2) return deleted(account, target, prepared.txId, attempt.id)
+		if (present && absentNodes.isEmpty()) {
+			guards.release(account, target, attempt.id)
+			return Outcome.Failed(EXPIRED_STILL_THERE)
+		}
+		return null
+	}
+
+	private fun headOf(read: HiveCommentRead): Long? = when (read) {
+		is HiveCommentRead.Present -> read.state.headEpochSec
+		is HiveCommentRead.Absent -> read.headEpochSec
 	}
 
 	private fun observe(prepared: PreparedHiveTransaction): HiveRpc.TransactionEvidence? =
@@ -244,16 +338,21 @@ class SnapDeleter(
 			.getOrNull()
 			?.firstOrNull() is HiveCommentRead.Present
 
-	private fun deleted(account: String, target: SnapReplyTarget, txId: String?): Outcome.Deleted {
-		forget(account, target)
-		if (runCatching { beforeRetire(account, target, txId) }.getOrDefault(false)) {
-			retireLocal(account, target)
+	/**
+	 * Proven gone. [attemptId] is the attempt being settled, or null when none
+	 * was sent. Only the caller that frees that attempt writes the local steps,
+	 * so a second settler of the same attempt — an older Activity finishing
+	 * late — repeats neither the tombstone nor the retirement, and can never
+	 * free a newer attempt.
+	 */
+	private fun deleted(account: String, target: SnapReplyTarget, txId: String?, attemptId: Long?): Outcome.Deleted {
+		val localSteps = {
+			if (runCatching { beforeRetire(account, target, txId) }.getOrDefault(false)) retireLocal(account, target)
 		}
+		// Tombstone, then retirement, then the saved attempt: a process that dies
+		// in between settles the same attempt again; both steps are repeatable.
+		if (attemptId == null) localSteps() else guards.finish(account, target, attemptId, localSteps)
 		return Outcome.Deleted(target.contentId, txId)
-	}
-
-	private fun forget(account: String, target: SnapReplyTarget) {
-		synchronized(unsettled) { unsettled.remove(slot(account, target)) }
 	}
 
 	/**
@@ -289,9 +388,6 @@ class SnapDeleter(
 		}
 	}
 
-	private fun slot(account: String, target: SnapReplyTarget) =
-		"${account.lowercase()}|${target.contentId}"
-
 	companion object {
 		const val NOT_AUTHOR = "Only the author can delete this."
 		const val SIGN_IN = "Sign in to your Hive account to delete."
@@ -302,6 +398,13 @@ class SnapDeleter(
 		const val HAS_VOTES = "Hive doesn't allow deleting this because it has net positive votes."
 		const val PAID_OUT = "Hive doesn't allow deleting this because its payout has already happened."
 		const val NOT_A_COMMENT = "RustedWax can only delete Snaps and replies."
+		const val EDIT_UNSETTLED = "An edit of this isn't settled yet, so it can't be deleted until it is."
+		const val BUSY = "RustedWax is already working on this. Try again in a moment."
+		const val LOCKED =
+			"RustedWax couldn't read what it saved about an earlier change to this, so it won't delete it here."
+		const val EXPIRED_STILL_THERE =
+			"This is on Hive now, and that earlier deletion can no longer go through. " +
+				"Nothing more will be sent for it; you can delete it again."
 
 		private const val SETTLE_ATTEMPTS = 6
 		private const val SETTLE_INTERVAL_MS = 3_000L

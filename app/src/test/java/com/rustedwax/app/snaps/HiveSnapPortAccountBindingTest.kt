@@ -67,7 +67,7 @@ class HiveSnapPortAccountBindingTest {
 			txId = "0123456789abcdef0123456789abcdef01234567",
 			expirationEpochSec = 2_000_000_000L,
 		)
-		val sendResult = HiveRpc.BroadcastResult.Success(
+		var sendResult: HiveRpc.BroadcastResult = HiveRpc.BroadcastResult.Success(
 			signed.txId,
 			"https://node",
 			HiveRpc.BroadcastResult.Evidence.BLOCK,
@@ -317,5 +317,80 @@ class HiveSnapPortAccountBindingTest {
 			assertEquals(0, port.signs)
 			assertEquals(0, port.keyReads)
 		}
+	}
+
+	// ── sendPrepared: never-sent is proven only by this port's own guard ─
+
+	private fun preparedDelete(port: Port): PreparedHiveTransaction =
+		(port.real.prepareDelete(TxSerializer.DeleteCommentOp("alice", "re-x"), author = "alice")
+			as HivePreparationResult.Ready).transaction
+
+	@Test
+	fun `an account switch or sign-out before sending is NotSent, with zero transmissions`() {
+		listOf("switched" to "bob", "cleared" to null).forEach { (why, vault) ->
+			val port = Port(vault = "alice", maySign = true)
+			val p = preparedDelete(port)
+			port.vault = vault
+
+			val outcome = port.real.sendPrepared(p, author = "alice")
+
+			assertEquals("$why must not transmit", 0, port.sends)
+			assertTrue("$why got $outcome", outcome is SnapSend.NotSent)
+			assertTrue((outcome as SnapSend.NotSent).reason.contains("switched Hive accounts"))
+		}
+	}
+
+	@Test
+	fun `an unchanged account is Sent, carrying exactly the node's answer`() {
+		val port = Port(vault = "alice", maySign = true)
+		val p = preparedDelete(port)
+
+		val outcome = port.real.sendPrepared(p, author = "alice")
+
+		assertEquals(1, port.sends)
+		assertSame(p, port.sent.single())
+		assertEquals(SnapSend.Sent(port.sendResult), outcome)
+	}
+
+	/** A node's refusal happens after the boundary, so it is never "not sent". */
+	@Test
+	fun `a node's rejection after transmission is Sent, not NotSent`() {
+		val port = Port(vault = "alice", maySign = true)
+		port.sendResult = HiveRpc.BroadcastResult.Rejected("Duplicate transaction check failed")
+		val p = preparedDelete(port)
+
+		val outcome = port.real.sendPrepared(p, author = "alice")
+
+		assertEquals(1, port.sends)
+		assertEquals(SnapSend.Sent(port.sendResult), outcome)
+	}
+
+	@Test
+	fun `broadcastPrepared answers exactly as before for both refusal and transmission`() {
+		val refused = Port(vault = "alice", maySign = true)
+		val p = preparedDelete(refused)
+		refused.vault = "bob"
+		assertEquals(
+			HiveRpc.BroadcastResult.Rejected("You've switched Hive accounts — this Snap belonged to a different one."),
+			refused.real.broadcastPrepared(p, author = "alice"),
+		)
+
+		val sent = Port(vault = "alice", maySign = true)
+		assertEquals(sent.sendResult, sent.real.broadcastPrepared(preparedDelete(sent), author = "alice"))
+	}
+
+	/** Fakes that only know how to broadcast can never claim never-sent. */
+	@Test
+	fun `the interface default treats every answer as possibly sent`() {
+		val rejection = HiveRpc.BroadcastResult.Rejected("anything at all")
+		val fake = object : SnapHivePort {
+			override fun resolveContainer() = error("unused")
+			override fun prepareComment(operation: TxSerializer.CommentOp, author: String) = error("unused")
+			override fun broadcastPrepared(prepared: PreparedHiveTransaction, author: String) = rejection
+			override fun observeTransaction(txId: String, expirationEpochSec: Long) = error("unused")
+			override fun contentExists(author: String, permlink: String) = error("unused")
+		}
+		val p = PreparedHiveTransaction("{}", "tx", 1L)
+		assertEquals(SnapSend.Sent(rejection), fake.sendPrepared(p, "alice"))
 	}
 }

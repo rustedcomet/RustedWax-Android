@@ -5,7 +5,6 @@ import com.rustedwax.hive.HivePreparationResult
 import com.rustedwax.hive.HiveRpc
 import com.rustedwax.hive.PreparedHiveTransaction
 import com.rustedwax.hive.TxSerializer
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * One comment exactly as the chain holds it now — every field an edit has to
@@ -25,6 +24,11 @@ data class SnapChainComment(
 	val title: String,
 	val body: String,
 	val jsonMetadata: String,
+	/**
+	 * Head block time of the current node this was read from, when known — the
+	 * chain point the words describe (Issue #56). Null for a read that cannot say.
+	 */
+	val headEpochSec: Long? = null,
 )
 
 /** Which shape of body is being edited. The two are not built the same way. */
@@ -63,7 +67,8 @@ enum class SnapEditKind {
  *
  * An ambiguous broadcast keeps its transaction in memory. Retry reconciles
  * that exact attempt without signing or sending again; another edit is allowed
- * only after inclusion or proven irreversible absence. This also keeps a late
+ * only after inclusion, proven irreversible absence, or proof that it can no
+ * longer be included read against the comment as it is now. This also keeps a late
  * edit from undoing a newer edit or recreating a deleted comment.
  *
  * The posting key is never held here. Signing and sending go through the same
@@ -78,22 +83,9 @@ class SnapEditor(
 	 * which costs nothing but the offline fallback showing the older text.
 	 */
 	private val store: PendingSnapStore? = null,
+	/** Shared with every editor and deleter in the process; see [SnapWriteGuards]. */
+	private val guards: SnapWriteGuards = SnapWriteGuards(),
 ) {
-
-	private data class Attempt(
-		val account: String,
-		val target: SnapReplyTarget,
-		val kind: SnapEditKind,
-		val text: String,
-		val body: String,
-		val prepared: PreparedHiveTransaction,
-	)
-
-	/** Memory only; never a confirmed record or an automatic restart job. */
-	private val unsettled = ConcurrentHashMap<String, Attempt>()
-
-	private fun attemptKey(account: String, target: SnapReplyTarget) =
-		"${account.lowercase()}|${target.contentId}"
 
 	sealed interface Outcome {
 		/** On chain. [userText] is what the screen should now show. */
@@ -130,13 +122,36 @@ class SnapEditor(
 			return Outcome.Failed(NOT_AUTHOR)
 		}
 		textProblem(newText)?.let { return Outcome.Failed(it) }
-		unsettled[attemptKey(account, target)]?.let { attempt ->
-			return settleUnproven(
-				attempt.account, attempt.target, attempt.kind,
-				attempt.text, attempt.body, attempt.prepared,
-			)
+		// One Edit or Delete per comment at a time, across every editor and
+		// deleter in the process — including ones built by an earlier Activity.
+		when (val held = guards.current(account, target)) {
+			// The edit already sent is settled, never repeated or replaced.
+			is SnapWriteGuards.EditAttempt ->
+				return if (held.kind == kind) settleUnproven(account, target, held) else Outcome.Failed(BUSY)
+			is SnapWriteGuards.DeleteAttempt -> return Outcome.Failed(DELETE_UNSETTLED)
+			is SnapWriteGuards.Reserved -> return Outcome.Failed(BUSY)
+			is SnapWriteGuards.Locked -> return Outcome.Failed(LOCKED)
+			null -> Unit
 		}
+		val reservation = guards.reserve(account, target, SnapWriteGuards.Operation.EDIT)
+			?: return Outcome.Failed(BUSY)
+		var attached = false
+		try {
+			return signAndSend(account, target, kind, newText, reservation.id) { attached = true }
+		} finally {
+			if (!attached) guards.release(account, target, reservation.id)
+		}
+	}
 
+	/** The edit itself, under this caller's reservation. [onAttached] marks the moment it may be sent. */
+	private fun signAndSend(
+		account: String,
+		target: SnapReplyTarget,
+		kind: SnapEditKind,
+		newText: String,
+		reservationId: Long,
+		onAttached: () -> Unit,
+	): Outcome {
 		val current = runCatching { hive.readComment(target.author, target.permlink) }.getOrNull()
 			?: return Outcome.Failed(
 				"RustedWax couldn't read this from Hive right now, so nothing was changed.",
@@ -195,14 +210,16 @@ class SnapEditor(
 		}
 
 		// Claim before crossing the network boundary, including a thrown/lost answer.
-		unsettled[attemptKey(account, target)] = Attempt(account, target, kind, newText, body, prepared)
+		val attempt = SnapWriteGuards.EditAttempt(reservationId, kind, newText, body, prepared)
+		if (!guards.attach(account, target, attempt)) return Outcome.Failed(NOT_SAVED)
+		onAttached()
 		val result = runCatching { hive.broadcastPrepared(prepared, account) }.getOrNull()
 		if (result is HiveRpc.BroadcastResult.Success &&
 			result.evidence == HiveRpc.BroadcastResult.Evidence.BLOCK
 		) {
-			return edited(account, target, kind, newText, body, result.txId)
+			return edited(account, target, attempt, result.txId)
 		}
-		return settleUnproven(account, target, kind, newText, body, prepared)
+		return settleUnproven(account, target, attempt)
 	}
 
 	/**
@@ -212,44 +229,80 @@ class SnapEditor(
 	private fun settleUnproven(
 		account: String,
 		target: SnapReplyTarget,
-		kind: SnapEditKind,
-		newText: String,
-		body: String,
-		prepared: PreparedHiveTransaction,
+		attempt: SnapWriteGuards.EditAttempt,
 	): Outcome {
-		val after = runCatching { hive.readComment(target.author, target.permlink) }.getOrNull()
-		if (after?.author.equals(target.author, ignoreCase = true) &&
-			after?.permlink == target.permlink && after.body == body
-		) return edited(account, target, kind, newText, body, prepared.txId)
+		val prepared = attempt.prepared
+		// The words being on chain are not this transaction's proof: the same
+		// text may have been there before, or put back by someone else, while
+		// this one can still land after a newer edit (Issue #56). Only the
+		// transaction's own inclusion, its proven absence, or proof that it can
+		// no longer be included — read against the comment past that point —
+		// settles it.
 		return when (
 			runCatching {
 				hive.observeTransaction(prepared.txId, prepared.expirationEpochSec)
 			}.getOrNull()
 		) {
 			HiveRpc.TransactionEvidence.BLOCK ->
-				edited(account, target, kind, newText, body, prepared.txId)
+				edited(account, target, attempt, prepared.txId)
 			HiveRpc.TransactionEvidence.ABSENT -> {
-				unsettled.remove(attemptKey(account, target))
+				guards.release(account, target, attempt.id)
 				Outcome.Failed("Your edit didn't reach Hive, so nothing changed. You can save it again.")
 			}
-			else -> Outcome.Uncertain(
+			else -> cannotLand(account, target, attempt) ?: Outcome.Uncertain(
 				"RustedWax couldn't confirm your edit yet, so the previous text is still " +
 					"shown. Retry will check this edit without sending another.",
 			)
 		}
 	}
 
+	/**
+	 * Settle an edit that current nodes prove can no longer be included (Issue
+	 * #56) — the case transaction status cannot answer once its history ages out.
+	 *
+	 * The proof says nothing about whether it already was included, so the
+	 * object is read again after it, from a node at or past the proving block.
+	 * These exact words there is the edit.
+	 * Different words free the comment without touching them and without
+	 * claiming the edit never landed: it may have landed and been replaced since,
+	 * and either way it cannot arrive later. An unreadable comment changes
+	 * nothing.
+	 */
+	private fun cannotLand(
+		account: String,
+		target: SnapReplyTarget,
+		attempt: SnapWriteGuards.EditAttempt,
+	): Outcome? {
+		val prepared = attempt.prepared
+		val final = runCatching { hive.irreversiblyPast(prepared.expirationEpochSec) }.getOrNull() ?: return null
+		val now = runCatching { hive.readComment(target.author, target.permlink) }.getOrNull() ?: return null
+		if (!now.author.equals(target.author, ignoreCase = true) || now.permlink != target.permlink) return null
+		// Only a node at or past the proving block describes the chain the proof
+		// is about; an earlier answer can neither confirm nor free the edit.
+		if ((now.headEpochSec ?: return null) < final) return null
+		if (now.body == attempt.body) return edited(account, target, attempt, prepared.txId)
+		guards.release(account, target, attempt.id)
+		return Outcome.Failed(
+			"RustedWax couldn't confirm your edit, and it can no longer arrive. " +
+				"Hive shows different words now, so those stay. You can save your edit again.",
+		)
+	}
+
 	private fun edited(
 		account: String,
 		target: SnapReplyTarget,
-		kind: SnapEditKind,
-		newText: String,
-		body: String,
+		attempt: SnapWriteGuards.EditAttempt,
 		txId: String,
 	): Outcome.Edited {
-		unsettled.remove(attemptKey(account, target))
-		rememberBody(account, target, kind, body)
-		return Outcome.Edited(target.contentId, newText, txId)
+		// Only the caller that frees this attempt updates the stored body: a late
+		// completion from an earlier Activity, settling an attempt already
+		// settled, must not write its older words over a newer edit (Issue #56).
+		// The repair runs before the saved attempt is removed, so a process that
+		// dies in between settles it again rather than losing the repair.
+		guards.finish(account, target, attempt.id) {
+			rememberBody(account, target, attempt.kind, attempt.body)
+		}
+		return Outcome.Edited(target.contentId, attempt.text, txId)
 	}
 
 	/**
@@ -289,6 +342,11 @@ class SnapEditor(
 
 	companion object {
 		const val NOT_AUTHOR = "Only the author can edit this."
+		const val DELETE_UNSETTLED = "This one's deletion isn't settled yet, so your edit wasn't saved."
+		const val BUSY = "RustedWax is already working on this, so your edit wasn't saved. Try again in a moment."
+		const val LOCKED =
+			"RustedWax couldn't read what it saved about an earlier change to this, so it won't change it here."
+		const val NOT_SAVED = "RustedWax couldn't save this edit safely on your phone, so it wasn't sent."
 
 		/**
 		 * Why this text cannot replace a Snap's or reply's words, or null.

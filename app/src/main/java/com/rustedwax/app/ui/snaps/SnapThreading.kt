@@ -762,6 +762,8 @@ class SnapThreadController internal constructor(
 		// Never alongside a deletion: an edit landing after a delete would
 		// recreate the comment under the same permlink.
 		if (deletingState != null) return
+		// Nor after one whose outcome is still unproven, though its dialog is gone.
+		if (deleteUnsettled(accountId(), target)) return
 		if (!canEdit(target.author)) return
 		if (isEditSettling(target)) return
 		// A failed edit comes back exactly as it was saved — words, kept images
@@ -796,6 +798,14 @@ class SnapThreadController internal constructor(
 		editingState?.let { editImagesPort()?.clear(editImagesKey(it.target)) }
 		clearEdit()
 	}
+
+	/**
+	 * Whether [who] has a delete of [target] sent and not yet settled. An edit
+	 * landing after it would recreate the comment under the same permlink, so
+	 * nothing is signed as an edit until the deleter has settled it (Issue #56).
+	 */
+	private fun deleteUnsettled(who: String, target: SnapReplyTarget): Boolean =
+		SnapEditKind.entries.any { deleter(it)?.hasUnsettled(who, target) == true }
 
 	private fun clearEdit() {
 		editingState = null
@@ -1088,6 +1098,12 @@ class SnapThreadController internal constructor(
 		// edit stays with the account that made it, to retry as that account.
 		if (accountId() != who) {
 			failEdit(key, "You switched Hive accounts, so your edit wasn't saved.", Phase.FAILED)
+			return
+		}
+		// The last gate before signing, so a retry or a late upload cannot
+		// get past a delete that started after the edit bar was opened.
+		if (deleteUnsettled(who, pending.edit.target)) {
+			failEdit(key, "This one's deletion isn't settled yet, so your edit wasn't saved.", Phase.FAILED)
 			return
 		}
 		val edit = pending.edit

@@ -362,6 +362,72 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 		return answers
 	}
 
+	/**
+	 * One comment, read from a node that has **caught up** at the moment of the
+	 * read — the read an edit is signed from and settled against (Issue #56).
+	 *
+	 * [readCommentState] accepts any node within [MAX_NODE_LAG_SEC], which is
+	 * right for deciding whether something may be deleted and wrong for copying
+	 * an object back verbatim: a node 45 seconds behind still shows a comment
+	 * another frontend has just changed or deleted, and an edit built from it
+	 * would overwrite the newer words or recreate the deleted permlink.
+	 *
+	 * So the moment the read starts is fixed first, by this device's clock, and
+	 * every node's head is read after it. The answer must come from one node
+	 * whose own head has reached that start and is within a block of the newest
+	 * current head — head and content from the same node, as everywhere else in
+	 * this class. Lagging nodes are skipped, never used as a fallback, and the
+	 * start is never lowered because every node trails; with no such node there
+	 * is one short wait and one more try, then null. Heads outside
+	 * [MAX_NODE_LAG_SEC] of the clock are not evidence at all. Narrowed to this
+	 * read: nothing else changes its freshness rule.
+	 */
+	fun readCommentCaughtUp(author: String, permlink: String): HiveCommentRead? {
+		val params = HiveCommentStates.params(author, permlink)
+		return readCommentCaughtUpAcross(
+			author = author,
+			permlink = permlink,
+			headOf = { node -> nodeHeadEpochSec(node) },
+			commentsFrom = { node ->
+				val response = post(node, "database_api.find_comments", params)
+				if (response.optJSONObject("error") != null) null else response.optJSONObject("result")
+			},
+		)
+	}
+
+	internal fun readCommentCaughtUpAcross(
+		author: String,
+		permlink: String,
+		headOf: (String) -> Long?,
+		commentsFrom: (String) -> JSONObject?,
+		nowEpochSec: () -> Long = { System.currentTimeMillis() / 1000 },
+		sleep: (Long) -> Unit = { Thread.sleep(it) },
+	): HiveCommentRead? {
+		// Fixed before any node is asked, and never lowered: a node that has not
+		// reached the moment this read began cannot have seen a change made just
+		// before it, however far behind every other node is too.
+		val start = nowEpochSec()
+		repeat(CAUGHT_UP_ATTEMPTS) { attempt ->
+			if (attempt > 0) sleep(CAUGHT_UP_RETRY_MS)
+			val now = nowEpochSec()
+			// Every head first, so a lagging node cannot become the fence by
+			// being the only one whose comment answer arrived.
+			val heads = nodes.associateWith { node ->
+				runCatching { headOf(node) }.getOrNull()
+					?.takeIf { it in (now - MAX_NODE_LAG_SEC)..(now + MAX_NODE_LAG_SEC) }
+			}
+			val fence = heads.values.filterNotNull().maxOrNull() ?: return@repeat
+			for (node in nodes) {
+				val head = heads[node] ?: continue
+				if (head < start || head < fence - BLOCK_SECONDS) continue
+				val comments = runCatching { commentsFrom(node) }.getOrNull()
+				HiveCommentStates.parse(comments, author, permlink, head, node.substringAfter("//"))
+					?.let { return it }
+			}
+		}
+		return null
+	}
+
 	private fun nodeHeadEpochSec(node: String): Long? = runCatching {
 		val result = post(node, "condenser_api.get_dynamic_global_properties", JSONArray())
 			.optJSONObject("result") ?: return null
@@ -481,6 +547,79 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 				expirationEpochSec = expirationEpochSec,
 			),
 		)
+
+	/**
+	 * The timestamp of the last irreversible block, when at least
+	 * [MIN_FINALITY_CONFIRMATIONS] current nodes each show it is **after**
+	 * [expirationEpochSec]; otherwise null (Issue #56).
+	 *
+	 * A transaction is applied only while its expiration is ahead of the chain,
+	 * so once an irreversible block is timestamped after it, every block that
+	 * could still carry it is already final: it **can no longer be included**.
+	 * That is all this proves. It says nothing about whether it was included
+	 * earlier, so it is not [TransactionEvidence.ABSENT], and callers decide
+	 * that from the object itself. Unlike `transaction_status_api`, whose
+	 * history nodes keep for about two days, it never ages out.
+	 *
+	 * Per node, from one properties answer: the node must be current, its
+	 * irreversible block number a positive integer no higher than its head, and
+	 * that block's header must name its predecessor and carry a timestamp no
+	 * later than the head's. Any node that fails one of those is skipped, never
+	 * counted. Chain time throughout; the device clock only judges freshness.
+	 */
+	fun irreversiblyPast(expirationEpochSec: Long): Long? = irreversiblyPastAcross(
+		expirationEpochSec = expirationEpochSec,
+		propertiesOf = { node ->
+			post(node, "condenser_api.get_dynamic_global_properties", JSONArray()).optJSONObject("result")
+		},
+		headerOf = { node, blockNum ->
+			post(node, "block_api.get_block_header", JSONObject().put("block_num", blockNum))
+				.optJSONObject("result")
+				?.optJSONObject("header")
+		},
+	)
+
+	internal fun irreversiblyPastAcross(
+		expirationEpochSec: Long,
+		propertiesOf: (String) -> JSONObject?,
+		headerOf: (String, Long) -> JSONObject?,
+		nowEpochSec: () -> Long = { System.currentTimeMillis() / 1000 },
+	): Long? {
+		// One proof per endpoint: the same node listed twice is not a second witness.
+		val proofs = mutableMapOf<String, Long>()
+		for (node in nodes) {
+			val endpoint = node.substringAfter("//").trimEnd('/').lowercase()
+			if (endpoint in proofs) continue
+			runCatching { irreversibleTime(node, propertiesOf, headerOf, nowEpochSec) }.getOrNull()
+				?.takeIf { it > expirationEpochSec }
+				?.let { proofs[endpoint] = it }
+		}
+		return if (proofs.size >= MIN_FINALITY_CONFIRMATIONS) proofs.values.min() else null
+	}
+
+	/** One node's last irreversible block time, or null when it is not trustworthy evidence. */
+	private fun irreversibleTime(
+		node: String,
+		propertiesOf: (String) -> JSONObject?,
+		headerOf: (String, Long) -> JSONObject?,
+		nowEpochSec: () -> Long,
+	): Long? {
+		val props = propertiesOf(node) ?: return null
+		val headTime = ChainTimes.epochSec(props.opt("time") as? String ?: return null) ?: return null
+		val now = nowEpochSec()
+		if (headTime !in (now - MAX_NODE_LAG_SEC)..(now + MAX_NODE_LAG_SEC)) return null
+		val head = HiveCommentStates.integer(props.opt("head_block_number")) ?: return null
+		val irreversible = HiveCommentStates.integer(props.opt("last_irreversible_block_num"))
+			?.takeIf { it in 1..head }
+			?: return null
+		val header = headerOf(node, irreversible) ?: return null
+		// A block id is 20 bytes as 40 lowercase hex digits, beginning with its
+		// number: the header must be whole, well formed and the one asked for.
+		val previous = header.opt("previous") as? String ?: return null
+		if (!BLOCK_ID.matches(previous) || previous.substring(0, 8).toLong(16) != irreversible - 1) return null
+		val blockTime = ChainTimes.epochSec(header.opt("timestamp") as? String ?: return null) ?: return null
+		return blockTime.takeIf { it <= headTime }
+	}
 
 	internal fun evidenceFromStatuses(statuses: List<String>): TransactionEvidence {
 		return when (strongestTransactionStatus(statuses)) {
@@ -706,6 +845,12 @@ class HiveRpc(private val nodes: List<String> = DEFAULT_NODES) {
 		private const val EXPIRED_IRREVERSIBLE_STATUS = "expired_irreversible"
 		private const val UNAVAILABLE_STATUS = "__unavailable__"
 		private const val MIN_ABSENCE_CONFIRMATIONS = 2
+		private const val MIN_FINALITY_CONFIRMATIONS = 2
+		private val BLOCK_ID = Regex("[0-9a-f]{40}")
+
+		private const val BLOCK_SECONDS = 3L
+		private const val CAUGHT_UP_ATTEMPTS = 2
+		private const val CAUGHT_UP_RETRY_MS = 3_000L
 
 		private val PLACEHOLDER = Regex("""\$\{\w+\}""")
 

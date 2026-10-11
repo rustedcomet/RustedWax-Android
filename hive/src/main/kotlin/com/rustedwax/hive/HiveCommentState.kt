@@ -32,6 +32,14 @@ data class HiveCommentState(
 	val cashoutEpochSec: Long?,
 	/** Head block time of the node that answered, for comparing [cashoutEpochSec]. */
 	val headEpochSec: Long,
+	/**
+	 * The object's own words, read in the same answer from the same current
+	 * node (Issue #56). What an edit carries forward and settles against; null
+	 * when that answer did not carry them as strings.
+	 */
+	val title: String? = null,
+	val body: String? = null,
+	val jsonMetadata: String? = null,
 ) {
 	/** Payout still ahead of this node's head block: the cashout object exists. */
 	val payoutPending: Boolean
@@ -44,8 +52,12 @@ sealed interface HiveCommentRead {
 
 	data class Present(val state: HiveCommentState, override val node: String) : HiveCommentRead
 
-	/** A current node holds no comment at that `author/permlink`. */
-	data class Absent(override val node: String) : HiveCommentRead
+	/**
+	 * A current node holds no comment at that `author/permlink`. [headEpochSec]
+	 * is that node's head block time when this answer was read, so absence can
+	 * be fenced against a later chain point (Issue #56).
+	 */
+	data class Absent(override val node: String, val headEpochSec: Long? = null) : HiveCommentRead
 }
 
 internal object HiveCommentStates {
@@ -69,7 +81,7 @@ internal object HiveCommentStates {
 		node: String,
 	): HiveCommentRead? {
 		val comments = result?.optJSONArray("comments") ?: return null
-		if (comments.length() == 0) return HiveCommentRead.Absent(node)
+		if (comments.length() == 0) return HiveCommentRead.Absent(node, headEpochSec)
 		if (comments.length() != 1) return null
 		val c = comments.optJSONObject(0) ?: return null
 		fun str(name: String): String? = c.opt(name) as? String
@@ -91,6 +103,9 @@ internal object HiveCommentStates {
 				netRshares = net,
 				cashoutEpochSec = if (cashout == NO_CASHOUT) null else ChainTimes.epochSec(cashout),
 				headEpochSec = headEpochSec,
+				title = str("title"),
+				body = str("body"),
+				jsonMetadata = str("json_metadata"),
 			),
 			node,
 		)
