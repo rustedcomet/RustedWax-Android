@@ -126,7 +126,11 @@ callback Android might have missed.
 
 History and Not logged are scoped to the connected Hive account. History cards
 show full-width media artwork rather than transaction IDs; Now cards show
-full-width artwork and distinct YouTube / YouTube Music badges.
+full-width artwork and distinct YouTube / YouTube Music badges. Until a Now
+card's video is identified (or while its thumbnail cannot be fetched), it shows
+the picture the player itself attached to that listen, when the player provides
+one — Brave and YouTube Music do; the YouTube app does not. That picture is
+display only: it never identifies the video or affects a scrobble.
 
 Private mode is not exposed in current settings. Stored privacy preferences
 and the compatible encrypted envelope remain implemented; see

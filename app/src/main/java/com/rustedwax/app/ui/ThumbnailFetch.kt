@@ -45,6 +45,14 @@ internal object ThumbnailFetch {
 	private const val HTTP_NOT_FOUND = 404
 	private const val HTTP_GONE = 410
 
+	/**
+	 * How long a surface that stays on screen waits before asking again after
+	 * a transient miss. Doubles from 5 s to a 2 min ceiling, so a card left
+	 * open through a long outage costs one attempt every two minutes.
+	 */
+	fun retryDelayMs(attempt: Int): Long =
+		(5_000L shl attempt.coerceIn(0, 5)).coerceAtMost(120_000L)
+
 	fun classify(status: Int, byteCount: Int): Fetched = when {
 		status == HTTP_OK && byteCount > MAX_BYTES -> Fetched.Unavailable
 		status == HTTP_OK && byteCount < MIN_BYTES -> Fetched.Absent
