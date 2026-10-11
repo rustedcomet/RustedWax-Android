@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Issue #4: the status pill, amber. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+	<solid android:color="@color/status_amber_wash" />
+	<stroke android:width="1dp" android:color="@color/status_amber" />
+	<corners android:radius="999dp" />
+</shape>

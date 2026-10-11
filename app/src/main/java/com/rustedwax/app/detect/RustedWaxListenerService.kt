@@ -5,10 +5,12 @@ import android.os.PowerManager
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
+import com.rustedwax.app.MainActivity
 import com.rustedwax.core.SourceSessionId
 import com.rustedwax.app.scrobble.ConnectivityRetryTrigger
 import com.rustedwax.app.scrobble.FinalizationRuntime
 import com.rustedwax.app.scrobble.FinalizationTrigger
+import com.rustedwax.app.status.ScrobbleStatusNotification
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -35,6 +37,18 @@ class RustedWaxListenerService : NotificationListenerService() {
 	 * so covering both boundaries costs nothing when both happen.
 	 */
 	private var connectivityRetry: ConnectivityRetryTrigger? = null
+
+	/**
+	 * The scrobbling-status card (#4). Bound to the listener, like the probe it
+	 * reads: a card the listener can no longer keep true is taken down rather
+	 * than left to go stale.
+	 */
+	private var statusCard: ScrobbleStatusNotification? = null
+
+	private fun releaseStatusCard() {
+		statusCard?.stop()
+		statusCard = null
+	}
 
 	/** Both teardown callbacks, and the rebuild in [onListenerConnected], end here. */
 	private fun releaseConnectivityRetry() {
@@ -98,6 +112,10 @@ class RustedWaxListenerService : NotificationListenerService() {
 		// usually ends at some other one, with the app nowhere near the screen.
 		releaseConnectivityRetry()
 		connectivityRetry = ConnectivityRetryTrigger().also { it.register(applicationContext) }
+
+		releaseStatusCard()
+		statusCard = ScrobbleStatusNotification(applicationContext, MainActivity::class.java)
+			.also { it.start() }
 	}
 
 	override fun onListenerDisconnected() {
@@ -105,6 +123,7 @@ class RustedWaxListenerService : NotificationListenerService() {
 		EventLog.append("listener", "disconnected")
 		NativeSourceSwitches.invalidateAll("listener disconnected")
 		releaseConnectivityRetry()
+		releaseStatusCard()
 		scope?.cancel()
 		scope = null
 		// System teardown, not a user Stop — a track in flight really is ending,
@@ -127,6 +146,7 @@ class RustedWaxListenerService : NotificationListenerService() {
 	 */
 	override fun onDestroy() {
 		releaseConnectivityRetry()
+		releaseStatusCard()
 		super.onDestroy()
 	}
 
@@ -171,6 +191,7 @@ class RustedWaxListenerService : NotificationListenerService() {
 			displayInteractive = ::displayInteractive,
 		).also { p ->
 			p.onTrackFinalized = { snapshot ->
+				statusCard?.onTrackFinalizing(snapshot)
 				if (FinalizationRuntime.isReady) {
 					FinalizationRuntime.finalizeTrack.execute(
 						FinalizedTrack.from(snapshot),

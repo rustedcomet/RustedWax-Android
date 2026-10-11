@@ -17,7 +17,28 @@ internal data class NowCard(
 	/** The final category — `Song`, `Video`, `Movie`, `Episode`, `Podcast`. */
 	val category: String?,
 	val status: String?,
+	/** Which of [status]'s lines this is, for surfaces that word it differently. */
+	val phase: Phase? = null,
 ) {
+
+	/**
+	 * The status line as a value rather than as words.
+	 *
+	 * The scrobbling notification (#4) states the same thing in less room, and a
+	 * second copy of the ordering below would be a second set of rules to drift.
+	 * Same order, same meaning: nothing here is a scrobble decision, and
+	 * [THRESHOLD_REACHED] is still not "ready".
+	 */
+	enum class Phase {
+		ADVERTISEMENT,
+		READING,
+		PAUSED,
+		IDENTIFYING,
+		NO_LENGTH,
+		AUTO_SCROBBLE_OFF,
+		THRESHOLD_REACHED,
+		BELOW_THRESHOLD,
+	}
 
 	/**
 	 * The app the sound is coming from, named the way its icon is labelled.
@@ -114,6 +135,14 @@ internal data class NowCard(
 			autoScrobble: Boolean,
 		): NowCard {
 			val percent = session.percentPlayed?.coerceIn(0.0, 1.0)
+			val phase = phase(
+				session = session,
+				durationMs = durationMs,
+				identified = identified,
+				percent = percent,
+				thresholdPercent = thresholdPercent,
+				autoScrobble = autoScrobble,
+			)
 			return NowCard(
 				platform = platformFor(session.packageName),
 				channel = session.artist?.takeIf { it.isNotBlank() },
@@ -122,15 +151,35 @@ internal data class NowCard(
 				progress = percent?.toFloat(),
 				percentText = percent?.let { "${(it * 100).roundToInt()}%" },
 				category = categoryLabel(kind),
-				status = status(
-					session = session,
-					durationMs = durationMs,
-					identified = identified,
-					percent = percent,
-					thresholdPercent = thresholdPercent,
-					autoScrobble = autoScrobble,
-				),
+				status = status(phase, thresholdPercent),
+				phase = phase,
 			)
+		}
+
+		fun phase(
+			session: SessionSnapshot,
+			durationMs: Long?,
+			identified: Boolean,
+			percent: Double?,
+			thresholdPercent: Int,
+			autoScrobble: Boolean,
+		): Phase = when {
+			session.explicitAdSignal != null -> Phase.ADVERTISEMENT
+			session.title.isNullOrBlank() -> Phase.READING
+			// A Short playing in picture-in-picture publishes no position, so the
+			// transport cannot say "playing" for it and this branch used to claim
+			// it was paused while inference credited it a second per second
+			// (#12). Narrowed rather than relabelled: the actively inferred case
+			// falls through to the ordinary statuses below, which still say what
+			// would stop this listen counting, and a real PiP pause — where the
+			// authorization is withdrawn and nothing is credited — still lands
+			// here.
+			!session.isPlaying && !session.pipInferredPlaying -> Phase.PAUSED
+			!identified -> Phase.IDENTIFYING
+			durationMs == null -> Phase.NO_LENGTH
+			!autoScrobble -> Phase.AUTO_SCROBBLE_OFF
+			(percent ?: 0.0) * 100 >= thresholdPercent -> Phase.THRESHOLD_REACHED
+			else -> Phase.BELOW_THRESHOLD
 		}
 
 		/**
@@ -143,31 +192,15 @@ internal data class NowCard(
 		 * not called "ready": minimum duration, Shorts proof and disablement,
 		 * privacy, mute and dedup remain finalization-owned checks.
 		 */
-		private fun status(
-			session: SessionSnapshot,
-			durationMs: Long?,
-			identified: Boolean,
-			percent: Double?,
-			thresholdPercent: Int,
-			autoScrobble: Boolean,
-		): String = when {
-			session.explicitAdSignal != null -> "Advertisement — not counted"
-			session.title.isNullOrBlank() -> "Reading what's playing…"
-			// A Short playing in picture-in-picture publishes no position, so the
-			// transport cannot say "playing" for it and this branch used to claim
-			// it was paused while inference credited it a second per second
-			// (#12). Narrowed rather than relabelled: the actively inferred case
-			// falls through to the ordinary statuses below, which still say what
-			// would stop this listen counting, and a real PiP pause — where the
-			// authorization is withdrawn and nothing is credited — still lands
-			// here.
-			!session.isPlaying && !session.pipInferredPlaying -> "Paused"
-			!identified -> "Identifying video…"
-			durationMs == null -> "Waiting for the length…"
-			!autoScrobble -> "Automatic scrobbling is off"
-			(percent ?: 0.0) * 100 >= thresholdPercent ->
-				"Threshold reached — final checks run when this ends"
-			else -> "Scrobbles at $thresholdPercent% played"
+		private fun status(phase: Phase, thresholdPercent: Int): String = when (phase) {
+			Phase.ADVERTISEMENT -> "Advertisement — not counted"
+			Phase.READING -> "Reading what's playing…"
+			Phase.PAUSED -> "Paused"
+			Phase.IDENTIFYING -> "Identifying video…"
+			Phase.NO_LENGTH -> "Waiting for the length…"
+			Phase.AUTO_SCROBBLE_OFF -> "Automatic scrobbling is off"
+			Phase.THRESHOLD_REACHED -> "Threshold reached — final checks run when this ends"
+			Phase.BELOW_THRESHOLD -> "Scrobbles at $thresholdPercent% played"
 		}
 	}
 }

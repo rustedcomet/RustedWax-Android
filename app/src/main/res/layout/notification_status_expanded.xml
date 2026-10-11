@@ -1,0 +1,230 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+	Issue #4, expanded, after notification_mockup: artwork left; title, artist,
+	source, credited time, a slim hot-pink bar and one prominent status pill
+	right; then the tap hint. The system draws the outer card and header —
+	surface, corners and height are One UI's, not this layout's.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+	xmlns:tools="http://schemas.android.com/tools"
+	android:layout_width="match_parent"
+	android:layout_height="wrap_content"
+	android:orientation="vertical">
+
+	<!--
+		Idle: one line and a pink dot. Kept small on purpose; the system header
+		already carries the logo, so a second one here only took room.
+	-->
+	<LinearLayout
+		android:id="@+id/idle_block"
+		android:layout_width="match_parent"
+		android:layout_height="wrap_content"
+		android:orientation="vertical"
+		android:paddingTop="2dp"
+		android:paddingBottom="6dp"
+		android:visibility="gone">
+
+		<TextView
+			android:id="@+id/idle_title"
+			android:layout_width="wrap_content"
+			android:layout_height="wrap_content"
+			android:drawablePadding="4dp"
+			android:drawableStart="@drawable/ic_status_dot"
+			android:drawableTint="@color/status_pink"
+			android:fontFamily="sans-serif-medium"
+			android:gravity="center_vertical"
+			android:maxLines="1"
+			android:text="@string/scrobble_status_active"
+			android:textColor="@color/status_text_primary"
+			android:textSize="15sp" />
+
+		<TextView
+			android:id="@+id/idle_text"
+			android:layout_width="wrap_content"
+			android:layout_height="wrap_content"
+			android:layout_marginTop="2dp"
+			android:maxLines="1"
+			android:text="@string/scrobble_status_waiting"
+			android:textColor="@color/status_text_secondary"
+			android:textSize="13sp" />
+	</LinearLayout>
+
+	<LinearLayout
+		android:id="@+id/track_block"
+		android:layout_width="match_parent"
+		android:layout_height="wrap_content"
+		android:orientation="horizontal"
+		android:paddingTop="4dp">
+
+		<ImageView
+			android:id="@+id/art"
+			android:layout_width="104dp"
+			android:layout_height="104dp"
+			android:importantForAccessibility="no"
+			android:scaleType="centerCrop" />
+
+		<LinearLayout
+			android:layout_width="0dp"
+			android:layout_height="wrap_content"
+			android:layout_marginStart="14dp"
+			android:layout_weight="1"
+			android:orientation="vertical">
+
+			<TextView
+				android:id="@+id/title"
+				android:layout_width="match_parent"
+				android:layout_height="wrap_content"
+				android:ellipsize="end"
+				android:fontFamily="sans-serif-medium"
+				android:maxLines="2"
+				android:textColor="@color/status_text_primary"
+				android:textSize="16sp" />
+
+			<TextView
+				android:id="@+id/artist"
+				android:layout_width="match_parent"
+				android:layout_height="wrap_content"
+				android:ellipsize="end"
+				android:maxLines="1"
+				android:textColor="@color/status_text_secondary"
+				android:textSize="14sp" />
+
+			<TextView
+				android:id="@+id/source"
+				android:layout_width="match_parent"
+				android:layout_height="wrap_content"
+				android:layout_marginTop="3dp"
+				android:drawablePadding="5dp"
+				android:drawableStart="@drawable/ic_status_source"
+				android:drawableTint="@color/status_text_secondary"
+				android:ellipsize="end"
+				android:gravity="center_vertical"
+				android:maxLines="1"
+				android:textColor="@color/status_text_secondary"
+				android:textSize="12sp" />
+
+			<TextView
+				android:id="@+id/credited"
+				android:layout_width="match_parent"
+				android:layout_height="wrap_content"
+				android:layout_marginTop="6dp"
+				android:maxLines="1"
+				android:textColor="@color/status_text_primary"
+				android:textSize="12sp" />
+
+			<ProgressBar
+				android:id="@+id/progress"
+				style="?android:attr/progressBarStyleHorizontal"
+				android:layout_width="match_parent"
+				android:layout_height="5dp"
+				android:layout_marginTop="4dp"
+				android:max="1000"
+				android:progressDrawable="@drawable/status_progress" />
+
+			<LinearLayout
+				android:layout_width="match_parent"
+				android:layout_height="wrap_content"
+				android:layout_marginTop="8dp"
+				android:orientation="vertical">
+
+				<!--
+					Not a compound drawable: the icon is re-tinted per state, and
+					RemoteViews cannot set a compound drawable's tint before API 31.
+				-->
+				<LinearLayout
+					android:id="@+id/pill"
+					tools:ignore="UseCompoundDrawables"
+					android:layout_width="wrap_content"
+					android:layout_height="wrap_content"
+					android:background="@drawable/bg_status_pill_pink"
+					android:gravity="center_vertical"
+					android:orientation="horizontal"
+					android:paddingStart="9dp"
+					android:paddingTop="4dp"
+					android:paddingEnd="11dp"
+					android:paddingBottom="4dp">
+
+					<ImageView
+						android:id="@+id/pill_icon"
+						android:layout_width="14dp"
+						android:layout_height="14dp"
+						android:layout_marginEnd="6dp"
+						android:importantForAccessibility="no"
+						android:src="@drawable/ic_status_dot" />
+
+					<TextView
+						android:id="@+id/pill_text"
+						android:layout_width="wrap_content"
+						android:layout_height="wrap_content"
+						android:ellipsize="end"
+						android:fontFamily="sans-serif-medium"
+						android:maxLines="1"
+						android:textSize="12sp" />
+				</LinearLayout>
+
+				<!-- Under the pill, not beside it: a long pill left it one letter wide. -->
+				<TextView
+					android:id="@+id/pill_detail"
+					android:layout_width="match_parent"
+					android:layout_height="wrap_content"
+					android:layout_marginStart="4dp"
+					android:layout_marginTop="3dp"
+					android:ellipsize="end"
+					android:maxLines="1"
+					android:textColor="@color/status_text_secondary"
+					android:textSize="11sp" />
+			</LinearLayout>
+		</LinearLayout>
+	</LinearLayout>
+
+	<TextView
+		android:id="@+id/footnote"
+		android:layout_width="match_parent"
+		android:layout_height="wrap_content"
+		android:layout_marginTop="8dp"
+		android:ellipsize="end"
+		android:maxLines="1"
+		android:textColor="@color/status_text_secondary"
+		android:textSize="12sp"
+		android:visibility="gone" />
+
+	<FrameLayout
+		android:id="@+id/footer_divider"
+		android:layout_width="match_parent"
+		android:layout_height="1dp"
+		android:layout_marginTop="10dp"
+		android:background="@color/status_divider" />
+
+	<LinearLayout
+		android:id="@+id/footer"
+		android:layout_width="match_parent"
+		android:layout_height="wrap_content"
+		android:gravity="center_vertical"
+		android:orientation="horizontal"
+		android:paddingTop="8dp"
+		android:paddingBottom="2dp">
+
+		<ImageView
+			android:layout_width="15dp"
+			android:layout_height="15dp"
+			android:layout_marginEnd="8dp"
+			android:importantForAccessibility="no"
+			android:src="@drawable/ic_status_open"
+			android:tint="@color/status_text_secondary" />
+
+		<TextView
+			android:layout_width="0dp"
+			android:layout_height="wrap_content"
+			android:layout_weight="1"
+			android:text="@string/scrobble_status_open_now"
+			android:textColor="@color/status_text_secondary"
+			android:textSize="12sp" />
+
+		<ImageView
+			android:layout_width="15dp"
+			android:layout_height="15dp"
+			android:importantForAccessibility="no"
+			android:src="@drawable/ic_status_chevron"
+			android:tint="@color/status_text_secondary" />
+	</LinearLayout>
+</LinearLayout>

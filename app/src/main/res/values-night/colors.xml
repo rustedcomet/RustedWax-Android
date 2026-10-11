@@ -1,4 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 	<color name="window_background">#060508</color>
+
+	<color name="status_text_primary">#F5E3CB</color>
+	<color name="status_text_secondary">#A5A3A4</color>
+	<color name="status_pink">#FF5C8F</color>
+	<color name="status_pink_wash">#26FF5C8F</color>
+	<color name="status_green">#4CC17E</color>
+	<color name="status_green_wash">#1F4CC17E</color>
+	<color name="status_amber">#E9A24B</color>
+	<color name="status_amber_wash">#1FE9A24B</color>
+	<color name="status_red">#FF6B86</color>
+	<color name="status_red_wash">#1FFF6B86</color>
+	<color name="status_neutral">#A5A3A4</color>
+	<color name="status_neutral_wash">#1AFFFFFF</color>
+	<color name="status_track">#3A3438</color>
+	<color name="status_divider">#26FFFFFF</color>
 </resources>

@@ -1,6 +1,8 @@
 package com.rustedwax.app.scrobble
 
+import com.rustedwax.app.detect.EventLog
 import com.rustedwax.app.detect.SessionSnapshot
+import com.rustedwax.core.TrackInstanceId
 import com.rustedwax.hive.HiveScrobblePayload
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -41,19 +43,46 @@ sealed interface FinalizationOutcome {
 }
 
 /**
- * Told once per finalized track. A no-op in production.
+ * Told once per finalized track.
  *
  * The seam exists so the replay harness can watch the real engine's branches
- * instead of guessing at them from its side effects. Production installs
- * nothing and pays one virtual call per finalize.
+ * instead of guessing at them from its side effects. In production the only
+ * observer is the scrobbling-status card (#4), which records the verdict for
+ * that exact listen and returns; it is told after the decision and cannot
+ * change it.
  */
 fun interface FinalizationObserver {
 	fun onFinalizationOutcome(session: SessionSnapshot, outcome: FinalizationOutcome)
+
+	/**
+	 * The durable queue operation for one eligible payload was written, before
+	 * anything was signed. [account] is the account it will be signed for.
+	 *
+	 * Read-only correlation for the status card (#4): the only statement that a
+	 * given operation — and therefore the History row that names it — belongs
+	 * to a given listen. Nothing may infer that from a video id or an order.
+	 */
+	fun onOperationCreated(link: DispatchLink, operationId: String, account: String) {}
+
+	/** That payload's dispatch stopped before any operation existed; none ever will. */
+	fun onDispatchEnded(link: DispatchLink, reason: String) {}
 
 	companion object {
 		val None = FinalizationObserver { _, _ -> }
 	}
 }
+
+/**
+ * Which listen, and which of its eligible payloads, one dispatch carries.
+ *
+ * Passed alongside the payload and read by nothing on the transport path: it
+ * signs, queues and broadcasts nothing, and only the observer hears it back.
+ */
+data class DispatchLink(
+	val listen: TrackInstanceId,
+	val payloadIndex: Int,
+	val payloadCount: Int,
+)
 
 /**
  * One finalization's report, which can only be filed once.
@@ -118,7 +147,19 @@ internal class FinalizationReport(
 
 	private fun file(outcome: FinalizationOutcome) {
 		if (filed.compareAndSet(false, true)) {
-			observer.onFinalizationOutcome(session, outcome)
+			// Told, never asked. The verdict is already decided and filed; an
+			// observer that throws — the status card is one — must not unwind
+			// the path that dispatches it, which used to lose an eligible listen
+			// with its dedup claim still held. Contained like the transport's
+			// own observer callbacks.
+			runCatching { observer.onFinalizationOutcome(session, outcome) }
+				// The diagnostic is best-effort as well: `onFailure` runs outside the
+				// protected lambda, so a logger that throws here would escape anyway.
+				.onFailure { failure ->
+					runCatching {
+						EventLog.append("engine", "finalization observer failed: ${failure.javaClass.simpleName}")
+					}
+				}
 		}
 	}
 }
