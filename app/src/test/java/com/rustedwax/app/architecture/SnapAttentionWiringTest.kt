@@ -260,7 +260,6 @@ class SnapAttentionWiringTest {
 			manifest.contains("android.permission.POST_NOTIFICATIONS"),
 		)
 		listOf(
-			"RECEIVE_BOOT_COMPLETED",
 			"FOREGROUND_SERVICE",
 			"WAKE_LOCK",
 			"SCHEDULE_EXACT_ALARM",
@@ -271,6 +270,15 @@ class SnapAttentionWiringTest {
 				manifest.contains(it),
 			)
 		}
+		// Issue #42 Stage 2, owner-authorized: the background reply check is a
+		// persisted periodic job, and JobScheduler will not persist one without
+		// this permission. There is still no boot receiver; see
+		// SnapReplyBackgroundWiringTest.
+		assertEquals(
+			"the boot permission is declared once, for the persisted reply job",
+			1,
+			Regex("RECEIVE_BOOT_COMPLETED").findAll(manifest).count(),
+		)
 		// Issue #9 B1's one exception, owner-authorized: the scrobble queue's
 		// retry alarm. It belongs to scrobbling, not to Snaps, and is held to its
 		// own gate in QueueWakeupWiringTest. No other receiver may appear.
@@ -282,14 +290,19 @@ class SnapAttentionWiringTest {
 		)
 		// Issue #9 added one: the queue's retry job. It belongs to scrobbling,
 		// not to Snaps, and is held to its own gate in QueueWakeupWiringTest.
+		// Issue #42 Stage 2 added the background reply check's job.
 		assertEquals(
-			"the three services that were already there plus the queue retry job, and no other",
-			4,
+			"the three services that were already there, the queue retry job and the reply job, and no other",
+			5,
 			Regex("""<service""").findAll(manifest).count(),
 		)
 		assertTrue(
 			"the fourth service is the queue retry job",
 			manifest.contains(".scrobble.QueueRetryJobService"),
+		)
+		assertTrue(
+			"the fifth is the background reply check",
+			manifest.contains(".ui.snaps.SnapReplyJobService"),
 		)
 	}
 

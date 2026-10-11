@@ -44,7 +44,30 @@ internal class SnapReplyCheck(
 	private val checkpoints: SyncCheckpoints?,
 	private val nowMillis: () -> Long = { System.currentTimeMillis() },
 	private val sleep: (Long) -> Unit = { Thread.sleep(it) },
+	/**
+	 * Who else may be running a check. Process-wide by default (Issue #42 Stage
+	 * 2): the foreground check and the scheduled background one are separate
+	 * instances, and two runs at once would each read up to [MAX_ROOTS]
+	 * conversations before either had stamped the shared checkpoint.
+	 */
+	private val gate: Gate = Gate.PROCESS,
 ) {
+
+	/**
+	 * The state every instance in a process shares: whether a run is under way,
+	 * and each account's rotation as last advanced here. One per process in
+	 * production; tests hand each check its own.
+	 */
+	internal class Gate {
+		val running = AtomicBoolean(false)
+
+		/** The rotation as last advanced in this process, for when the checkpoint cannot be read. */
+		val remembered = java.util.concurrent.ConcurrentHashMap<String, Rotation>()
+
+		companion object {
+			val PROCESS = Gate()
+		}
+	}
 
 	sealed interface Outcome {
 		/** Nothing was read: nobody signed in, too soon, already running, or storage not ready. */
@@ -107,21 +130,22 @@ internal class SnapReplyCheck(
 		}
 	}
 
-	private val running = AtomicBoolean(false)
-
-	/** The rotation as last advanced in this process, for when the checkpoint cannot be read. */
-	private val remembered = java.util.concurrent.ConcurrentHashMap<String, Rotation>()
-
 	@WorkerThread
-	fun run(force: Boolean = false): Outcome {
+	/**
+	 * [minIntervalMillis] is how long after the last run, by anyone, this one
+	 * may read again. The foreground keeps [MIN_INTERVAL_MILLIS]; the scheduled
+	 * job passes a shorter one because the platform places its runs anywhere in
+	 * a window and two on-time runs can fall a little under a full period apart.
+	 */
+	fun run(force: Boolean = false, minIntervalMillis: Long = MIN_INTERVAL_MILLIS): Outcome {
 		val who = account()?.takeIf { it.isNotBlank() } ?: return Outcome.Skipped("no account")
 		val owner = LocalOwner.account(who) ?: return Outcome.Skipped("no account")
-		if (!running.compareAndSet(false, true)) return Outcome.Skipped("already running")
+		if (!gate.running.compareAndSet(false, true)) return Outcome.Skipped("already running")
 		try {
 			val now = nowMillis()
 			if (!force) {
 				val last = runCatching { checkpoints?.get(owner, SCOPE)?.value?.toLongOrNull() }.getOrNull()
-				if (last != null && now - last in 0 until MIN_INTERVAL_MILLIS) return Outcome.Skipped("too soon")
+				if (last != null && now - last in 0 until minIntervalMillis) return Outcome.Skipped("too soon")
 			}
 			// A cold process starts the notice store asynchronously. Waiting a
 			// moment is cheaper than spending network reads that cannot be recorded.
@@ -198,7 +222,7 @@ internal class SnapReplyCheck(
 			}
 			return Outcome.Checked(who, read, announced, quiet, complete = failures == 0)
 		} finally {
-			running.set(false)
+			gate.running.set(false)
 		}
 	}
 
@@ -208,12 +232,12 @@ internal class SnapReplyCheck(
 	private fun loadRotation(owner: String): Rotation =
 		runCatching { checkpoints?.get(owner, ROTATION_SCOPE)?.value }.getOrNull()
 			?.let { Rotation.decode(it) }
-			?: remembered[owner]
+			?: gate.remembered[owner]
 			?: Rotation()
 
 	/** Memory first, so a checkpoint that will not take the write still cannot move the walk backwards in this process. */
 	private fun saveRotation(owner: String, rotation: Rotation, now: Long) {
-		remembered[owner] = rotation
+		gate.remembered[owner] = rotation
 		runCatching { checkpoints?.put(owner, ROTATION_SCOPE, rotation.encode(), now) }
 	}
 

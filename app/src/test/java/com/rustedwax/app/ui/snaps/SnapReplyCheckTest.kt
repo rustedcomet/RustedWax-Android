@@ -116,6 +116,8 @@ class SnapReplyCheckTest {
 		shade: Shade,
 		roots: List<SnapReplyTarget> = listOf(root),
 		checkpoints: SyncCheckpoints? = null,
+		// A new check is a new process unless a test says otherwise.
+		gate: SnapReplyCheck.Gate = SnapReplyCheck.Gate(),
 	) = SnapReplyCheck(
 		account = { signedIn },
 		roots = { rows(roots) },
@@ -126,6 +128,7 @@ class SnapReplyCheckTest {
 		checkpoints = checkpoints,
 		nowMillis = { now },
 		sleep = { now += it },
+		gate = gate,
 	)
 
 	/** A first look at each conversation, which records what is there without announcing it. */
@@ -541,5 +544,124 @@ class SnapReplyCheckTest {
 		listOf("", "1|", "x|p||0", "1||a|0", "|p||0", "1|p||-1", "1|p|a").forEach {
 			assertEquals(it, null, SnapReplyCheck.Rotation.decode(it))
 		}
+	}
+
+	// Issue #42 Stage 2: the foreground check and the scheduled background one
+	// are two instances in one process, over one store and one checkpoint table.
+
+	@Test
+	fun `foreground and background never run at once in one process`() {
+		val store = Store().also { seeded(it, *(many + root).toTypedArray()) }
+		val chain = everyThreadEmpty()
+		chain.threads[root.contentId] = listOf(reply(bob, "r1", alice))
+		val shade = Shade()
+		val gate = SnapReplyCheck.Gate()
+		val checkpoints = Checkpoints()
+		val background = check(store, chain, shade, roots = many + root, checkpoints = checkpoints, gate = gate)
+		val foreground = check(store, chain, shade, roots = many + root, checkpoints = checkpoints, gate = gate)
+		val overlapping = mutableListOf<SnapReplyCheck.Outcome>()
+		chain.onRead = { if (overlapping.isEmpty()) overlapping += foreground.run(force = true) }
+
+		background.run()
+
+		assertEquals(SnapReplyCheck.Outcome.Skipped("already running"), overlapping.single())
+		assertEquals("one run's budget, not two", SnapReplyCheck.MAX_ROOTS, chain.reads.size)
+		assertEquals(listOf(alice to "bob/r1"), shade.posted)
+	}
+
+	@Test
+	fun `a background run soon after a foreground one reads nothing`() {
+		val store = Store().also { seeded(it, root) }
+		val chain = Chain(mutableMapOf(root.contentId to listOf(reply(bob, "r1", alice))))
+		val shade = Shade()
+		val gate = SnapReplyCheck.Gate()
+		val checkpoints = Checkpoints()
+
+		check(store, chain, shade, checkpoints = checkpoints, gate = gate).run()
+		now += SnapReplyCheck.MIN_INTERVAL_MILLIS / 2
+		val later = check(store, chain, shade, checkpoints = checkpoints, gate = gate).run()
+
+		assertEquals(SnapReplyCheck.Outcome.Skipped("too soon"), later)
+		assertEquals(1, chain.reads.size)
+		assertEquals(listOf(alice to "bob/r1"), shade.posted)
+	}
+
+	@Test
+	fun `the same reply found by both sides is announced once`() {
+		val store = Store().also { seeded(it, root) }
+		val chain = Chain(mutableMapOf(root.contentId to listOf(reply(bob, "r1", alice))))
+		val shade = Shade()
+
+		check(store, chain, shade).run(force = true)
+		// A second process's worth of state: another gate, the same durable rows.
+		check(Store(store.saved), chain, shade).run(force = true)
+
+		assertEquals(listOf(alice to "bob/r1"), shade.posted)
+	}
+
+	@Test
+	fun `a sign-out during a background run announces and records nothing`() {
+		val store = Store().also { seeded(it, root) }
+		val chain = Chain(mutableMapOf(root.contentId to listOf(reply(bob, "r1", alice))))
+		chain.onRead = { signedIn = null }
+		val shade = Shade()
+
+		val outcome = check(store, chain, shade).run()
+
+		assertEquals(SnapReplyCheck.Outcome.Skipped("account changed"), outcome)
+		assertEquals(emptyList<Pair<String, String>>(), shade.posted)
+		assertFalse(SnapNoticeCodec.noticeKey(alice, "bob/r1") in store.saved)
+	}
+
+	@Test
+	fun `a background run reads for whoever is signed in when it starts`() {
+		val bobRoot = SnapReplyTarget.of(bob, "rustedwax-snap-1000-bbbbbb")!!
+		val store = Store()
+		store.record(bob, bobRoot.contentId, emptyList(), 0L)
+		val chain = Chain(
+			mutableMapOf(
+				root.contentId to listOf(reply(carol, "for-alice", alice)),
+				bobRoot.contentId to listOf(reply(carol, "for-bob", bob, bobRoot)),
+			),
+		)
+		val shade = Shade()
+		signedIn = bob
+		val check = SnapReplyCheck(
+			account = { signedIn },
+			roots = { who -> rows(if (who == bob) listOf(bobRoot) else listOf(root), owner = who) },
+			reader = { chain },
+			store = store,
+			notifier = shade,
+			visible = { _, _ -> false },
+			checkpoints = null,
+			nowMillis = { now },
+			sleep = { now += it },
+			gate = SnapReplyCheck.Gate(),
+		)
+
+		check.run()
+
+		assertEquals(listOf(bobRoot.contentId), chain.reads)
+		assertEquals(listOf(bob to "carol/for-bob"), shade.posted)
+		assertTrue(store.saved.keys.none { SnapNoticeCodec.accountOf(it) == alice })
+	}
+
+	@Test
+	fun `a scheduled run may read sooner than the foreground, never on top of another run`() {
+		val checkpoints = Checkpoints()
+		val chain = Chain(mutableMapOf(root.contentId to emptyList()))
+		val gate = SnapReplyCheck.Gate()
+		val foreground = check(Store(), chain, Shade(), checkpoints = checkpoints, gate = gate)
+		val job = check(Store(), chain, Shade(), checkpoints = checkpoints, gate = gate)
+		val jobInterval = SnapReplySchedule.JOB_MIN_INTERVAL_MILLIS
+
+		job.run(minIntervalMillis = jobInterval)
+		now += 5_000L
+		assertEquals("the platform's catch-up run", SnapReplyCheck.Outcome.Skipped("too soon"), job.run(minIntervalMillis = jobInterval))
+		now += jobInterval - 5_000L
+		assertEquals("the foreground still waits a full period", SnapReplyCheck.Outcome.Skipped("too soon"), foreground.run())
+		assertTrue(job.run(minIntervalMillis = jobInterval) is SnapReplyCheck.Outcome.Checked)
+
+		assertEquals(2, chain.reads.size)
 	}
 }

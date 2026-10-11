@@ -66,11 +66,11 @@ import com.rustedwax.app.snaps.HiveSnapLikePort
 import com.rustedwax.app.snaps.HiveSnapThreadReader
 import com.rustedwax.app.ui.snaps.AndroidSnapNoticeNotifier
 import com.rustedwax.app.ui.snaps.SnapNoticeLocal
-import com.rustedwax.app.ui.snaps.MySnapsBackfill
 import com.rustedwax.app.ui.snaps.SnapReplyCheck
+import com.rustedwax.app.ui.snaps.SnapReplyChecks
+import com.rustedwax.app.ui.snaps.SnapReplyResults
+import com.rustedwax.app.ui.snaps.SnapReplySchedule
 import com.rustedwax.app.ui.snaps.SnapThreadVisibility
-import com.rustedwax.app.ui.snaps.SqliteSyncCheckpoints
-import com.rustedwax.app.storage.db.LocalOwner
 import com.rustedwax.app.ui.snaps.SharedPreferencesSnapReplyDraftStore
 import com.rustedwax.app.storage.db.LocalDatabase
 import com.rustedwax.app.ui.snaps.MySnapsController
@@ -618,43 +618,23 @@ class MainActivity : ComponentActivity() {
 		// in turn. Reads only, through the same reader, rule, store and notifier
 		// as above; at most ten conversations, once per fifteen minutes per
 		// account, on the way in, on an account change and on a return to the app.
-		val replyCheck = remember {
-			val pendingSnaps = SharedPreferencesPendingSnapStore(applicationContext)
-			SnapReplyCheck(
-				account = { account?.username },
-				roots = { who ->
-					val owner = LocalOwner.account(who)
-					val catalog = owner?.let {
-						runCatching {
-							SqliteMySnapRows(LocalDatabase.get(applicationContext))
-								.page(it, SnapReplyCheck.MAX_CANDIDATES, null)
-						}.getOrNull()
-					}.orEmpty()
-					val confirmed = runCatching {
-						MySnapsBackfill.rows(who, pendingSnaps.all(who), { null })
-					}.getOrDefault(emptyList())
-					catalog + confirmed
-				},
-				reader = { HiveSnapThreadReader() },
-				store = SnapNoticeLocal.store(applicationContext),
-				notifier = AndroidSnapNoticeNotifier(
-					context = applicationContext,
-					target = MainActivity::class.java,
-				),
-				visible = SnapThreadVisibility::isVisible,
-				checkpoints = runCatching { SqliteSyncCheckpoints(LocalDatabase.get(applicationContext)) }.getOrNull(),
-			)
+		val replyCheck = remember { SnapReplyChecks.create(applicationContext) { account?.username } }
+		// What a finished check means for the screen, from either side: the bell
+		// reads the store again so a reply recorded there is listed, and the open
+		// conversation is re-read in place.
+		val onReplyCheck = remember {
+			{ outcome: SnapReplyCheck.Outcome.Checked ->
+				if (outcome.account == account?.username) {
+					notices.load()
+					outcome.quiet.forEach { threads.load(it, force = true) }
+				}
+			}
 		}
 		val checkReplies = remember {
 			{
 				lifecycleScope.launch {
 					val outcome = withContext(Dispatchers.IO) { replyCheck.run() }
-					if (outcome !is SnapReplyCheck.Outcome.Checked) return@launch
-					if (outcome.account != account?.username) return@launch
-					// The bell reads the store again so a reply recorded here is
-					// listed; the open conversation is re-read in place.
-					notices.load()
-					outcome.quiet.forEach { threads.load(it, force = true) }
+					if (outcome is SnapReplyCheck.Outcome.Checked) onReplyCheck(outcome)
 				}
 				Unit
 			}
@@ -674,6 +654,8 @@ class MainActivity : ComponentActivity() {
 			lifecycle.addObserver(observer)
 			onDispose { lifecycle.removeObserver(observer) }
 		}
+		// Issue #42 Stage 2: the scheduled check may run while this screen is up.
+		LaunchedEffect(Unit) { SnapReplyResults.results.collect { onReplyCheck(it) } }
 		// Anything that was still in flight when the process last died gets
 		// settled against the chain on the way in. This reconciles; it never sends.
 		// A notification tapped on a cold start. Read here rather than in
@@ -714,6 +696,11 @@ class MainActivity : ComponentActivity() {
 			// file whose entire contents are public Hive comment ids.
 			notices.load()
 			checkReplies()
+			// Issue #42 Stage 2: the periodic background check exists while
+			// somebody is signed in, and not otherwise. Kept as it is when it is
+			// already scheduled, so opening the app does not restart its period.
+			val signedIn = !account?.username.isNullOrBlank()
+			withContext(Dispatchers.IO) { SnapReplySchedule.Platform(applicationContext).ensure(signedIn) }
 		}
 		// Mirrored into composition so the slider redraws as it moves. The value
 		// a Like actually votes with is read from `settings` at the moment of
