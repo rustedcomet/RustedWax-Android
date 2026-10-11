@@ -109,6 +109,8 @@ internal interface ScrobbleDispatcher {
 		automaticTransportCommitted: Boolean,
 		trigger: FinalizationTrigger,
 		onFeedback: ((String, Boolean) -> Unit)?,
+		/** Correlation only (#4); never consulted by transport. */
+		link: DispatchLink? = null,
 	)
 
 	/** Retry already-serialized bytes. This method has no finalized-track input. */
@@ -268,7 +270,7 @@ internal class ProductionFinalizationOrchestrator(
 		}
 		file(FinalizationOutcome.Eligible(ordered))
 		if (trigger == FinalizationTrigger.SHADOW) return
-		ordered.forEach { payload ->
+		ordered.forEachIndexed { index, payload ->
 			val dispatchFeedback: ((String, Boolean) -> Unit)? = if (
 				trigger == FinalizationTrigger.MANUAL
 			) {
@@ -290,6 +292,7 @@ internal class ProductionFinalizationOrchestrator(
 				automaticTransportCommitted,
 				trigger,
 				dispatchFeedback,
+				DispatchLink(track.trackInstance, index, ordered.size),
 			)
 		}
 	}
@@ -657,7 +660,7 @@ internal class ProductionFinalizationOrchestrator(
 			}
 			report.eligible(orderedPayloads)
 			if (report.shadow) return
-			orderedPayloads.forEach { payload ->
+			orderedPayloads.forEachIndexed { index, payload ->
 				val dispatchFeedback: ((String, Boolean) -> Unit)? = if (
 					trigger == FinalizationTrigger.MANUAL
 				) {
@@ -679,6 +682,7 @@ internal class ProductionFinalizationOrchestrator(
 					automaticTransportCommitted,
 					trigger,
 					dispatchFeedback,
+					DispatchLink(session.trackInstance, index, orderedPayloads.size),
 				)
 			}
 		}

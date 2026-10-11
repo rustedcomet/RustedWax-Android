@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+	Issue #4, collapsed. Android 12+ wraps this in its own header (icon, app
+	name, time, chevron) and gives it one short row, so it holds exactly two
+	lines and a thumbnail: what is playing, and the honest short status.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+	xmlns:tools="http://schemas.android.com/tools"
+	android:layout_width="match_parent"
+	android:layout_height="wrap_content"
+	android:gravity="center_vertical"
+	android:orientation="horizontal">
+
+	<LinearLayout
+		android:layout_width="0dp"
+		android:layout_height="wrap_content"
+		android:layout_weight="1"
+		android:orientation="vertical">
+
+		<TextView
+			android:id="@+id/collapsed_title"
+			android:layout_width="match_parent"
+			android:layout_height="wrap_content"
+			android:ellipsize="end"
+			android:fontFamily="sans-serif-medium"
+			android:maxLines="1"
+			android:textColor="@color/status_text_primary"
+			android:textSize="15sp" />
+
+		<!-- The icon is re-tinted per state; see the pill in the expanded layout. -->
+		<LinearLayout
+			android:layout_width="match_parent"
+			android:layout_height="wrap_content"
+			android:layout_marginTop="2dp"
+			tools:ignore="UseCompoundDrawables"
+			android:gravity="center_vertical"
+			android:orientation="horizontal">
+
+			<ImageView
+				android:id="@+id/collapsed_icon"
+				android:layout_width="12dp"
+				android:layout_height="12dp"
+				android:layout_marginEnd="5dp"
+				android:importantForAccessibility="no"
+				android:src="@drawable/ic_status_dot" />
+
+			<TextView
+				android:id="@+id/collapsed_status"
+				android:layout_width="0dp"
+				android:layout_height="wrap_content"
+				android:layout_weight="1"
+				android:ellipsize="end"
+				android:maxLines="1"
+				android:textColor="@color/status_text_secondary"
+				android:textSize="13sp" />
+		</LinearLayout>
+	</LinearLayout>
+
+	<ImageView
+		android:id="@+id/collapsed_art"
+		android:layout_width="40dp"
+		android:layout_height="40dp"
+		android:layout_marginStart="10dp"
+		android:importantForAccessibility="no"
+		android:scaleType="centerCrop"
+		android:visibility="gone" />
+</LinearLayout>

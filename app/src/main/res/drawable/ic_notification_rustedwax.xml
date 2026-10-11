@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+	Issue #4: the status-bar stencil for the scrobbling card. A record: Android
+	keeps only the alpha channel of a small icon, so the full-colour mark would
+	arrive as a filled disc. Grooves are cut rather than stroked so they survive
+	24dp on a dense screen.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+	android:width="24dp"
+	android:height="24dp"
+	android:viewportWidth="24"
+	android:viewportHeight="24"
+	android:tint="#FFFFFFFF">
+	<path
+		android:fillColor="#FFFFFFFF"
+		android:fillType="evenOdd"
+		android:pathData="M12,2.5a9.5,9.5 0,1 1,0 19a9.5,9.5 0,1 1,0 -19zM12,5.2a6.8,6.8 0,1 0,0 13.6a6.8,6.8 0,1 0,0 -13.6zM12,6.4a5.6,5.6 0,1 1,0 11.2a5.6,5.6 0,1 1,0 -11.2zM12,10.6a1.4,1.4 0,1 0,0 2.8a1.4,1.4 0,1 0,0 -2.8z" />
+</vector>

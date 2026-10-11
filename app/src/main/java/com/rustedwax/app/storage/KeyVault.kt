@@ -6,6 +6,10 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.rustedwax.hive.HiveKey
 import com.rustedwax.hive.PrivacySecret
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 /**
  * Stores the Hive username and posting key.
@@ -56,6 +60,7 @@ class KeyVault(context: Context) {
 			.putString(KEY_WIF, wif.trim())
 			.putString(KEY_PUBLIC, publicKey)
 			.apply()
+		HiveAccountChanges.changed()
 	}
 
 	/** Parse the stored key for signing. Returns null if nothing is stored. */
@@ -76,6 +81,7 @@ class KeyVault(context: Context) {
 
 	fun forget() {
 		prefs.edit().clear().apply()
+		HiveAccountChanges.changed()
 	}
 
 	private companion object {
@@ -83,5 +89,23 @@ class KeyVault(context: Context) {
 		const val KEY_USERNAME = "username"
 		const val KEY_WIF = "posting_wif"
 		const val KEY_PUBLIC = "posting_pub"
+	}
+}
+
+/**
+ * Says only that the stored Hive account may have changed — never which.
+ *
+ * Bumped after [KeyVault.save] and [KeyVault.forget] have applied, so a read
+ * made after hearing it sees the new value. Exists for code that caches who
+ * is signed in outside the activity — the status card (#4) — and must stop
+ * trusting that cache the moment a key is saved or forgotten, rather than on
+ * some later, unrelated event. It carries no account and changes no data.
+ */
+object HiveAccountChanges {
+	private val _generation = MutableStateFlow(0L)
+	val generation: StateFlow<Long> = _generation.asStateFlow()
+
+	fun changed() {
+		_generation.update { it + 1 }
 	}
 }

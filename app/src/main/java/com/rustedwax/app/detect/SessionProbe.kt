@@ -551,6 +551,23 @@ class SessionProbe(
 	/** Recomputes snapshots so the UI shows live extrapolated position. */
 	fun tick() = publish()
 
+	/**
+	 * Credited time per live listen, as of now, and nothing else.
+	 *
+	 * A pure read for the status notification (#4). [tick] cannot stand in for
+	 * it: publishing re-reads identity, which latches confirmations and rewrites
+	 * resolver context, so calling it from the background would change *when*
+	 * identity settles. This reads the reducer's own clock — the same
+	 * `playedMsAt` a snapshot uses — for the same listens [publish] would show,
+	 * and changes no state. Main thread only, like every other entry point here.
+	 */
+	fun creditedNow(): Map<TrackInstanceId, Long> = watches.values
+		.filter {
+			!it.suppressedByForegroundShort && it.acceptsLiveEvidence &&
+				!it.sessionDestroyed && it.hasPresentableIdentity
+		}
+		.associate { it.creditedListenNow() }
+
 	// ── internals ──────────────────────────────────────────────────────
 
 	private fun syncControllers(controllers: List<MediaController>) {
@@ -2281,6 +2298,10 @@ class SessionProbe(
 		}
 
 		private fun playedMsNow(): Long = listen.playedMsAt(SystemClock.elapsedRealtime())
+
+		/** The key [snapshot] would publish this listen under, and its credit now. */
+		fun creditedListenNow(): Pair<TrackInstanceId, Long> =
+			TrackInstanceId(packageName, trackInstanceToken) to playedMsNow()
 
 		private fun speedOf(ps: PlaybackState?): Double = transportSpeed(
 			playing = isPlaying(ps),

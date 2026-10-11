@@ -82,6 +82,7 @@ import com.rustedwax.app.ui.snaps.SnapComposerState
 import com.rustedwax.app.ui.snaps.SnapLikeController
 import com.rustedwax.app.ui.snaps.SnapNoticeController
 import com.rustedwax.app.ui.snaps.SnapNoticeIntent
+import com.rustedwax.app.status.ScrobbleStatusNotification
 import com.rustedwax.app.ui.snaps.SnapPostController
 import com.rustedwax.app.ui.snaps.SnapThreadController
 import com.rustedwax.app.ui.snaps.androidSnapImageIntake
@@ -118,6 +119,20 @@ class MainActivity : ComponentActivity() {
 	 */
 	private var noticeTarget by mutableStateOf<SnapReplyTarget?>(null)
 
+	/**
+	 * A tap on the scrobbling-status card (#4), until the screen has shown Now.
+	 *
+	 * Carries no data: the card only ever opens Now, so there is nothing in the
+	 * intent to trust or refuse. Consumed as it is read, like [noticeTarget].
+	 */
+	private var openNowRequested by mutableStateOf(false)
+
+	private fun readOpenNow(intent: Intent?) {
+		if (intent?.action != ScrobbleStatusNotification.ACTION_OPEN_NOW) return
+		intent.action = null
+		openNowRequested = true
+	}
+
 	override fun onResume() {
 		super.onResume()
 		RustedWaxUiVisibility.resumed()
@@ -140,6 +155,7 @@ class MainActivity : ComponentActivity() {
 		super.onNewIntent(intent)
 		setIntent(intent)
 		readNoticeTarget(intent)
+		readOpenNow(intent)
 	}
 
 	/**
@@ -662,7 +678,10 @@ class MainActivity : ComponentActivity() {
 		// `onCreate` because the answer depends on the vault, which is opened off
 		// the main thread during start-up — and this composable only exists once
 		// that has finished.
-		LaunchedEffect(Unit) { readNoticeTarget(intent) }
+		LaunchedEffect(Unit) {
+			readNoticeTarget(intent)
+			readOpenNow(intent)
+		}
 
 		// Android 13 stopped granting this at install, so the shade is silent
 		// until it is asked for. Asked once, and only when there is an account
@@ -817,6 +836,8 @@ class MainActivity : ComponentActivity() {
 			notices = notices,
 			openThreadRequest = noticeTarget,
 			onThreadRequestConsumed = { noticeTarget = null },
+			openNowRequest = openNowRequested,
+			onOpenNowConsumed = { openNowRequested = false },
 			tracksWithoutVideoId = quietBar,
 			queuedCount = queued,
 			youTubeAccount = youTubeAccount,

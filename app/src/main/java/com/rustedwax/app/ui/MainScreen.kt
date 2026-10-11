@@ -209,6 +209,9 @@ fun MainScreen(
 	 */
 	openThreadRequest: SnapReplyTarget?,
 	onThreadRequestConsumed: () -> Unit,
+	/** The scrobbling-status card was tapped (#4): show Now, once. */
+	openNowRequest: Boolean = false,
+	onOpenNowConsumed: () -> Unit = {},
 	tracksWithoutVideoId: Int,
 	queuedCount: Int,
 	youTubeAccount: YouTubeSessionVault.Session?,
@@ -318,6 +321,12 @@ fun MainScreen(
 	// A tapped notification, honoured once. Keyed on the request itself so a
 	// second tap on the same conversation re-opens it, and cleared immediately so
 	// a rotation does not re-open a sheet the user has since dismissed.
+	LaunchedEffect(openNowRequest) {
+		if (!openNowRequest) return@LaunchedEffect
+		chosen = Destination.NOW
+		onOpenNowConsumed()
+	}
+
 	LaunchedEffect(openThreadRequest) {
 		val target = openThreadRequest ?: return@LaunchedEffect
 		chosen = Destination.HISTORY

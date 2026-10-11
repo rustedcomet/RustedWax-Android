@@ -14,4 +14,24 @@
 		follow the system, which the in-app switch is allowed to disagree with.
 	-->
 	<color name="window_background">#FAF8F6</color>
+
+	<!--
+		Issue #4 status notification. Android and One UI own the card's surface
+		and follow the *system* light/dark mode, so every colour drawn on it has
+		a night twin in values-night: ivory text on a light shade would vanish.
+	-->
+	<color name="status_text_primary">#1B181C</color>
+	<color name="status_text_secondary">#6E6A6C</color>
+	<color name="status_pink">#EC3F75</color>
+	<color name="status_pink_wash">#1FEC3F75</color>
+	<color name="status_green">#1E8A4C</color>
+	<color name="status_green_wash">#1A26A25A</color>
+	<color name="status_amber">#B86A12</color>
+	<color name="status_amber_wash">#1AD98324</color>
+	<color name="status_red">#C8264B</color>
+	<color name="status_red_wash">#1AD92D53</color>
+	<color name="status_neutral">#6E6A6C</color>
+	<color name="status_neutral_wash">#14000000</color>
+	<color name="status_track">#E3DCD8</color>
+	<color name="status_divider">#1F000000</color>
 </resources>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A generic play tile: the source line names the service in words. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+	android:width="16dp" android:height="16dp"
+	android:viewportWidth="24" android:viewportHeight="24">
+	<path android:fillColor="#FFFFFFFF" android:fillType="evenOdd"
+		android:pathData="M6,5h12a4,4 0,0 1,4 4v6a4,4 0,0 1,-4 4h-12a4,4 0,0 1,-4 -4v-6a4,4 0,0 1,4 -4zM10,8.8v6.4l5.4,-3.2z" />
+</vector>

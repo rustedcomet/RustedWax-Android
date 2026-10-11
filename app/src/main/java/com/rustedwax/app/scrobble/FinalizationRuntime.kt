@@ -124,11 +124,11 @@ object FinalizationRuntime {
 	/**
 	 * Told what became of each finalized track — see [FinalizationOutcome].
 	 *
-	 * [FinalizationObserver.None] in production, which is the whole point: the
-	 * seam costs one virtual call per finalize and changes nothing a user can
-	 * see. The replay harness installs a recorder so it can assert on the branch
-	 * the engine actually took rather than reconstructing it from the skip list
-	 * and the broadcast list afterwards.
+	 * [FinalizationObserver.None] until the listener installs the status card's
+	 * observer (#4), which only records the verdict: the seam costs one call per
+	 * finalize and changes no decision. The replay harness installs a recorder
+	 * so it can assert on the branch the engine actually took rather than
+	 * reconstructing it from the skip list and the broadcast list afterwards.
 	 */
 	@Volatile
 	internal var finalizationObserver: FinalizationObserver = FinalizationObserver.None
@@ -298,7 +298,8 @@ object FinalizationRuntime {
 		val rowId: String,
 	)
 
-	private const val MIN_NOTABLE_PLAYED_MS = 3_000L
+	/** Read by the status notification (#4) so it hides exactly the refusals Not logged hides. */
+	internal const val MIN_NOTABLE_PLAYED_MS = 3_000L
 
 	private val SHORT_HISTORY_RETRY_DELAYS_MS = longArrayOf(
 		5_000L,
@@ -717,6 +718,7 @@ object FinalizationRuntime {
 				automaticTransportCommitted: Boolean,
 				trigger: FinalizationTrigger,
 				onFeedback: ((String, Boolean) -> Unit)?,
+				link: DispatchLink?,
 			) = enqueueAndSend(
 				payload = payload,
 				videoId = sourceItemId,
@@ -725,6 +727,7 @@ object FinalizationRuntime {
 				automaticTransportCommitted = automaticTransportCommitted,
 				trigger = trigger,
 				onFeedback = onFeedback,
+				link = link,
 			)
 
 			override fun retryDue() {
@@ -2596,11 +2599,20 @@ object FinalizationRuntime {
 		automaticTransportCommitted: Boolean,
 		trigger: FinalizationTrigger,
 		onFeedback: ((String, Boolean) -> Unit)?,
+		link: DispatchLink? = null,
 	) {
+		// #4: told, never asked. Every exit below that leaves no queue operation
+		// says so, and the one that writes one names it — so the status card
+		// can tie a History row to this listen by its operation id instead of
+		// guessing from a video id. A throwing observer cannot touch transport.
+		fun ended(reason: String) {
+			link?.let { runCatching { finalizationObserver.onDispatchEnded(it, reason) } }
+		}
 		// Automatic dispatch is transport-only after the use case's linearizable
 		// commit. Refuse a miswired caller before account access, privacy-secret
 		// derivation, key loading, queueing or the broadcaster seam.
 		if (trigger == FinalizationTrigger.AUTOMATIC && !automaticTransportCommitted) {
+			ended("not authorized")
 			EventLog.append(
 				"engine",
 				"automatic transport reached dispatch without a committed authorization — broadcast cancelled",
@@ -2612,6 +2624,7 @@ object FinalizationRuntime {
 		if (account == null) {
 			EventLog.append("engine", "no key saved — scrobble dropped")
 			onFeedback?.invoke("No key saved — add one on the Account tab first.", true)
+			ended("no key saved")
 			return
 		}
 		val label = "${payload.artist?.plus(" — ") ?: ""}${payload.title}"
@@ -2630,6 +2643,7 @@ object FinalizationRuntime {
 						"derived, and a private listen is never broadcast in the clear",
 				)
 				onFeedback?.invoke("Private scrobble could not be encrypted. Nothing sent.", true)
+				ended("could not be encrypted")
 				return
 			}
 			EventLog.append("privacy", "encrypted a ${payload.kind} scrobble before broadcast")
@@ -2648,16 +2662,20 @@ object FinalizationRuntime {
 						"$sourcePackage opt-in/lifecycle changed before signing — broadcast cancelled",
 					)
 					onFeedback?.invoke("That source was disabled or reset. Nothing sent.", true)
+					ended("source was reset")
 					return@withLock
 				}
 				val key = vault.loadKey()
 				if (key == null) {
 					EventLog.append("engine", "key unreadable — scrobble dropped")
 					onFeedback?.invoke("The posting key could not be read. Nothing sent.", true)
+					ended("key unreadable")
 					return@withLock
 				}
 				EventLog.append("engine", "broadcasting: $json")
 				if (trigger == FinalizationTrigger.MANUAL) {
+					// Manual transport writes no queue operation to correlate with.
+					ended("manual send")
 					broadcastDirect(account.username, key, json, label, payload, videoId, onFeedback)
 					return@withLock
 				}
@@ -2683,7 +2701,11 @@ object FinalizationRuntime {
 						videoId = videoId,
 					)
 					onFeedback?.invoke("Retry state could not be persisted. Nothing sent.", true)
+					ended("queue storage failure")
 					return@withLock
+				}
+				link?.let {
+					runCatching { finalizationObserver.onOperationCreated(it, entry.operationId, account.username) }
 				}
 
 				when (val preparation = broadcaster.prepareJson(account.username, key, json)) {
