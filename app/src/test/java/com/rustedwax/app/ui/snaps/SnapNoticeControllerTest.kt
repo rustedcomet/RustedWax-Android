@@ -120,12 +120,14 @@ class SnapNoticeControllerTest {
 	private fun controller(
 		store: Notices,
 		shade: Shade = Shade(),
+		visible: (String, String) -> Boolean = { _, _ -> false },
 		account: () -> String?,
 	) = SnapNoticeController(
 		store = store,
 		account = account,
 		notifier = shade,
 		nowEpochSec = { 1_000L },
+		visible = visible,
 	)
 
 	private fun reply(
@@ -492,6 +494,39 @@ class SnapNoticeControllerTest {
 		notices.record(alice, root, listOf(reply(bob, "r1", alice)))
 
 		assertEquals(listOf(alice to "bob/r1"), shade.posted)
+	}
+
+	@Test
+	fun `a reply in the conversation on screen is answered in place, not announced`() {
+		val shade = Shade()
+		val store = Notices()
+		val notices = controller(store, shade, visible = { who, rootId -> who == alice && rootId == root.contentId }) { alice }
+		notices.load()
+		seed(notices)
+
+		notices.record(alice, root, listOf(reply(bob, "r1", alice)))
+
+		assertEquals(emptyList<Pair<String, String>>(), shade.posted)
+		assertEquals(emptyList<SnapNotice>(), notices.unread())
+		assertTrue(SnapNoticeCodec.decode(store.saved.getValue(SnapNoticeCodec.noticeKey(alice, "bob/r1")))!!.read)
+	}
+
+	@Test
+	fun `a reply recorded elsewhere reaches the bell on the next load`() {
+		val store = Notices()
+		val notices = controller(store) { alice }
+		notices.load()
+		store.record(alice, root.contentId, emptyList(), 0L)
+		store.record(
+			alice,
+			root.contentId,
+			SnapNoticeScan.incoming(alice, root, listOf(reply(bob, "r1", alice))),
+			0L,
+		)
+
+		notices.load()
+
+		assertEquals(listOf("bob/r1"), notices.unread().map { it.contentId })
 	}
 
 	@Test

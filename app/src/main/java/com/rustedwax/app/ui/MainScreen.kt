@@ -90,6 +90,7 @@ import com.rustedwax.app.ui.snaps.SnapAttentionModel
 import com.rustedwax.app.ui.snaps.SnapAttentionTarget
 import com.rustedwax.app.ui.snaps.SnapComposerState
 import com.rustedwax.app.ui.snaps.SnapNoticeController
+import com.rustedwax.app.ui.snaps.SnapThreadVisibility
 import com.rustedwax.app.ui.snaps.SnapPostController
 import com.rustedwax.app.ui.snaps.SnapPostStatus
 import com.rustedwax.app.ui.snaps.SnapThreadController
@@ -1501,6 +1502,12 @@ private fun ConversationSheet(
 		// rule is stated once instead of beside three click handlers, one of
 		// which would eventually be added without it.
 		LaunchedEffect(root.contentId) { notices.markThreadRead(root) }
+		// Issue #42: while this sheet is up, a newly found reply in it is
+		// answered in place instead of announced in the shade.
+		DisposableEffect(viewer, root.contentId) {
+			SnapThreadVisibility.opened(viewer, root.contentId)
+			onDispose { SnapThreadVisibility.closed(viewer, root.contentId) }
+		}
 		SnapThreadSheet(
 			root = root,
 			// The posting controller's copy when it has one, so a refresh of the

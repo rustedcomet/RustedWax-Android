@@ -12,6 +12,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -21,6 +22,8 @@ import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -63,6 +66,11 @@ import com.rustedwax.app.snaps.HiveSnapLikePort
 import com.rustedwax.app.snaps.HiveSnapThreadReader
 import com.rustedwax.app.ui.snaps.AndroidSnapNoticeNotifier
 import com.rustedwax.app.ui.snaps.SnapNoticeLocal
+import com.rustedwax.app.ui.snaps.MySnapsBackfill
+import com.rustedwax.app.ui.snaps.SnapReplyCheck
+import com.rustedwax.app.ui.snaps.SnapThreadVisibility
+import com.rustedwax.app.ui.snaps.SqliteSyncCheckpoints
+import com.rustedwax.app.storage.db.LocalOwner
 import com.rustedwax.app.ui.snaps.SharedPreferencesSnapReplyDraftStore
 import com.rustedwax.app.storage.db.LocalDatabase
 import com.rustedwax.app.ui.snaps.MySnapsController
@@ -441,6 +449,9 @@ class MainActivity : ComponentActivity() {
 					context = applicationContext,
 					target = MainActivity::class.java,
 				),
+				// Issue #42: a reply in the conversation on screen is answered in
+				// place rather than announced.
+				visible = SnapThreadVisibility::isVisible,
 			)
 		}
 		// Phone images on Snap and reply drafts (Issue 40D). Uploaded to Hive's
@@ -602,6 +613,67 @@ class MainActivity : ComponentActivity() {
 				likePercent = { settings.likePercent },
 			)
 		}
+		// Issue #42: look for replies to this account's Snaps without waiting
+		// for a History card to be drawn — the newest every run, the older ones
+		// in turn. Reads only, through the same reader, rule, store and notifier
+		// as above; at most ten conversations, once per fifteen minutes per
+		// account, on the way in, on an account change and on a return to the app.
+		val replyCheck = remember {
+			val pendingSnaps = SharedPreferencesPendingSnapStore(applicationContext)
+			SnapReplyCheck(
+				account = { account?.username },
+				roots = { who ->
+					val owner = LocalOwner.account(who)
+					val catalog = owner?.let {
+						runCatching {
+							SqliteMySnapRows(LocalDatabase.get(applicationContext))
+								.page(it, SnapReplyCheck.MAX_CANDIDATES, null)
+						}.getOrNull()
+					}.orEmpty()
+					val confirmed = runCatching {
+						MySnapsBackfill.rows(who, pendingSnaps.all(who), { null })
+					}.getOrDefault(emptyList())
+					catalog + confirmed
+				},
+				reader = { HiveSnapThreadReader() },
+				store = SnapNoticeLocal.store(applicationContext),
+				notifier = AndroidSnapNoticeNotifier(
+					context = applicationContext,
+					target = MainActivity::class.java,
+				),
+				visible = SnapThreadVisibility::isVisible,
+				checkpoints = runCatching { SqliteSyncCheckpoints(LocalDatabase.get(applicationContext)) }.getOrNull(),
+			)
+		}
+		val checkReplies = remember {
+			{
+				lifecycleScope.launch {
+					val outcome = withContext(Dispatchers.IO) { replyCheck.run() }
+					if (outcome !is SnapReplyCheck.Outcome.Checked) return@launch
+					if (outcome.account != account?.username) return@launch
+					// The bell reads the store again so a reply recorded here is
+					// listed; the open conversation is re-read in place.
+					notices.load()
+					outcome.quiet.forEach { threads.load(it, force = true) }
+				}
+				Unit
+			}
+		}
+		DisposableEffect(Unit) {
+			// The first ON_START is this screen being created, which the
+			// account-keyed effect below already covers; only a return counts.
+			var created = false
+			val observer = LifecycleEventObserver { _, event ->
+				if (event != Lifecycle.Event.ON_START) return@LifecycleEventObserver
+				if (!created) {
+					created = true
+					return@LifecycleEventObserver
+				}
+				checkReplies()
+			}
+			lifecycle.addObserver(observer)
+			onDispose { lifecycle.removeObserver(observer) }
+		}
 		// Anything that was still in flight when the process last died gets
 		// settled against the chain on the way in. This reconciles; it never sends.
 		// A notification tapped on a cold start. Read here rather than in
@@ -641,6 +713,7 @@ class MainActivity : ComponentActivity() {
 			// This reconciles nothing and sends nothing; it reads a preference
 			// file whose entire contents are public Hive comment ids.
 			notices.load()
+			checkReplies()
 		}
 		// Mirrored into composition so the slider redraws as it moves. The value
 		// a Like actually votes with is read from `settings` at the moment of
