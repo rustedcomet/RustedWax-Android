@@ -101,10 +101,16 @@ class SnapAttentionWiringTest {
 		assertTrue("it needs somewhere to remember", ctor.contains("store: SnapNoticeStore"))
 		assertTrue("and it needs to know whose bell it is", ctor.contains("account: () -> String?"))
 		assertTrue("and somewhere to announce", ctor.contains("notifier: SnapNoticeNotifier"))
+		// Issue #42 adds one read-only predicate: whether a conversation is on
+		// screen. It answers a Boolean and can carry no write.
+		assertTrue(
+			"the on-screen check is a question, not a port",
+			ctor.contains("visible: (account: String, rootId: String) -> Boolean"),
+		)
 		assertEquals(
-			"a fourth dependency would be the seam a write could arrive through",
-			4,
-			ctor.split(",").count { it.contains(":") },
+			"another dependency would be the seam a write could arrive through",
+			5,
+			Regex("""private val \w+:""").findAll(ctor).count(),
 		)
 	}
 
@@ -323,7 +329,8 @@ class SnapAttentionWiringTest {
 		)
 		assertTrue(
 			"and posts exactly that",
-			notices.contains(Regex("""fresh\.forEach \{ notifier\.post\(who, it\) \}""")),
+			notices.contains(Regex("""val \(shown, toShade\) = fresh\.partition \{""")) &&
+				notices.contains(Regex("""toShade\.forEach \{ notifier\.post\(who, it\) \}""")),
 		)
 		assertFalse(
 			"the notifier must not be handed the raw scan result",

@@ -174,6 +174,13 @@ internal interface SnapNoticeStore {
 
 	/** Mark every notice under one conversation read. */
 	fun markThreadRead(account: String, rootId: String)
+
+	/**
+	 * Whether [record] can give a real answer yet (Issue #42). A store that
+	 * loads asynchronously says false until it has, so a reply check can wait
+	 * instead of spending reads whose results cannot be kept.
+	 */
+	fun ready(): Boolean = true
 }
 
 /**
@@ -570,6 +577,12 @@ class SnapNoticeController internal constructor(
 	 */
 	private val notifier: SnapNoticeNotifier,
 	private val nowEpochSec: () -> Long = { System.currentTimeMillis() / 1000 },
+	/**
+	 * Whether this account is reading this conversation on screen right now
+	 * (Issue #42). A new reply there is answered in place: recorded read, never
+	 * announced, because the user is already looking at it.
+	 */
+	private val visible: (account: String, rootId: String) -> Boolean = { _, _ -> false },
 ) {
 
 	/** Account-scoped `contentId` to the notice, as Compose reads it. */
@@ -627,12 +640,17 @@ class SnapNoticeController internal constructor(
 		// not new; the scan cannot tell, so it said unread, and the answered
 		// reply reappeared in the bell. Everything that is not new arrives
 		// through [load] instead, which reads the store rather than guessing.
-		fresh.forEach { notices[key(who, it.contentId)] = it }
 		// Re-checked after the write, for the reason every completion in this
 		// stack re-checks: the store read and the announcement are two moments,
 		// and a switch between them must not put Alice's reply in Bob's shade.
 		if (accountId() != who) return
-		fresh.forEach { notifier.post(who, it) }
+		val (shown, toShade) = fresh.partition { visible(who, it.rootId) }
+		shown.forEach {
+			notices[key(who, it.contentId)] = it.copy(read = true)
+			store.markRead(who, it.contentId)
+		}
+		toShade.forEach { notices[key(who, it.contentId)] = it }
+		toShade.forEach { notifier.post(who, it) }
 	}
 
 	/** Unread incoming replies for this account, newest first. */

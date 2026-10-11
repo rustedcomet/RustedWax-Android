@@ -63,6 +63,8 @@ internal class MirroredSnapNoticeStore(
 	private val mirror: LocalMirror<NoticeEntry>,
 ) : SnapNoticeStore {
 
+	override fun ready(): Boolean = mirror.isReady()
+
 	override fun all(account: String): List<SnapNotice> =
 		mirror.entries().mapNotNull { (key, entry) ->
 			if (SnapNoticeCodec.accountOf(key) != account) return@mapNotNull null
