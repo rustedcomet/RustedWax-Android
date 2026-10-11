@@ -35,6 +35,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -132,6 +133,12 @@ object Thumbnails {
 
 	/** Cache-only, for the first composition of a row that already has one. */
 	fun cached(videoId: String): ImageBitmap? = memory[videoId]
+
+	/**
+	 * True when YouTube said this video has no thumbnail. A null [load] without
+	 * this is transient — offline, a timeout — and worth asking again.
+	 */
+	fun isAbsent(videoId: String): Boolean = videoId in absent
 
 	suspend fun load(videoId: String): ImageBitmap? {
 		if (!VIDEO_ID.matches(videoId)) return null
@@ -298,6 +305,22 @@ fun VideoThumbnail(
 	 * YouTube serves, so filling the width crops nothing and stretches nothing.
 	 */
 	width: androidx.compose.ui.unit.Dp? = 68.dp,
+	/**
+	 * Drawn while the id's frame is absent — the picture the player itself
+	 * published, for Now. Display only; the caller has already bound it to this
+	 * listen. Ignored when [enabled] is off, like the frame it stands in for.
+	 */
+	fallback: ImageBitmap? = null,
+	/**
+	 * Ask again after a transient miss for as long as this stays composed.
+	 *
+	 * A History row recomposes when it scrolls back, which is its retry. The Now
+	 * card is composed once per listen, so without this one timeout during a
+	 * network change left it on the placeholder for the rest of a long video.
+	 */
+	retryTransient: Boolean = false,
+	/** Told which picture is drawn, each time that changes. Diagnostics only. */
+	onShown: ((source: String) -> Unit)? = null,
 ) {
 	val shape = RoundedCornerShape(9.dp)
 	// Starts from the memory cache so a row that has been drawn before does not
@@ -305,8 +328,18 @@ fun VideoThumbnail(
 	var bitmap by remember(videoId) {
 		mutableStateOf(videoId?.let { Thumbnails.cached(it) })
 	}
-	LaunchedEffect(videoId, enabled) {
-		bitmap = if (enabled && videoId != null) Thumbnails.load(videoId) else null
+	LaunchedEffect(videoId, enabled, retryTransient) {
+		if (!enabled || videoId == null) {
+			bitmap = null
+			return@LaunchedEffect
+		}
+		var attempt = 0
+		while (true) {
+			val loaded = Thumbnails.load(videoId)
+			bitmap = loaded
+			if (loaded != null || !retryTransient || Thumbnails.isAbsent(videoId)) break
+			delay(ThumbnailFetch.retryDelayMs(attempt++))
+		}
 	}
 
 	Box(
@@ -325,7 +358,15 @@ fun VideoThumbnail(
 			.background(MaterialTheme.colorScheme.surfaceContainerHighest),
 		contentAlignment = Alignment.Center,
 	) {
-		val frame = bitmap
+		val frame = bitmap ?: fallback?.takeIf { enabled }
+		if (onShown != null) {
+			val source = when {
+				bitmap != null -> "id"
+				frame != null -> "player"
+				else -> "placeholder"
+			}
+			LaunchedEffect(source) { onShown(source) }
+		}
 		if (frame != null) {
 			Image(
 				bitmap = frame,

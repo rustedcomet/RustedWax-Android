@@ -50,3 +50,17 @@ internal data class NowPreview(
 		}
 	}
 }
+
+/**
+ * Whether a player-published picture may stand in for [session]'s thumbnail.
+ *
+ * The frame must have arrived in a bundle naming the title this card shows. The
+ * listen key already keeps it on the right card; this keeps a bundle the player
+ * sent mid-switch — a browser's `YouTube` teardown, the next title before its
+ * art — from painting a picture the card's own text does not describe. Display
+ * only: the answer never reaches identity, finalization or Hive.
+ */
+internal fun playerArtworkMatches(session: SessionSnapshot, frameTitle: String): Boolean {
+	val shown = session.title?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+	return shown == frameTitle.trim()
+}

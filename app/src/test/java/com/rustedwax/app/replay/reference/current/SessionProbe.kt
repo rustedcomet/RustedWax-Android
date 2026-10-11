@@ -703,13 +703,16 @@ class SessionProbe(
 	}
 
 	private fun publish() {
-		val mediaSessions = watches.values
+		val live = watches.values
 			.filter {
 				!it.suppressedByForegroundShort && it.acceptsLiveEvidence &&
 					!it.sessionDestroyed && it.hasPresentableIdentity
 			}
-			.map { it.snapshot() }
+		val mediaSessions = live.map { it.snapshot() }
 		_sessions.value = listOfNotNull(foregroundShortSnapshot) + mediaSessions
+		PlayerArtwork.publish(
+			live.zip(mediaSessions).map { (watch, snapshot) -> watch.artworkSource(snapshot.trackInstance) },
+		)
 	}
 
 	private fun handleNativeShortEvent(event: NativeShortsObserver.Event) {
@@ -980,6 +983,19 @@ class SessionProbe(
 		/** Raw Android metadata, only while callback order authorizes this generation. */
 		private val currentMetadata: MediaMetadata?
 			get() = metadata.takeIf { listen.metadataAuthoritativeForCurrentPlayback }
+
+		/**
+		 * What this listen's current metadata offers the Now card as a picture.
+		 * Display only; [PlayerArtwork] owns the judgement and the bitmap.
+		 */
+		fun artworkSource(listenKey: TrackInstanceId): PlayerArtwork.Source = PlayerArtwork.Source(
+			packageName = packageName,
+			listen = listenKey,
+			token = trackInstanceToken,
+			title = titleOf(currentMetadata),
+			fields = currentMetadata?.asFields(),
+			lagsArtwork = !adapter.evidenceCapabilities.packageProvesSource,
+		)
 
 		// Read-only views, so the identity, logging and snapshot code below reads
 		// exactly as it did before the extraction. Every write goes through

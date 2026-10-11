@@ -40,6 +40,23 @@ internal object Phase3Telemetry {
 		}
 	}
 
+	/**
+	 * What the Now banner is drawing for one listen: `id`, `player` or
+	 * `placeholder`, and whether an id is known. No title, id or pixels — the
+	 * device gate needs the timing of each change, nothing it shows.
+	 */
+	fun nowArtwork(packageName: String, token: Long?, source: String, hasId: Boolean) {
+		if (!BuildConfig.DEBUG) return
+		val observedAt = SystemClock.elapsedRealtime()
+		logExecutor.execute {
+			Log.i(
+				TAG,
+				"kind=now-art elapsed=$observedAt package=$packageName token=${token ?: -1} " +
+					"source=$source hasId=$hasId",
+			)
+		}
+	}
+
 	fun pipEvidence(
 		observedAtMillis: Long,
 		mediaAudioStarted: Boolean,

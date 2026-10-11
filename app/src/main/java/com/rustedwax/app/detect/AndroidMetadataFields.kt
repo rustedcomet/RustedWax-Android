@@ -11,16 +11,19 @@ import com.rustedwax.core.MetadataFields
  * is the point — a second conversion site would be a second chance to disagree
  * about what "unset" means.
  */
-internal class AndroidMetadataFields(private val md: MediaMetadata) : MetadataFields {
+internal class AndroidMetadataFields(
+	/** The bundle itself, for the one display-only reader of its pictures. */
+	internal val metadata: MediaMetadata,
+) : MetadataFields {
 
-	override fun getString(key: String): String? = md.getString(key)
+	override fun getString(key: String): String? = metadata.getString(key)
 
-	override fun getLong(key: String): Long = md.getLong(key)
+	override fun getLong(key: String): Long = metadata.getLong(key)
 
 	override fun bitmapDimensions(key: String): Pair<Int, Int>? =
-		runCatching { md.getBitmap(key) }.getOrNull()?.let { it.width to it.height }
+		runCatching { metadata.getBitmap(key) }.getOrNull()?.let { it.width to it.height }
 
-	override fun keySet(): Set<String> = md.keySet()
+	override fun keySet(): Set<String> = metadata.keySet()
 }
 
 /** This metadata as the source-neutral surface the readers consume. */

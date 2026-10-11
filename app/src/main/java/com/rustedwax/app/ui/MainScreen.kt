@@ -52,6 +52,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -66,6 +67,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.layout.onSizeChanged
@@ -105,6 +107,8 @@ import com.rustedwax.app.ui.snaps.SnapMediaText
 import com.rustedwax.app.ui.snaps.SnapThreadSheet
 import com.rustedwax.app.snaps.SnapReplyTarget
 import com.rustedwax.app.ui.snaps.SnapText
+import com.rustedwax.app.detect.Phase3Telemetry
+import com.rustedwax.app.detect.PlayerArtwork
 import com.rustedwax.app.detect.ScrobbleBuilder
 import com.rustedwax.app.detect.SessionSnapshot
 import com.rustedwax.app.detect.NativeShortsObserver
@@ -2346,6 +2350,15 @@ private fun SessionCard(
 		// Drawn even before identity resolves. `VideoThumbnail` always occupies
 		// its space, so a card does not jump when the id lands, and a session
 		// still being read keeps its place in the list with the placeholder.
+		//
+		// Until that frame is on screen — no id yet, as for a browser video that
+		// autoplayed in the background, or a fetch still failing — the picture
+		// the player attached to this same listen stands in. Display only.
+		val playerFrames by PlayerArtwork.frames.collectAsState()
+		val playerFrame = playerFrames[s.trackInstance]
+			?.takeIf { playerArtworkMatches(s, it.title) }
+			?.bitmap
+		val fallback = remember(playerFrame) { playerFrame?.asImageBitmap() }
 		VideoThumbnail(
 			preview.videoId,
 			enabled = thumbnails,
@@ -2354,6 +2367,11 @@ private fun SessionCard(
 			// Now is the one surface holding the package, so it is the one
 			// surface that can tell YouTube Music from YouTube.
 			badge = card.platform.badge,
+			fallback = fallback,
+			retryTransient = true,
+			onShown = { source ->
+				Phase3Telemetry.nowArtwork(s.packageName, s.trackInstanceToken, source, preview.videoId != null)
+			},
 		)
 		Spacer(Modifier.height(8.dp))
 
