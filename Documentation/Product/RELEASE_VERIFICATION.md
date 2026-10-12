@@ -30,3 +30,29 @@ procedure are intentionally kept outside Git.
 
 This record identifies the published artifact; it is not a description of the
 maintainer's private signing environment.
+
+## Update metadata
+
+From the release that ships the update check (Issue #43), every GitHub Release
+also carries `rustedwax-update.json`:
+
+```json
+{
+  "schema": 1,
+  "applicationId": "com.rustedwax.app",
+  "versionCode": 66,
+  "versionName": "0.14.0"
+}
+```
+
+Generate it from the release checkout with `tools/release/update-metadata.sh`
+and attach it to the release with the APK. The app reads it from
+`releases/latest/download/rustedwax-update.json` at most once a day and
+compares `versionCode` only. It refuses the file when any field is missing or
+mistyped, when `applicationId` differs, or when `versionName` disagrees with the
+release tag it was served from. Refused or unreachable metadata never produces a
+notification.
+
+The file carries no URL. A tap on the notification opens this repository's
+latest release page, or the Play listing for a copy installed by Google Play.
+Nothing is downloaded or installed automatically.

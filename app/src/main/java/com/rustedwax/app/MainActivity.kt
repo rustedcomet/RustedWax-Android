@@ -70,6 +70,7 @@ import com.rustedwax.app.ui.snaps.SnapReplyCheck
 import com.rustedwax.app.ui.snaps.SnapReplyChecks
 import com.rustedwax.app.ui.snaps.SnapReplyResults
 import com.rustedwax.app.ui.snaps.SnapReplySchedule
+import com.rustedwax.app.update.UpdateChecks
 import com.rustedwax.app.ui.snaps.SnapThreadVisibility
 import com.rustedwax.app.ui.snaps.SharedPreferencesSnapReplyDraftStore
 import com.rustedwax.app.storage.db.LocalDatabase
@@ -1004,6 +1005,9 @@ class MainActivity : ComponentActivity() {
 		super.onStart()
 		// Coming back to the app is a good moment to drain anything queued.
 		FinalizationRuntime.flushQueue()
+		// Issue #43: ask whether a newer official release exists, at most once a
+		// day. Off the main thread, and silent unless there is one to announce.
+		lifecycleScope.launch(Dispatchers.IO) { UpdateChecks.runOnStart(applicationContext) }
 	}
 
 	private fun openNotificationAccessSettings() {
