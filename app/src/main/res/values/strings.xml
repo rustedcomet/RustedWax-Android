@@ -11,6 +11,12 @@
 	<string name="scrobble_status_open_now">Tap to open Now</string>
 	<string name="scrobble_status_active">RustedWax active</string>
 	<string name="scrobble_status_waiting">Waiting for media</string>
+	<!-- Issue #43: one notice per newer official release. Its own channel. -->
+	<string name="app_update_channel_name">App updates</string>
+	<string name="app_update_channel_description">When a newer official RustedWax release is available. Nothing is downloaded or installed automatically.</string>
+	<string name="app_update_title">RustedWax %1$s is available</string>
+	<string name="app_update_open_github">Tap to open the official release page.</string>
+	<string name="app_update_open_play">Tap to open RustedWax on Google Play.</string>
 
 	<string name="accessibility_summary">Reads the browser URL bar and visible YouTube ad labels</string>
 	<string name="accessibility_description">Optional. Lets RustedWax read the URL bar in Brave and Chrome so it knows exactly which site is playing and which video. While that bar names a YouTube Short, it also checks visible page labels for exact YouTube ad controls such as “Sponsored” or “Skip ad”, so promoted items can be excluded from scrobbling. Unmatched page text is not stored; a matched ad label is kept only in the local diagnostic log.\n\nThis service is restricted to those browsers by the system — it cannot see any other app. Nothing from this accessibility scan is sent anywhere. The separate video-lookup switch controls network requests made from a detected video id.</string>
